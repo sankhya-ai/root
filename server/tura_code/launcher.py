@@ -122,6 +122,8 @@ class LaunchSpec:
     sandbox: Sandbox = field(default_factory=Sandbox)
     session_dir: Path | None = None
     home: Path | None = None
+    #: More writable places, e.g. the main repository's `.git` for a worktree.
+    extra_writable: tuple[Path, ...] = ()
 
     def key(self) -> str:
         return self.api_key or self.settings.api_key()
@@ -151,7 +153,7 @@ class LaunchSpec:
         readable = [binary.parent, base_agent_file().parent, REPO_ROOT / "runtime" / "kimi-agent" / "src" / "skills", *self.skills_dirs]
         if self.mcp_config is not None:
             readable.append(self.mcp_config.parent)
-        writable = (self.session_dir,) if self.session_dir is not None else ()
+        writable = ((self.session_dir,) if self.session_dir is not None else ()) + self.extra_writable
         return Mounts(workspace=self.workspace, writable=writable, readable=tuple(readable), home=self.home)
 
 

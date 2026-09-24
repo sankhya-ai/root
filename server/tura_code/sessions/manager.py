@@ -41,7 +41,7 @@ class SessionManager:
         records.sort(key=lambda item: item["updated_at"], reverse=True)
         return records
 
-    def create(self, workspace: str | Path, title: str | None = None, *, kind: str = "session", parent: str = "", mode: str | None = None) -> SessionRuntime:
+    def create(self, workspace: str | Path, title: str | None = None, *, kind: str = "session", parent: str = "", mode: str | None = None, role: str = "") -> SessionRuntime:
         path = self.tenant.check_workspace(workspace)
         settings = self.tenant.settings.get()
         record = SessionRecord(
@@ -51,6 +51,7 @@ class SessionManager:
             permission_mode=mode or settings.default_permission_mode,
             kind=kind,
             parent=parent,
+            role=role,
         )
         runtime = SessionRuntime(self.tenant, record)
         runtime.save_record()

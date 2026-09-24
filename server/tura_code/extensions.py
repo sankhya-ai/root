@@ -14,7 +14,14 @@ if TYPE_CHECKING:
 
 def install(server: "Server") -> None:
     """Register every service's tenant extension and after-turn hook."""
+    from . import flows, learning
+
+    learning.install(server)
+    flows.install(server)
 
 
 def routers(state) -> list:
-    return []
+    from .flows.routes import router as flows_router
+    from .learning.routes import router as learning_router
+
+    return [learning_router(state), flows_router(state)]

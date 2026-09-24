@@ -54,6 +54,8 @@ class Tenant:
         self.trust = TrustLedger(root / "trust.json")
         self.memory = MemoryView(server.gateway, owner_scope)
         self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset()]
+        #: Awaited when the tenant closes (a service's background work).
+        self.closers: list[Any] = []
         self.sessions = SessionManager(self)
         for extension in server.extensions:
             extension(self)
@@ -119,7 +121,16 @@ class Tenant:
             sandbox=self.sandbox,
             session_dir=runtime.dir,
             home=self.home,
+            extra_writable=self._git_dirs(runtime),
         )
+
+    @staticmethod
+    def _git_dirs(runtime: "SessionRuntime") -> tuple[Path, ...]:
+        """A worktree's Git metadata lives in its main repository: it must be writable too."""
+        from .flows.git import common_dir
+
+        found = common_dir(Path(runtime.record.workspace))
+        return (found,) if found else ()
 
     def director_state(self, spec: launcher.LaunchSpec) -> str:
         """Whether Jev can actually steer: it needs an OpenRouter-shaped endpoint and a key."""
@@ -143,7 +154,7 @@ class Tenant:
     def wrap_command(self, runtime: "SessionRuntime", argv: list[str]) -> list[str]:
         from .sandbox import Mounts
 
-        mounts = Mounts(workspace=Path(runtime.record.workspace), writable=(runtime.dir,), home=self.home)
+        mounts = Mounts(workspace=Path(runtime.record.workspace), writable=(runtime.dir, *self._git_dirs(runtime)), home=self.home)
         return self.sandbox.wrap(argv, mounts)
 
     # ----- after a turn --------------------------------------------------------
@@ -175,6 +186,8 @@ class Tenant:
             logger.info("turn checkpoint skipped: %s", error)
 
     async def close(self) -> None:
+        for closer in self.closers:
+            await closer()
         await self.sessions.close()
 
 
