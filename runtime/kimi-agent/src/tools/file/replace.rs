@@ -9,6 +9,7 @@ use crate::soul::agent::Runtime;
 use crate::tools::utils::tool_rejected_error;
 use crate::utils::{build_diff_blocks, is_within_directory};
 
+use super::tolerant;
 use super::{
     FILE_ACTION_EDIT, FILE_ACTION_EDIT_OUTSIDE, REPLACE_DESC, read_text_lossy, resolve_tool_path,
     validate_absolute_path,
@@ -138,11 +139,23 @@ impl CallableTool2 for StrReplaceFile {
         };
 
         let mut content = original.clone();
+        let mut notes: Vec<String> = Vec::new();
         for (index, edit) in params.edit.iter().enumerate() {
             if edit.old.is_empty() {
                 return tool_error("", "Edit old string cannot be empty.", "Invalid edit");
             }
             if !content.contains(&edit.old) {
+                if let Some(found) = tolerant::replace(&content, &edit.old, &edit.new) {
+                    notes.push(format!(
+                        "Edit {} did not match exactly; it was applied to lines {}-{}, ignoring whitespace differences{}. Re-read the file before editing those lines again.",
+                        index + 1,
+                        found.first_line,
+                        found.last_line,
+                        if found.reindented { ", and the new text was re-indented to the file's indentation" } else { "" }
+                    ));
+                    content = found.content;
+                    continue;
+                }
                 return tool_error(
                     replacement_miss_preview(&original, &edit.old),
                     format!(
@@ -207,7 +220,11 @@ impl CallableTool2 for StrReplaceFile {
         ToolReturnValue {
             is_error: false,
             output: Default::default(),
-            message: "File successfully edited.".to_string(),
+            message: if notes.is_empty() {
+                "File successfully edited.".to_string()
+            } else {
+                format!("File successfully edited. {}", notes.join(" "))
+            },
             display: diff_blocks,
             extras: None,
         }

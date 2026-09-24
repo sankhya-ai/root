@@ -18,6 +18,7 @@ use crate::config::ModelCapability;
 use crate::council_budget::{CouncilBudgetExceeded, WALL_CLOCK_BUDGET_EXHAUSTED};
 use crate::skill::flow::{Flow, FlowEdge, FlowLabel, FlowNode, FlowNodeKind, parse_choice};
 use crate::skill::{Skill, SkillType, read_skill_text};
+use crate::soul::repeat_guard::RepeatGuard;
 use crate::soul::agent::{Agent, Runtime};
 use crate::soul::decision::JevClient;
 use crate::soul::director::{self, Director, DirectorConfig, DirectorMode, Directive, Phase};
@@ -97,6 +98,8 @@ pub struct KimiSoul {
     /// Turns reopened this turn by [`KimiSoul::follow_up`]. Capped, so a read
     /// that keeps finding one more call can cost seconds, never the turn.
     follow_ups: AtomicUsize,
+    /// Identical calls with identical results this turn; see [`RepeatGuard`].
+    repeat_guard: std::sync::Mutex<RepeatGuard>,
     slash_commands: Vec<SlashCommandInfo>,
     slash_handlers: HashMap<String, SlashHandler>,
 }
@@ -157,6 +160,7 @@ impl KimiSoul {
             steps_taken: AtomicUsize::new(0),
             next_directive: std::sync::Mutex::new(None),
             follow_ups: AtomicUsize::new(0),
+            repeat_guard: std::sync::Mutex::new(RepeatGuard::default()),
             slash_commands: Vec::new(),
             slash_handlers: HashMap::new(),
         };
@@ -444,6 +448,9 @@ impl KimiSoul {
         self.steps_taken.store(0, Ordering::Relaxed);
         self.take_next_directive();
         self.follow_ups.store(0, Ordering::Relaxed);
+        if let Ok(mut guard) = self.repeat_guard.lock() {
+            guard.reset();
+        }
         self.checkpoint().await?;
         {
             let mut context = self.context.lock().await;
@@ -716,6 +723,10 @@ impl KimiSoul {
             .lock()
             .await
             .observe(&result.tool_calls, &tool_results);
+        let tool_results = match self.repeat_guard.lock() {
+            Ok(mut guard) => guard.annotate(&result.tool_calls, &tool_results),
+            Err(_) => tool_results,
+        };
         self.grow_context(&result, &tool_results).await?;
 
         let rejected = tool_results

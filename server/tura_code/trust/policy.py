@@ -1,0 +1,87 @@
+"""The approval policy: settle a request by mode, grants and ledger, or ask."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from .classify import (
+    ACTION_EDIT_FILE,
+    ACTION_RUN_COMMAND,
+    TIER_READ,
+    TIER_VERIFY,
+    Classification,
+    classify_command,
+    command_of,
+)
+from .ledger import PROMOTE_AFTER, TrustLedger
+
+
+@dataclass
+class Decision:
+    """What the host does with one approval request."""
+
+    key: str
+    #: "approve" or "reject" when the host settles it, None to ask the owner.
+    response: str | None
+    reason: str
+    #: Whether the owner's answer counts toward the ledger.
+    promotable: bool
+    classification: Classification | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def trust_info(self, ledger: TrustLedger) -> dict[str, Any]:
+        entry = ledger.entry(self.key) if self.promotable else {}
+        info: dict[str, Any] = {
+            "key": self.key,
+            "promotable": self.promotable,
+            "approvals": int(entry.get("approvals") or 0),
+            "promote_after": PROMOTE_AFTER,
+        }
+        if self.classification is not None:
+            info.update(tier=self.classification.tier, effects=list(self.classification.effects), reasons=list(self.classification.reasons))
+        return info
+
+
+def decide(
+    payload: dict[str, Any],
+    *,
+    mode: str,
+    ledger: TrustLedger,
+    grants: set[str] | frozenset[str] = frozenset(),
+    ask_owner: bool = True,
+) -> Decision:
+    """Settle an approval request by policy, or say it needs the owner.
+
+    ``ask_owner=False`` is for unattended work (coding-flow candidates): what
+    would go to the owner is rejected instead, and the agent adapts.
+    """
+    action = str(payload.get("action") or "").strip()
+    sender = str(payload.get("sender") or "").strip()
+
+    def settle(key: str, reason: str, promotable: bool, classification: Classification | None = None) -> Decision:
+        if mode == "yolo":
+            return Decision(key, "approve", "auto-approve all", promotable, classification)
+        if key in grants:
+            return Decision(key, "approve", "allowed for this session", promotable, classification)
+        if promotable and ledger.is_promoted(key):
+            return Decision(key, "approve", f"trusted after {PROMOTE_AFTER} approvals", promotable, classification)
+        if not ask_owner:
+            return Decision(key, "reject", "needs the owner, and this run is unattended", promotable, classification)
+        return Decision(key, None, reason, promotable, classification)
+
+    if action == ACTION_RUN_COMMAND:
+        classification = classify_command(command_of(payload))
+        if classification.tier == TIER_READ:
+            return Decision(classification.key, "approve", "read-only command", True, classification)
+        if classification.tier == TIER_VERIFY and mode in ("accept_edits", "plan", "flow"):
+            return Decision(classification.key, "approve", "project check", True, classification)
+        return settle(classification.key, "command", True, classification)
+    if action == ACTION_EDIT_FILE:
+        if mode in ("accept_edits", "flow"):
+            return Decision(ACTION_EDIT_FILE, "approve", "accept edits", False)
+        return settle(ACTION_EDIT_FILE, "edit", False)
+    # Edits outside the workspace, host actions (a background process, a
+    # coding-flow apply) and anything unknown: the owner, or a session grant.
+    key = action or f"{sender or 'tool'}:(unknown)"
+    return settle(key, "action", False)

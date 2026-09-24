@@ -26,7 +26,11 @@ OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 PermissionMode = Literal["default", "accept_edits", "plan", "yolo"]
 DirectorMode = Literal["on", "shadow", "off"]
 MemoryMode = Literal["local", "openrouter", "off"]
+LearningMode = Literal["review", "auto", "off"]
 ReasoningEffort = Literal["", "none", "low", "medium", "high", "xhigh"]
+
+#: Credentials: never sent to the UI, and a blank field in a form means "unchanged".
+SECRET_FIELDS = ("openrouter_api_key", "parallel_api_key", "firecrawl_api_key")
 
 
 def data_dir() -> Path:
@@ -41,7 +45,9 @@ class Settings(BaseModel):
 
     openrouter_api_key: str = ""
     base_url: str = OPENROUTER_BASE_URL
-    model: str = "qwen/qwen3-coder"
+    # Cheap and fast; the harness (Jev, Dhee, tolerant edits, argument repair)
+    # is built so a model of this class can do real multi-file work.
+    model: str = "deepseek/deepseek-v4-flash"
     max_context_size: int = Field(default=200_000, ge=8_000, le=4_000_000)
     reasoning_effort: ReasoningEffort = ""
     max_steps_per_turn: int = Field(default=100, ge=1, le=1_000)
@@ -52,8 +58,18 @@ class Settings(BaseModel):
     memory_llm_model: str = "openai/gpt-4o-mini"
     memory_embedding_model: str = "openai/text-embedding-3-small"
     memory_embedding_dims: int = Field(default=1536, ge=64, le=8192)
+    # Web search is keyless by default (Parallel, then Firecrawl). Keys lift
+    # their per-IP limits; the paid OpenRouter plugin is an opt-in last resort.
     web_search: bool = True
+    parallel_api_key: str = ""
+    firecrawl_api_key: str = ""
+    web_search_paid_fallback: bool = False
     search_model: str = "openai/gpt-4o-mini"
+    # The Hermes-style learning loop: after substantive turns a reviewer
+    # proposes skills and memories. `review` queues them for the owner,
+    # `auto` promotes what passes the overfit filter, `off` skips the review.
+    learning_mode: LearningMode = "review"
+    learning_model: str = ""
     default_permission_mode: PermissionMode = "default"
     recent_workspaces: list[str] = Field(default_factory=list)
 
@@ -74,10 +90,12 @@ class Settings(BaseModel):
         return "missing"
 
     def public(self) -> dict:
-        """Settings as the UI may see them: never the key itself."""
+        """Settings as the UI may see them: never a credential itself."""
         data = self.model_dump()
         key = self.api_key()
-        data["openrouter_api_key"] = ""
+        for name in SECRET_FIELDS:
+            data[f"{name.removesuffix('_api_key')}_key_set"] = bool(data[name])
+            data[name] = ""
         data["api_key_set"] = bool(key)
         data["api_key_hint"] = f"…{key[-4:]}" if len(key) >= 8 else ""
         data["api_key_source"] = self.key_source()
@@ -109,13 +127,16 @@ class SettingsStore:
             for key, value in changes.items():
                 if key not in data:
                     continue
-                # An empty key field in the form means "unchanged", not "erase";
-                # erasing is an explicit `clear_api_key`.
-                if key == "openrouter_api_key" and not str(value or "").strip():
+                # An empty credential in the form means "unchanged", not
+                # "erase"; erasing is an explicit `clear_<field>`.
+                if key in SECRET_FIELDS and not str(value or "").strip():
                     continue
                 data[key] = value
             if changes.get("clear_api_key"):
                 data["openrouter_api_key"] = ""
+            for name in SECRET_FIELDS:
+                if changes.get(f"clear_{name}"):
+                    data[name] = ""
             self._settings = Settings.model_validate(data)
             self._write()
             return self._settings.model_copy(deep=True)

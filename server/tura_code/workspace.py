@@ -115,10 +115,15 @@ def git_changes(workspace: Path) -> dict:
     return {"git": True, "branch": branch, "files": files, "diff": diff[:MAX_DIFF_BYTES]}
 
 
-def list_dirs(path: str | None) -> dict:
-    """Subdirectories of ``path`` (default: home), for the workspace picker."""
-    base = Path(path).expanduser() if path else Path.home()
+def list_dirs(path: str | None, root: Path | None = None) -> dict:
+    """Subdirectories of ``path`` (default: home, or ``root``), for the workspace picker.
+
+    With ``root`` (a hosted person's workspace folder) nothing outside it is listed.
+    """
+    base = Path(path).expanduser() if path else (root or Path.home())
     base = base.resolve()
+    if root is not None and not base.is_relative_to(root.resolve()):
+        base = root.resolve()
     if not base.is_dir():
         raise WorkspaceError("Not a directory.")
     entries = []
@@ -131,7 +136,7 @@ def list_dirs(path: str | None) -> dict:
         raise WorkspaceError("Permission denied.") from error
     return {
         "path": str(base),
-        "parent": str(base.parent) if base.parent != base else None,
+        "parent": str(base.parent) if base.parent != base and (root is None or base != root.resolve()) else None,
         "git": (base / ".git").exists(),
         "entries": entries[:500],
     }

@@ -14,6 +14,7 @@ use crate::wire::{UserInput, Wire, WireFile, WireMessage};
 
 pub mod agent;
 pub mod approval;
+pub mod args_repair;
 pub mod compaction;
 pub mod completion_gate;
 pub mod context;
@@ -22,6 +23,7 @@ pub mod denwarenji;
 pub mod director;
 pub mod kimisoul;
 pub mod message;
+pub mod repeat_guard;
 pub mod toolset;
 
 #[derive(Debug, Error)]

@@ -96,6 +96,20 @@ pub async fn find_project_skills_dir(work_dir: &KaosPath) -> Option<KaosPath> {
     find_first_existing_dir(&get_project_skills_dir_candidates(work_dir)).await
 }
 
+/// Extra skill roots named by the host (`KIMI_EXTRA_SKILLS_DIRS`, separated
+/// like `PATH`). They load after the built-in skills and before the user's and
+/// the project's, so a skill the owner wrote wins over a host-supplied one of
+/// the same name. root uses this for skills its learning loop promoted.
+pub fn get_extra_skills_dirs() -> Vec<KaosPath> {
+    let Some(raw) = std::env::var_os("KIMI_EXTRA_SKILLS_DIRS") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&raw)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| KaosPath::unsafe_from_local_path(&path))
+        .collect()
+}
+
 pub async fn resolve_skills_roots(
     work_dir: &KaosPath,
     skills_dir_override: Option<KaosPath>,
@@ -108,6 +122,7 @@ pub async fn resolve_skills_roots(
         roots.push(override_dir);
         return roots;
     }
+    roots.extend(find_existing_dirs(&get_extra_skills_dirs()).await);
     roots.extend(find_existing_dirs(&get_user_skills_dir_candidates()).await);
     roots.extend(find_existing_dirs(&get_project_skills_dir_candidates(work_dir)).await);
     roots

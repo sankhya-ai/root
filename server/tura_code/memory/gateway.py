@@ -29,137 +29,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import hashlib
 import logging
-import re
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .settings import Settings
+from ..settings import Settings
+from .errors import MemoryUnavailableError
+from .scopes import OWNER_SCOPE, PACKET_CHAR_LIMIT, Packet, clip, project_scope, words
 
 logger = logging.getLogger(__name__)
 
-RECALL_TOOL = "memory_recall"
-REMEMBER_TOOL = "memory_remember"
-CHECKPOINT_TOOL = "memory_checkpoint"
-
-OWNER_SCOPE = "owner"
-PACKET_CHAR_LIMIT = 2_400
 CONTEXT_TIMEOUT_SECONDS = 6.0
-_KINDS = ("preference", "convention", "command", "decision", "fact", "gotcha")
-_WORD = re.compile(r"[a-z0-9_]{3,}")
-_STOP = frozenset(
-    "the and for with that this from have has was were are you your our can will not "
-    "into when then than what which who how why use using used also just only more "
-    "some any all its it's they them their there here about after before over under".split()
-)
-
-MEMORY_ROLE = """\
-You have long-term memory (Dhee) that persists across sessions and projects:
-- memory_recall: search it when earlier decisions, project conventions, or the owner's preferences could matter.
-- memory_remember: save a durable fact worth knowing next time — an owner preference, a project convention, a build/test command, an architectural decision, a gotcha you hit. One fact per call. Never store secrets, transient task state, or code.
-- memory_checkpoint: at a natural stopping point in long work, record what was done, what worked, what failed, and what remains.
-Relevant memories are attached automatically at the start of a request in the `## System` section. Treat them as advisory: the owner's current request wins."""
-
-
-def project_scope(workspace: Path | str) -> str:
-    digest = hashlib.sha1(str(Path(workspace).resolve()).encode("utf-8")).hexdigest()[:16]
-    return f"project:{digest}"
-
-
-def tool_definitions() -> list[dict[str, Any]]:
-    scope_prop = {
-        "type": "string",
-        "enum": ["project", "owner"],
-        "description": "`project` for facts about this codebase; `owner` for the person's own preferences that apply everywhere.",
-    }
-    return [
-        {
-            "name": RECALL_TOOL,
-            "description": (
-                "Search long-term memory for facts from earlier sessions: project conventions, build and "
-                "test commands, architectural decisions, known gotchas, and the owner's preferences. "
-                "Returns the most relevant memories with ids."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What you want to know, in plain words."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum results (default 6)."},
-                    "scope": {
-                        "type": "string",
-                        "enum": ["all", "project", "owner"],
-                        "description": "Which memory to search (default all).",
-                    },
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": REMEMBER_TOOL,
-            "description": (
-                "Store ONE durable fact in long-term memory so it is known in future sessions. Use for owner "
-                "preferences, project conventions, build/test commands, architectural decisions, and gotchas. "
-                "Never store secrets, credentials, transient task state, or code."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string", "description": "The fact, written as a standalone sentence."},
-                    "kind": {"type": "string", "enum": list(_KINDS), "description": "What sort of fact this is."},
-                    "scope": scope_prop,
-                },
-                "required": ["content"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": CHECKPOINT_TOOL,
-            "description": (
-                "Record progress on the current work in long-term memory: a summary, what worked, what failed, "
-                "decisions made, remaining todos, and files touched. Returns the durable context Dhee holds for "
-                "this project. Use at a natural stopping point in long, multi-step work."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {"type": "string", "description": "What was being worked on and where it stands."},
-                    "what_worked": {"type": "string"},
-                    "what_failed": {"type": "string"},
-                    "decisions": {"type": "array", "items": {"type": "string"}},
-                    "todos": {"type": "array", "items": {"type": "string"}},
-                    "files_touched": {"type": "array", "items": {"type": "string"}},
-                    "session_id": {"type": "string"},
-                    "workspace_root": {"type": "string"},
-                },
-                "required": ["summary"],
-                "additionalProperties": True,
-            },
-        },
-    ]
-
-
-@dataclass
-class Packet:
-    text: str
-    items: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _words(text: str) -> set[str]:
-    return {w for w in _WORD.findall(text.lower()) if w not in _STOP}
-
-
-def _clip(text: str, limit: int) -> str:
-    text = " ".join(str(text or "").split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _return(output: str, message: str = "", *, error: bool = False, brief: str = "") -> dict[str, Any]:
-    display = [{"type": "brief", "text": brief}] if brief else []
-    return {"is_error": error, "output": output, "message": message, "display": display}
 
 
 class MemoryGateway:
@@ -297,7 +177,7 @@ class MemoryGateway:
         def work() -> Any:
             dhee = self._ensure()
             if dhee is None:
-                raise MemoryUnavailable(self._error or "Memory is switched off.")
+                raise MemoryUnavailableError(self._error or "Memory is switched off.")
             return fn(dhee)
 
         future = asyncio.get_running_loop().run_in_executor(self._executor, work)
@@ -319,8 +199,8 @@ class MemoryGateway:
 
     # ----- reads ---------------------------------------------------------
 
-    def _search(self, dhee: Any, query: str, scopes: list[str], limit: int) -> list[dict[str, Any]]:
-        query_words = _words(query)
+    def _search(self, dhee: Any, query: str, scopes: list[str], limit: int, owner: str) -> list[dict[str, Any]]:
+        query_words = words(query)
         found: dict[str, dict[str, Any]] = {}
         for scope in scopes:
             try:
@@ -332,7 +212,7 @@ class MemoryGateway:
                 text = str(row.get("memory") or "").strip()
                 if not text:
                     continue
-                overlap = len(query_words & _words(text))
+                overlap = len(query_words & words(text))
                 # Local mode embeds by hashing, so its similarity alone ranks
                 # unrelated facts highly. Shared words are the honest floor.
                 if self._active_mode == "local" and query_words and overlap == 0:
@@ -341,7 +221,7 @@ class MemoryGateway:
                 item = {
                     "id": str(row.get("id") or ""),
                     "memory": text,
-                    "scope": "owner" if scope == OWNER_SCOPE else "project",
+                    "scope": "owner" if scope == owner else "project",
                     "score": round(score, 3),
                 }
                 key = item["id"] or text
@@ -350,17 +230,17 @@ class MemoryGateway:
         ranked = sorted(found.values(), key=lambda item: item["score"], reverse=True)
         return ranked[:limit]
 
-    async def recall(self, query: str, workspace: Path, *, scope: str = "all", limit: int = 6) -> list[dict[str, Any]]:
+    async def recall(self, query: str, workspace: Path, *, scope: str = "all", limit: int = 6, owner: str = OWNER_SCOPE) -> list[dict[str, Any]]:
         scopes = {
             "project": [project_scope(workspace)],
-            "owner": [OWNER_SCOPE],
-        }.get(scope, [project_scope(workspace), OWNER_SCOPE])
-        return await self._run(lambda dhee: self._search(dhee, query, scopes, limit))
+            "owner": [owner],
+        }.get(scope, [project_scope(workspace), owner])
+        return await self._run(lambda dhee: self._search(dhee, query, scopes, limit, owner))
 
-    async def list_memories(self, workspace: Path, limit: int = 200) -> list[dict[str, Any]]:
+    async def list_memories(self, workspace: Path, limit: int = 200, owner: str = OWNER_SCOPE) -> list[dict[str, Any]]:
         def work(dhee: Any) -> list[dict[str, Any]]:
             items: list[dict[str, Any]] = []
-            for scope in (project_scope(workspace), OWNER_SCOPE):
+            for scope in (project_scope(workspace), owner):
                 try:
                     rows = dhee._engram.get_all(user_id=scope, limit=limit)
                 except Exception:  # noqa: BLE001
@@ -372,7 +252,7 @@ class MemoryGateway:
                         {
                             "id": str(row.get("id") or ""),
                             "memory": str(row.get("memory") or row.get("content") or ""),
-                            "scope": "owner" if scope == OWNER_SCOPE else "project",
+                            "scope": "owner" if scope == owner else "project",
                             "created_at": row.get("created_at"),
                             "metadata": row.get("metadata") or {},
                         }
@@ -384,7 +264,7 @@ class MemoryGateway:
     async def forget(self, memory_id: str) -> None:
         await self._run(lambda dhee: dhee._engram.delete(memory_id))
 
-    async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool) -> Packet | None:
+    async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool, owner: str = OWNER_SCOPE) -> Packet | None:
         """The memory worth attaching to this request, or ``None``.
 
         Only memories not yet shown in this session are attached, so a long
@@ -396,7 +276,7 @@ class MemoryGateway:
         scope = project_scope(workspace)
 
         def work(dhee: Any) -> Packet | None:
-            hits = [item for item in self._search(dhee, prompt, [scope, OWNER_SCOPE], 8) if item["id"] not in seen]
+            hits = [item for item in self._search(dhee, prompt, [scope, owner], 8, owner) if item["id"] not in seen]
             lessons: list[str] = []
             if first_turn:
                 try:
@@ -404,26 +284,26 @@ class MemoryGateway:
                 except Exception:  # noqa: BLE001
                     context = {}
                 for warning in (context.get("warnings") or [])[:3]:
-                    lessons.append(f"Warning: {_clip(warning, 240)}")
+                    lessons.append(f"Warning: {clip(warning, 240)}")
                 for insight in (context.get("insights") or [])[:4]:
                     content = insight.get("content") if isinstance(insight, dict) else insight
-                    if content and f"Warning: {_clip(content, 240)}" not in lessons:
-                        lessons.append(_clip(content, 240))
+                    if content and f"Warning: {clip(content, 240)}" not in lessons:
+                        lessons.append(clip(content, 240))
                 for intention in (context.get("intentions") or [])[:2]:
                     text = intention.get("description") if isinstance(intention, dict) else intention
                     if text:
-                        lessons.append(f"Reminder: {_clip(text, 240)}")
+                        lessons.append(f"Reminder: {clip(text, 240)}")
             if not hits and not lessons:
                 return None
             lines = ["Memory from earlier sessions (Dhee). Advisory: the request below wins if they conflict."]
             project = [h for h in hits if h["scope"] == "project"]
-            owner = [h for h in hits if h["scope"] == "owner"]
+            preferences = [h for h in hits if h["scope"] == "owner"]
             if project:
                 lines.append("Project memory:")
-                lines += [f"- {_clip(h['memory'], 300)}" for h in project]
-            if owner:
+                lines += [f"- {clip(h['memory'], 300)}" for h in project]
+            if preferences:
                 lines.append("Owner preferences:")
-                lines += [f"- {_clip(h['memory'], 300)}" for h in owner]
+                lines += [f"- {clip(h['memory'], 300)}" for h in preferences]
             if lessons:
                 lines.append("Lessons from earlier work:")
                 lines += [f"- {lesson}" for lesson in lessons]
@@ -436,7 +316,7 @@ class MemoryGateway:
             return await self._run(work, timeout=CONTEXT_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             logger.info("Dhee packet skipped: memory busy for %.0fs", CONTEXT_TIMEOUT_SECONDS)
-        except MemoryUnavailable:
+        except MemoryUnavailableError:
             pass
         except Exception:  # noqa: BLE001
             logger.warning("Dhee packet failed", exc_info=True)
@@ -444,8 +324,8 @@ class MemoryGateway:
 
     # ----- writes --------------------------------------------------------
 
-    async def remember(self, content: str, workspace: Path, *, scope: str = "project", kind: str = "fact", session_id: str = "") -> dict[str, Any]:
-        user_id = OWNER_SCOPE if scope == "owner" else project_scope(workspace)
+    async def remember(self, content: str, workspace: Path, *, scope: str = "project", kind: str = "fact", session_id: str = "", owner: str = OWNER_SCOPE) -> dict[str, Any]:
+        user_id = owner if scope == "owner" else project_scope(workspace)
         metadata = {"kind": kind, "source": "tura-code", "workspace": str(workspace), "session_id": session_id}
         return await self._run(lambda dhee: dhee.remember(content, user_id=user_id, metadata=metadata))
 
@@ -464,74 +344,49 @@ class MemoryGateway:
             )
         )
 
-    # ----- the runtime's tool calls --------------------------------------
+
+class MemoryView:
+    """The gateway bound to one person's owner scope; what a tenant uses.
+
+    One Dhee instance serves every tenant (one SQLite store, one embedder, one
+    worker thread) instead of one per user; the scope keeps them apart.
+    """
+
+    def __init__(self, gateway: MemoryGateway, owner: str = OWNER_SCOPE) -> None:
+        self.gateway = gateway
+        self.owner = owner
+
+    @property
+    def enabled(self) -> bool:
+        return self.gateway.enabled
+
+    def status(self) -> dict[str, Any]:
+        return self.gateway.status()
+
+    async def recall(self, query: str, workspace: Path, *, scope: str = "all", limit: int = 6) -> list[dict[str, Any]]:
+        return await self.gateway.recall(query, workspace, scope=scope, limit=limit, owner=self.owner)
+
+    async def list_memories(self, workspace: Path, limit: int = 200) -> list[dict[str, Any]]:
+        return await self.gateway.list_memories(workspace, limit, owner=self.owner)
+
+    async def forget(self, memory_id: str, workspace: Path) -> bool:
+        """Forget a memory, but only one this person can see."""
+        visible = {item["id"] for item in await self.list_memories(workspace, limit=1000)}
+        if memory_id not in visible:
+            return False
+        await self.gateway.forget(memory_id)
+        return True
+
+    async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool) -> Packet | None:
+        return await self.gateway.compile_packet(prompt, workspace, seen=seen, first_turn=first_turn, owner=self.owner)
+
+    async def remember(self, content: str, workspace: Path, *, scope: str = "project", kind: str = "fact", session_id: str = "") -> dict[str, Any]:
+        return await self.gateway.remember(content, workspace, scope=scope, kind=kind, session_id=session_id, owner=self.owner)
+
+    async def checkpoint(self, workspace: Path, *, summary: str, status: str = "paused", **fields: Any) -> dict[str, Any]:
+        return await self.gateway.checkpoint(workspace, summary=summary, status=status, **fields)
 
     async def handle_tool(self, name: str, arguments: dict[str, Any], *, workspace: Path, session_id: str) -> dict[str, Any]:
-        try:
-            if name == RECALL_TOOL:
-                query = str(arguments.get("query") or "").strip()
-                if not query:
-                    return _return("", "`query` is required.", error=True, brief="Missing query")
-                limit = max(1, min(20, int(arguments.get("limit") or 6)))
-                hits = await self.recall(query, workspace, scope=str(arguments.get("scope") or "all"), limit=limit)
-                if not hits:
-                    return _return("No relevant memories found.", "", brief="No memories")
-                lines = [f"- [{h['scope']}] {h['memory']} (id: {h['id']})" for h in hits]
-                return _return("\n".join(lines), f"{len(hits)} memories", brief=f"Recalled {len(hits)}")
-            if name == REMEMBER_TOOL:
-                content = str(arguments.get("content") or "").strip()
-                if not content:
-                    return _return("", "`content` is required.", error=True, brief="Nothing to remember")
-                kind = str(arguments.get("kind") or "fact")
-                scope = "owner" if arguments.get("scope") == "owner" else "project"
-                result = await self.remember(content, workspace, scope=scope, kind=kind, session_id=session_id)
-                if isinstance(result, dict) and result.get("stored") is False:
-                    reason = result.get("reason") or result.get("event") or "rejected by Dhee's admission policy"
-                    return _return(f"Not stored: {reason}", "", brief="Not stored")
-                memory_id = result.get("id", "") if isinstance(result, dict) else ""
-                return _return(f"Stored in {scope} memory (id: {memory_id}).", "", brief=f"Remembered ({scope})")
-            if name == CHECKPOINT_TOOL:
-                summary = str(arguments.get("summary") or "").strip() or "Work in progress."
-                fields = {k: arguments.get(k) for k in ("what_worked", "what_failed", "decisions", "todos", "files_touched")}
-                await self.checkpoint(workspace, summary=summary, **fields)
-                restored = await self.compile_packet(summary, workspace, seen=set(), first_turn=True)
-                body = restored.text if restored else "No additional durable memory for this project yet."
-                return _return(f"Checkpoint saved.\n\n{body}", "", brief="Checkpoint saved")
-            return _return("", f"Unknown memory tool `{name}`.", error=True, brief="Unknown tool")
-        except MemoryUnavailable as error:
-            return _return("", f"Memory is unavailable: {error}", error=True, brief="Memory unavailable")
-        except Exception as error:  # noqa: BLE001 - a memory fault is a tool error, not a failed turn
-            logger.exception("memory tool %s failed", name)
-            return _return("", f"Memory error: {error}", error=True, brief="Memory error")
+        from .tools import handle_tool
 
-
-class MemoryUnavailable(RuntimeError):
-    pass
-
-
-def packet_envelope(packet_text: str, request: str, workspace: Path) -> str:
-    """The request with host context in the envelope the runtime's director reads.
-
-    The Jev director splits `## System` from `## User` so it judges the step
-    against the actual request, not against the memory attached to it.
-    """
-    return (
-        "## System\n"
-        f"You are root working in `{workspace}`.\n\n"
-        f"{packet_text}\n\n"
-        "## User\n"
-        f"{request}"
-    )
-
-
-def split_envelope(text: str) -> tuple[str, str]:
-    """(host context, request) for display; the inverse of ``packet_envelope``."""
-    stripped = text.lstrip()
-    if stripped.startswith("## System") and "\n## User\n" in stripped:
-        head, request = stripped.split("\n## User\n", 1)
-        return head[len("## System"):].strip(), request
-    return "", text
-
-
-def now() -> float:
-    return time.time()
+        return await handle_tool(self, name, arguments, workspace=workspace, session_id=session_id)

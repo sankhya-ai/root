@@ -131,6 +131,39 @@ pub struct OpenRouterSearchConfig {
     pub custom_headers: Option<HashMap<String, String>>,
 }
 
+/// Keyless web search: Parallel's and Firecrawl's free endpoints, tried in
+/// `order` before any paid backend. Keys are optional and lift the per-IP
+/// limits of keyless use; the URLs override the public endpoints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    #[serde(default = "default_web_search_order")]
+    pub order: Vec<String>,
+    #[serde(default)]
+    pub parallel_api_key: String,
+    #[serde(default)]
+    pub parallel_url: String,
+    #[serde(default)]
+    pub firecrawl_api_key: String,
+    #[serde(default)]
+    pub firecrawl_url: String,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            order: default_web_search_order(),
+            parallel_api_key: String::new(),
+            parallel_url: String::new(),
+            firecrawl_api_key: String::new(),
+            firecrawl_url: String::new(),
+        }
+    }
+}
+
+fn default_web_search_order() -> Vec<String> {
+    vec!["parallel".to_string(), "firecrawl".to_string()]
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Services {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +172,8 @@ pub struct Services {
     pub moonshot_fetch: Option<MoonshotFetchConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openrouter_search: Option<OpenRouterSearchConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearchConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

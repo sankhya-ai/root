@@ -15,7 +15,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +25,7 @@ use kosong::tooling::error::{
 };
 use kosong::tooling::{CallableTool, Tool, ToolResult, ToolResultFuture, ToolReturnValue, Toolset};
 
+use crate::soul::args_repair::parse_tool_arguments;
 use crate::constant::{NAME, VERSION};
 use crate::exception::{InvalidToolError, MCPConfigError, MCPRuntimeError};
 use crate::mcp::{get_mcp_credential_store, has_oauth_tokens};
@@ -312,104 +313,9 @@ impl Toolset for KimiToolset {
     }
 }
 
-fn parse_tool_arguments(tool_name: &str, arguments: &str) -> Result<Value, String> {
-    match serde_json::from_str::<Value>(arguments) {
-        Ok(value) => Ok(value),
-        Err(err) => {
-            if let Some(repaired) = repair_builtin_tool_arguments(tool_name, arguments) {
-                warn!(
-                    tool_name = tool_name,
-                    error = %err,
-                    "recovered malformed builtin tool arguments"
-                );
-                Ok(repaired)
-            } else {
-                Err(err.to_string())
-            }
-        }
-    }
-}
-
-fn repair_builtin_tool_arguments(tool_name: &str, arguments: &str) -> Option<Value> {
-    match tool_name {
-        "ReadFile" | "ReadMediaFile" => {
-            let path = extract_json_string_field(arguments, "path")?;
-            Some(json!({ "path": path }))
-        }
-        "Glob" => {
-            let pattern = extract_json_string_field(arguments, "pattern")?;
-            let mut value = json!({ "pattern": pattern });
-            if let Some(directory) = extract_json_string_field(arguments, "directory") {
-                value["directory"] = json!(directory);
-            }
-            Some(value)
-        }
-        "Grep" => {
-            let pattern = extract_json_string_field(arguments, "pattern")?;
-            let mut value = json!({ "pattern": pattern });
-            if let Some(path) = extract_json_string_field(arguments, "path") {
-                value["path"] = json!(path);
-            }
-            if let Some(glob) = extract_json_string_field(arguments, "glob") {
-                value["glob"] = json!(glob);
-            }
-            if let Some(output_mode) = extract_json_string_field(arguments, "output_mode") {
-                value["output_mode"] = json!(output_mode);
-            }
-            Some(value)
-        }
-        "Shell" => {
-            let command = extract_json_string_field(arguments, "command")?;
-            Some(json!({ "command": command }))
-        }
-        _ => None,
-    }
-}
-
-fn extract_json_string_field(arguments: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{field}\"");
-    let field_start = arguments.find(&needle)?;
-    let after_field = &arguments[field_start + needle.len()..];
-    let colon = after_field.find(':')?;
-    let mut chars = after_field[colon + 1..].trim_start().chars();
-    if chars.next()? != '"' {
-        return None;
-    }
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in chars {
-        if escaped {
-            out.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '"' => '"',
-                '\\' => '\\',
-                other => other,
-            });
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            break;
-        }
-        out.push(ch);
-    }
-    let trimmed = out.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parse_tool_arguments;
+    use crate::soul::args_repair::parse_tool_arguments;
 
     #[test]
     fn recovers_truncated_read_file_path_argument() {

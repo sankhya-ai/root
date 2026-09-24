@@ -77,11 +77,12 @@ def test_rejected_edit_stops_the_turn_and_leaves_disk_alone(client, workspace, s
     assert of_type(events, "TurnFinished")[-1]["payload"]["status"] == "finished"
 
 
-def test_accept_edits_mode_approves_edits_but_not_commands(client, workspace, script):
+def test_accept_edits_mode_approves_edits_and_reads_but_not_state_changes(client, workspace, script):
     script(
         [
             tool_call("c1", "WriteFile", {"path": "a.txt", "content": "hello\n"}),
             tool_call("c2", "Shell", {"command": "cat a.txt"}),
+            tool_call("c3", "Shell", {"command": "touch b.txt"}),
             text("ok"),
         ]
     )
@@ -92,9 +93,12 @@ def test_accept_edits_mode_approves_edits_but_not_commands(client, workspace, sc
         events = run_turn(ws, "write and show a.txt")
     auto = [e["payload"] for e in of_type(events, "ApprovalResolved") if e["payload"]["auto"]]
     asked = [e["payload"]["action"] for e in of_type(events, "ApprovalRequest")]
-    assert [a["action"] for a in auto] == ["edit file"]
+    assert [(a["action"], a["reason"]) for a in auto] == [("edit file", "accept edits"), ("run command", "read-only command")]
     assert asked == ["run command"]
+    request = of_type(events, "ApprovalRequest")[0]["payload"]
+    assert request["trust"]["key"] == "run command:touch" and request["trust"]["approvals"] == 0
     assert (workspace / "a.txt").read_text() == "hello\n"
+    assert (workspace / "b.txt").exists()
 
 
 def test_plan_mode_removes_edit_tools(client, workspace, script):
@@ -142,7 +146,7 @@ def test_memory_tools_round_trip_through_dhee(client, workspace, script):
 
 
 def test_cancel_ends_a_turn_waiting_for_approval(client, workspace, script):
-    script([tool_call("c1", "Shell", {"command": "echo hi"}), text("unreachable")])
+    script([tool_call("c1", "Shell", {"command": "touch hi.txt"}), text("unreachable")])
     session_id = _session(client, workspace)
     with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
         ws.receive_json()
@@ -204,3 +208,22 @@ def test_slash_commands_are_passed_to_the_runtime(client, workspace, script):
     runtime = [e for e in events if e["type"] == "TurnFinished"][0]["payload"]
     assert runtime["status"] == "finished"
     assert json.dumps(events)  # serialisable
+
+
+import os
+
+import pytest
+
+
+@pytest.mark.skipif(not os.environ.get("TURA_CODE_LIVE_SEARCH"), reason="set TURA_CODE_LIVE_SEARCH=1 to search the real web")
+def test_live_keyless_web_search(client, workspace, script):
+    """The runtime's SearchWeb against the real keyless backends: no key anywhere."""
+    script([tool_call("w", "SearchWeb", {"query": "tokio rust async runtime", "limit": 3}), text("found it")])
+    session_id = _session(client, workspace)
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "search the web", timeout=90)
+    result = of_type(events, "ToolResult")[0]["payload"]["return_value"]
+    assert result["is_error"] is False, result
+    assert "tokio" in result["output"].lower() and "URL: https://" in result["output"]
+    assert any(d.get("text", "").startswith("Searched via") for d in result["display"])

@@ -11,6 +11,7 @@ mod grep;
 mod read;
 mod read_media;
 mod replace;
+mod tolerant;
 mod write;
 
 pub use glob::{Glob, GlobParams};

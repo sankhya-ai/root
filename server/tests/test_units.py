@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 from tura_code import launcher
-from tura_code.memory import MemoryGateway, packet_envelope, project_scope, split_envelope
-from tura_code.sessions import SessionManager, build_parts, expand_mentions
+from tura_code.events import EventLog
+from tura_code.memory import MemoryGateway, MemoryView, packet_envelope, project_scope, split_envelope
+from tura_code.sessions import build_parts, expand_mentions
 from tura_code.settings import Settings, SettingsStore
+from tura_code.tenancy import Server
 
 
 def _spec(tmp_path: Path, **kw) -> launcher.LaunchSpec:
@@ -29,15 +31,19 @@ def test_config_uses_the_openrouter_protocol_and_keeps_the_key_out_of_env(tmp_pa
     monkeypatch.delenv(launcher.SCRIPTED_ECHO_ENV, raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env")
     monkeypatch.setenv("SOME_OTHER_API_KEY", "secret")
-    spec = _spec(tmp_path)
-    path = launcher.write_runtime_config(spec.settings, tmp_path / "rt", ["image_in"])
+    spec = _spec(tmp_path, capabilities=["image_in"])
+    path = launcher.write_runtime_config(spec, tmp_path / "rt")
     config = json.loads(path.read_text())
     assert oct(path.stat().st_mode & 0o777) == "0o600"
     provider = config["providers"]["openrouter"]
     assert provider["api_key"] == "sk-or-env"  # the environment wins
     assert config["models"]["main"]["provider"] == "openrouter"
     assert config["models"]["main"]["capabilities"] == ["image_in"]
-    assert config["services"]["openrouter_search"]["model"]
+    # Web search is keyless by default; the paid plugin only when asked for.
+    assert config["services"]["web_search"]["order"] == ["parallel", "firecrawl"]
+    assert "openrouter_search" not in config["services"]
+    paid = _spec(tmp_path, settings=Settings(web_search_paid_fallback=True))
+    assert launcher.runtime_config(paid)["services"]["openrouter_search"]["model"]
     env = launcher.child_environment(spec, tmp_path / "share")
     assert not any(k.endswith("_API_KEY") for k in env)
     assert "OPENROUTER_API_KEY" not in env
@@ -124,30 +130,53 @@ def test_build_parts_puts_images_after_text():
 
 
 def test_event_log_coalesces_stream_deltas(tmp_path):
-    store = SettingsStore(tmp_path)
-    manager = SessionManager(tmp_path, store, MemoryGateway(tmp_path, store.get))
     ws = tmp_path / "ws"
     ws.mkdir()
-    runtime = manager.create(str(ws))
+    runtime = Server(tmp_path).tenant().sessions.create(str(ws))
     for chunk in ("Hel", "lo", "!"):
         runtime.emit("ContentPart", {"type": "text", "text": chunk})
     runtime.emit("ToolCall", {"type": "function", "id": "c1", "function": {"name": "Shell", "arguments": '{"comm'}})
     runtime.emit("ToolCallPart", {"arguments_part": 'and":"ls"}'})
     runtime.emit("ToolResult", {"tool_call_id": "c1", "return_value": {"is_error": False}})
     runtime.emit("ContentPart", {"type": "text", "text": "Done"})
-    history = runtime.history()
+    history = runtime.log.page()["events"]
     assert [e["type"] for e in history] == ["ContentPart", "ToolCall", "ToolResult", "ContentPart"]
     assert history[0]["payload"]["text"] == "Hello!"
     assert history[1]["payload"]["function"]["arguments"] == '{"command":"ls"}'
-    runtime._flush_buffer()
+    runtime.log.flush()
     lines = (runtime.dir / "events.jsonl").read_text().splitlines()
     assert len(lines) == 4
+    # A reopened log knows where it left off without reading the whole file.
+    assert EventLog(runtime.dir / "events.jsonl").last_seq == runtime._seq
+
+
+def test_event_log_pages_from_the_end_at_turn_boundaries(tmp_path):
+    log = EventLog(tmp_path / "events.jsonl")
+    seq = 0
+    for turn in range(30):
+        for kind in ("UserPrompt", "ContentPart", "ToolCall", "ToolResult", "TurnFinished"):
+            seq += 1
+            payload = {"text": "x" * 200} if kind != "ToolCall" else {"function": {"name": "Shell", "arguments": "{}"}}
+            log.record({"seq": seq, "ts": 0, "turn": str(turn), "type": kind, "payload": payload})
+    log.flush()
+    page = log.page(max_events=12)
+    assert page["has_more"] is True
+    assert page["events"][0]["type"] == "UserPrompt" and page["events"][-1]["seq"] == seq
+    assert len(page["events"]) <= 12
+    older = log.page(before=page["first_seq"], max_events=12)
+    assert older["events"][-1]["seq"] == page["first_seq"] - 1
+    everything = log.page(max_events=10_000)
+    assert everything["has_more"] is False and len(everything["events"]) == seq
+    # Bounded by bytes too: one huge result does not pull the whole log into memory.
+    small = log.page(max_bytes=2_000)
+    assert small["has_more"] and sum(len(json.dumps(e)) for e in small["events"]) < 4_000
 
 
 @pytest.mark.asyncio
 async def test_memory_gateway_local_mode(tmp_path):
     settings = Settings(memory_mode="local")
-    gateway = MemoryGateway(tmp_path, lambda: settings)
+    root = MemoryGateway(tmp_path, lambda: settings)
+    gateway = MemoryView(root)
     ws = tmp_path / "project"
     ws.mkdir()
     try:
@@ -186,20 +215,30 @@ async def test_memory_gateway_local_mode(tmp_path):
         )
         assert checkpoint["is_error"] is False and checkpoint["output"].startswith("Checkpoint saved.")
         assert project_scope(ws) != project_scope(other)
+
+        # Two people on one hosted server share Dhee, not owner memory.
+        alice, bob = MemoryView(root, "owner:alice"), MemoryView(root, "owner:bob")
+        await alice.remember("Alice deploys with fly.io on Fridays.", ws, scope="owner")
+        assert any("fly.io" in m["memory"] for m in await alice.recall("how does deploys work fly.io", ws, scope="owner"))
+        assert await bob.recall("how does deploys work fly.io", ws, scope="owner") == []
+        alice_ids = [m["id"] for m in await alice.list_memories(ws) if "fly.io" in m["memory"]]
+        assert alice_ids and not await bob.forget(alice_ids[0], ws)
+        assert await alice.forget(alice_ids[0], ws)
     finally:
-        await gateway.close()
+        await root.close()
 
 
 @pytest.mark.asyncio
 async def test_memory_off_is_a_tool_error_not_a_crash(tmp_path):
     settings = Settings(memory_mode="off")
-    gateway = MemoryGateway(tmp_path, lambda: settings)
+    root = MemoryGateway(tmp_path, lambda: settings)
+    gateway = MemoryView(root)
     try:
         result = await gateway.handle_tool("memory_recall", {"query": "x"}, workspace=tmp_path, session_id="s")
         assert result["is_error"] is True and "unavailable" in result["message"].lower()
         assert await gateway.compile_packet("x", tmp_path, seen=set(), first_turn=True) is None
     finally:
-        await gateway.close()
+        await root.close()
 
 
 def test_security_guards(home, workspace):
