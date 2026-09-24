@@ -5,15 +5,15 @@ import { modeLabel } from "../lib/transcript.ts";
 import type { PermissionMode } from "../lib/types.ts";
 
 const MODES: { mode: PermissionMode; icon: ReactNode; description: string }[] = [
-  { mode: "default", icon: <ShieldCheck size={15} />, description: "Ask before every edit and command." },
-  { mode: "accept_edits", icon: <FilePen size={15} />, description: "Apply file edits in the workspace; ask before commands." },
-  { mode: "plan", icon: <ClipboardList size={15} />, description: "Read and investigate only, then propose a plan. No edits." },
+  { mode: "default", icon: <ShieldCheck size={15} />, description: "Read-only commands run; ask before edits and other commands." },
+  { mode: "accept_edits", icon: <FilePen size={15} />, description: "Edits and the project's own checks run; ask before anything else." },
+  { mode: "plan", icon: <ClipboardList size={15} />, description: "Investigate and propose a plan. No edits." },
   { mode: "yolo", icon: <Zap size={15} />, description: "Approve everything automatically. Use with care." },
 ];
 
 export const MODE_ORDER = MODES.map((m) => m.mode);
 
-export function ModeMenu({ mode, onChange }: { mode: PermissionMode; onChange: (mode: PermissionMode) => void }) {
+export function ModeMenu({ mode, onChange, down = false }: { mode: PermissionMode; onChange: (mode: PermissionMode) => void; down?: boolean }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -26,7 +26,7 @@ export function ModeMenu({ mode, onChange }: { mode: PermissionMode; onChange: (
   }, [open]);
   const current = MODES.find((m) => m.mode === mode) ?? MODES[0];
   return (
-    <div className="modeMenu" ref={root}>
+    <div className={`menuAnchor${down ? " down" : ""}`} ref={root}>
       <button className={`chip${mode === "yolo" ? " warn" : ""}`} onClick={() => setOpen((v) => !v)} title="Permission mode (Shift+Tab cycles)">
         {current.icon}
         {modeLabel(mode)}
@@ -37,16 +37,16 @@ export function ModeMenu({ mode, onChange }: { mode: PermissionMode; onChange: (
           {MODES.map((m) => (
             <button
               key={m.mode}
-              className={`modeOption${m.mode === mode ? " active" : ""}`}
+              className={`menuOption${m.mode === mode ? " active" : ""}`}
               onClick={() => {
                 onChange(m.mode);
                 setOpen(false);
               }}
             >
-              <span style={{ display: "inline-flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
+              <strong>
                 {m.icon}
                 {modeLabel(m.mode)}
-              </span>
+              </strong>
               <span className="desc">{m.description}</span>
             </button>
           ))}

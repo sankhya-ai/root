@@ -227,3 +227,15 @@ def test_live_keyless_web_search(client, workspace, script):
     assert result["is_error"] is False, result
     assert "tokio" in result["output"].lower() and "URL: https://" in result["output"]
     assert any(d.get("text", "").startswith("Searched via") for d in result["display"])
+
+
+def test_a_restart_for_a_new_mode_is_not_reported_as_an_exit(client, workspace, script):
+    script([text("first"), text("second")])
+    session_id = _session(client, workspace)
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "one")
+        ws.send_json({"type": "set_mode", "mode": "plan"})  # plan mode reshapes the process
+        events = run_turn(ws, "two")
+    statuses = [e["payload"].get("state") for e in events if e["type"] == "RuntimeStatus"]
+    assert "starting" in statuses and "ready" in statuses and "exited" not in statuses

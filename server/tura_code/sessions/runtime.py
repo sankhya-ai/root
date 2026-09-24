@@ -61,6 +61,8 @@ class SessionRuntime(Approvals):
         self.runtime_state = "stopped"
         self.runtime_info: dict[str, Any] = {}
         self._processes: processes.ProcessManager | None = None
+        #: Set while the host itself stops the process (a restart, eviction, close).
+        self._stopping = False
 
     # ----- persistence and fan-out ----------------------------------------
 
@@ -178,7 +180,11 @@ class SessionRuntime(Approvals):
         process, self.process = self.process, None
         self._fingerprint = None
         if process is not None:
-            await process.close()
+            self._stopping = True
+            try:
+                await process.close()
+            finally:
+                self._stopping = False
         self._release()
         self.runtime_state = "stopped"
 
@@ -187,6 +193,8 @@ class SessionRuntime(Approvals):
         return self.process is not None and self.turn is None and not self.pending
 
     async def _on_exit(self, returncode: int | None, detail: str) -> None:
+        if self._stopping:
+            return  # The host stopped it: a restart or eviction, not a failure.
         if self.process is not None and not self.process.alive:
             self.process = None
             self._fingerprint = None

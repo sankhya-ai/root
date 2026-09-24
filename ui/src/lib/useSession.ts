@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { bootstrap } from "./api.ts";
+import { api, bootstrap } from "./api.ts";
 import { applyEvent, createTranscript, loadHistory, type TranscriptState } from "./transcript.ts";
-import type { Attachment, PermissionMode, ServerMessage, Session } from "./types.ts";
+import type { ApprovalRequest, Attachment, PermissionMode, ServerMessage, Session, WireEvent } from "./types.ts";
 
 export type Connection = "connecting" | "open" | "closed";
 
@@ -16,6 +16,9 @@ export interface SessionHandle {
   cancel: () => void;
   approve: (requestId: string, response: "approve" | "approve_for_session" | "reject") => void;
   setMode: (mode: PermissionMode) => void;
+  /** Whether older history exists than what is loaded, and a way to load it. */
+  hasMore: boolean;
+  loadEarlier: () => Promise<void>;
 }
 
 /** One live session: its transcript, kept current over a reconnecting socket. */
@@ -27,6 +30,10 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const frame = useRef<number | null>(null);
+  // The raw events behind the transcript, so an older page can be prepended
+  // and the whole folded again. Only what the owner has scrolled to is held.
+  const eventsRef = useRef<WebSocketEvents>({ events: [], pending: [] });
+  const [hasMore, setHasMore] = useState(false);
   const changeRef = useRef(onSessionChange);
   changeRef.current = onSessionChange;
 
@@ -67,12 +74,15 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
       socket.onmessage = (message) => {
         const data = JSON.parse(message.data) as ServerMessage;
         if (data.type === "hello") {
+          eventsRef.current = { events: data.history.slice(), pending: data.pending_approvals };
+          setHasMore(Boolean(data.has_more));
           transcriptRef.current = loadHistory(data.history, data.pending_approvals);
           setSession(data.session);
           changeRef.current?.(data.session);
           setVersion((v) => v + 1);
         } else if (data.type === "event") {
           const t = transcriptRef.current;
+          eventsRef.current.events.push(data.event);
           if (data.event.type === "SessionUpdated") {
             setSession(data.event.payload as Session);
             changeRef.current?.(data.event.payload as Session);
@@ -130,7 +140,20 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
     socket.send(JSON.stringify(payload));
   }, []);
 
+  const loadEarlier = useCallback(async () => {
+    if (!sessionId) return;
+    const first = eventsRef.current.events.find((e) => e.seq)?.seq;
+    if (!first) return;
+    const page = await api.events(sessionId, first);
+    eventsRef.current.events = [...page.events, ...eventsRef.current.events];
+    setHasMore(page.has_more);
+    transcriptRef.current = loadHistory(eventsRef.current.events, eventsRef.current.pending);
+    setVersion((v) => v + 1);
+  }, [sessionId]);
+
   return {
+    hasMore,
+    loadEarlier,
     transcript: transcriptRef.current,
     session,
     connection,
@@ -142,4 +165,9 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
     approve: (requestId, response) => post({ type: "approval", request_id: requestId, response }),
     setMode: (mode) => post({ type: "set_mode", mode }),
   };
+}
+
+interface WebSocketEvents {
+  events: WireEvent[];
+  pending: ApprovalRequest[];
 }

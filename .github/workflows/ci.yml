@@ -29,6 +29,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: cargo build --release --manifest-path runtime/Cargo.toml --bin kimi-agent
+      # The hosted-mode sandbox test runs inside bubblewrap; it skips itself
+      # where the runner does not allow user namespaces.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: python -m pip install -e "./server[memory,dev]"
       - run: python -m pytest -q
         working-directory: server

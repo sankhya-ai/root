@@ -1,28 +1,46 @@
-import { ArrowUp, Folder, FolderGit2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowUp, Folder, FolderGit2, FolderPlus, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api.ts";
 import { useEscape } from "../lib/useEscape.ts";
 
-export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string[]; onClose: () => void; onCreate: (workspace: string) => Promise<void> }) {
+export function NewSessionDialog({
+  recent,
+  hosted,
+  title = "New session",
+  action = "Start session here",
+  onClose,
+  onCreate,
+}: {
+  recent: string[];
+  hosted: boolean;
+  title?: string;
+  action?: string;
+  onClose: () => void;
+  onCreate: (workspace: string) => Promise<void>;
+}) {
   useEscape(onClose);
+  const [newName, setNewName] = useState("");
+  const [gitUrl, setGitUrl] = useState("");
   const [path, setPath] = useState(recent[0] ?? "");
   const [listing, setListing] = useState<Awaited<ReturnType<typeof api.dirs>> | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Once the owner types a path, a listing that arrives later must not replace it.
+  const typed = useRef(false);
 
-  const browse = (target?: string) => {
+  const browse = (target?: string, initial = false) => {
     api.dirs(target).then(
       (d) => {
         setListing(d);
-        setPath(d.path);
+        if (!(initial && typed.current)) setPath(d.path);
         setError("");
       },
       (e) => setError(String(e.message)),
     );
   };
 
-  useEffect(() => browse(recent[0] || undefined), []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => browse(recent[0] || undefined, true), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const create = async (target: string) => {
     if (!target.trim()) return;
@@ -38,9 +56,9 @@ export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string
 
   return (
     <div className="backdrop" onMouseDown={onClose}>
-      <div className="dialog" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-label="New session">
+      <div className="dialog" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-label={title}>
         <div className="dialogHead">
-          <h2>New session</h2>
+          <h2>{title}</h2>
           <button className="iconButton" onClick={onClose} aria-label="Close">
             <X size={16} />
           </button>
@@ -56,16 +74,50 @@ export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string
                 browse(path);
               }}
             >
-              <input id="ws" className="input mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/path/to/project" />
-              <button type="submit" className="button">
+              <input
+                id="ws"
+                className="input mono"
+                value={path}
+                onChange={(e) => {
+                  typed.current = true;
+                  setPath(e.target.value);
+                }}
+                placeholder="/path/to/project"
+              />
+              <button type="submit" className="pill small">
                 Go
               </button>
             </form>
             <span className="help">The agent works inside this folder. Its AGENTS.md or CLAUDE.md is loaded as project instructions.</span>
           </div>
+          {hosted ? (
+            <form
+              className="field"
+              onSubmit={(e) => {
+                e.preventDefault();
+                setBusy(true);
+                api.createWorkspace(newName.trim(), gitUrl.trim()).then(
+                  (created) => create(created.path),
+                  (err) => {
+                    setError(String(err.message));
+                    setBusy(false);
+                  },
+                );
+              }}
+            >
+              <label htmlFor="newws">New workspace</label>
+              <div className="panelTools" style={{ marginBottom: 0 }}>
+                <input id="newws" className="input" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="name" />
+                <input className="input mono" value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/… (optional)" />
+                <button type="submit" className="pill small" disabled={busy || (!newName.trim() && !gitUrl.trim())}>
+                  <FolderPlus size={13} /> {gitUrl.trim() ? "Clone" : "Create"}
+                </button>
+              </div>
+            </form>
+          ) : null}
           {recent.length ? (
             <>
-              <div className="pixelLabel" style={{ marginBottom: 6 }}>
+              <div className="sectionLabel" style={{ marginBottom: 6 }}>
                 Recent
               </div>
               <div className="dirList" style={{ marginBottom: 14 }}>
@@ -79,7 +131,7 @@ export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string
           ) : null}
           {listing ? (
             <>
-              <div className="pixelLabel" style={{ marginBottom: 6 }}>
+              <div className="sectionLabel" style={{ marginBottom: 6 }}>
                 Browse
               </div>
               <div className="dirList scroll">
@@ -90,7 +142,7 @@ export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string
                 ) : null}
                 {listing.entries.map((entry) => (
                   <button key={entry.path} className="dirRow" onClick={() => browse(entry.path)} onDoubleClick={() => create(entry.path)}>
-                    {entry.git ? <FolderGit2 size={14} color="var(--tura-dot)" /> : <Folder size={14} className="faint" />} {entry.name}
+                    {entry.git ? <FolderGit2 size={14} color="var(--dot)" /> : <Folder size={14} className="faint" />} {entry.name}
                   </button>
                 ))}
                 {listing.entries.length === 0 ? <div className="dirRow faint">No subfolders</div> : null}
@@ -100,11 +152,11 @@ export function NewSessionDialog({ recent, onClose, onCreate }: { recent: string
           {error ? <p className="small" style={{ color: "var(--err)" }}>{error}</p> : null}
         </div>
         <div className="dialogFoot">
-          <button className="button" onClick={onClose}>
+          <button className="pill" onClick={onClose}>
             Cancel
           </button>
-          <button className="button primary" onClick={() => create(path)} disabled={busy || !path.trim()}>
-            {busy ? "Starting…" : "Start session here"}
+          <button className="pill ink" onClick={() => create(path)} disabled={busy || !path.trim()}>
+            {busy ? "Starting…" : action}
           </button>
         </div>
       </div>

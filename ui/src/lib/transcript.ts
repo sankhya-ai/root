@@ -4,7 +4,7 @@
 // So the fold mutates in place and the view re-renders on a version counter,
 // rather than copying the whole transcript per delta.
 
-import type { ApprovalRequest, DisplayBlock, MemoryItem, TokenUsage, ToolReturnValue, WireEvent } from "./types.ts";
+import type { ApprovalRequest, DisplayBlock, Flow, MemoryItem, ProcessInfo, TokenUsage, ToolReturnValue, WireEvent } from "./types.ts";
 
 export type ApprovalStatus = "pending" | "approve" | "approve_for_session" | "reject";
 
@@ -12,10 +12,12 @@ export interface ApprovalState {
   request: ApprovalRequest;
   status: ApprovalStatus;
   auto: boolean;
+  /** Why the host settled it without asking ("read-only command", "trusted after 3 approvals"…). */
+  reason?: string;
 }
 
 export type Block =
-  | { kind: "user"; key: string; turn: string | null; text: string; attachments: { name: string; mime: string }[]; memory: MemoryItem[] }
+  | { kind: "user"; key: string; turn: string | null; ts: number; text: string; attachments: { name: string; mime: string }[]; memory: MemoryItem[] }
   | { kind: "text"; key: string; turn: string | null; text: string }
   | { kind: "think"; key: string; turn: string | null; text: string }
   | {
@@ -31,10 +33,13 @@ export type Block =
     }
   | { kind: "approval"; key: string; turn: string | null; approval: ApprovalState }
   | { kind: "notice"; key: string; turn: string | null; tone: "info" | "warn" | "error"; text: string }
+  | { kind: "flow"; key: string; turn: string | null; flow: Flow }
+  | { kind: "learned"; key: string; turn: string | null; ok: boolean; summary: string; mode: string; skills: string[]; memories: number; promoted: number; error?: string }
   | {
       kind: "turn_end";
       key: string;
       turn: string | null;
+      ts: number;
       status: string;
       duration?: number;
       error?: string;
@@ -65,6 +70,7 @@ export interface TranscriptState {
   todos: TodoItem[];
   compacting: boolean;
   pending: Map<string, ApprovalState>;
+  processes: Map<string, ProcessInfo>;
   lastSeq: number;
   version: number;
 }
@@ -83,6 +89,7 @@ export function createTranscript(): TranscriptState {
     todos: [],
     compacting: false,
     pending: new Map(),
+    processes: new Map(),
     lastSeq: 0,
     version: 0,
   };
@@ -143,6 +150,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         kind: "user",
         key: nextKey("user"),
         turn,
+        ts: event.ts,
         text: String(p.text ?? ""),
         attachments: Array.isArray(p.attachments) ? p.attachments : [],
         memory: Array.isArray(p.memory) ? p.memory : [],
@@ -217,6 +225,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       if (existing) {
         existing.status = status;
         existing.auto = Boolean(p.auto);
+        existing.reason = p.reason ? String(p.reason) : undefined;
         state.pending.delete(id);
       } else {
         const tool = findTool(state, String(p.tool_call_id ?? ""));
@@ -231,6 +240,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
           },
           status,
           auto: Boolean(p.auto),
+          reason: p.reason ? String(p.reason) : undefined,
         };
         if (tool) tool.approval = approval;
       }
@@ -273,6 +283,45 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       break;
     case "MemoryCheckpoint":
       break;
+    case "TrustChanged": {
+      const key = String(p.key ?? "").replace(/^run command:/, "");
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: p.promoted ? `root now runs \`${key}\` without asking — you approved it ${p.approvals} times.` : `root will ask again before \`${key}\`.`,
+      });
+      break;
+    }
+    case "FlowUpdated": {
+      const flow = p as Flow;
+      const existing = state.blocks.find((b): b is Extract<Block, { kind: "flow" }> => b.kind === "flow" && b.flow.id === flow.id);
+      if (existing) existing.flow = flow;
+      else state.blocks.push({ kind: "flow", key: nextKey("flow"), turn, flow });
+      break;
+    }
+    case "LearningReviewed": {
+      const candidates: { kind: string; title: string }[] = Array.isArray(p.candidates) ? p.candidates : [];
+      const promoted = Array.isArray(p.promoted) ? p.promoted.length : 0;
+      if (!candidates.length && !promoted && p.ok !== false) break;
+      state.blocks.push({
+        kind: "learned",
+        key: nextKey("learned"),
+        turn,
+        ok: p.ok !== false,
+        summary: String(p.summary ?? ""),
+        mode: String(p.mode ?? "review"),
+        skills: candidates.filter((c) => c.kind === "skill").map((c) => c.title),
+        memories: candidates.filter((c) => c.kind === "memory").length,
+        promoted,
+        error: p.error ? String(p.error) : undefined,
+      });
+      break;
+    }
+    case "ProcessUpdated":
+      state.processes.set(String(p.id), p as ProcessInfo);
+      break;
     case "RuntimeStatus": {
       if (p.state === "exited" || p.state === "failed") {
         state.blocks.push({
@@ -295,6 +344,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         kind: "turn_end",
         key: nextKey("end"),
         turn,
+        ts: event.ts,
         status: String(p.status ?? "finished"),
         duration: typeof p.duration === "number" ? p.duration : undefined,
         error: p.error ? String(p.error) : undefined,

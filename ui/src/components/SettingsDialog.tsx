@@ -28,6 +28,8 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
   useEscape(onClose);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [key, setKey] = useState("");
+  const [parallelKey, setParallelKey] = useState("");
+  const [firecrawlKey, setFirecrawlKey] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsError, setModelsError] = useState("");
   const [filter, setFilter] = useState("");
@@ -66,8 +68,10 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
     setSaving(true);
     setError("");
     try {
-      const saved = await api.saveSettings({ ...settings, openrouter_api_key: key });
+      const saved = await api.saveSettings({ ...settings, openrouter_api_key: key, parallel_api_key: parallelKey, firecrawl_api_key: firecrawlKey });
       setKey("");
+      setParallelKey("");
+      setFirecrawlKey("");
       onSaved(saved);
       onClose();
     } catch (e) {
@@ -87,7 +91,7 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
           </button>
         </div>
         <div className="dialogBody scroll">
-          <div className="pixelLabel sectionTitle" style={{ marginTop: 0 }}>
+          <div className="dialogSection" style={{ marginTop: 0 }}>
             Model provider · OpenRouter
           </div>
           <div className="field">
@@ -107,7 +111,9 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
             <span className="help">
               {settings.api_key_source === "environment"
                 ? "Using OPENROUTER_API_KEY from the server's environment."
-                : "Stored on this machine only (0600). One key covers the agent, Jev, web search, and Dhee's OpenRouter lane."}
+                : health?.mode === "hosted"
+                  ? "Your own key, used instead of the server's. The agent never sees it: runtimes reach the model through the server."
+                  : "Stored on this machine only (0600). One key covers the agent, Jev, the learning reviewer, and Dhee's OpenRouter lane."}
               {settings.api_key_source === "settings" ? (
                 <>
                   {" "}
@@ -175,7 +181,7 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
             />
           </div>
 
-          <div className="pixelLabel sectionTitle">Jev step director</div>
+          <div className="dialogSection">Jev step director</div>
           <div className="field">
             <Segmented
               value={settings.director_mode}
@@ -192,7 +198,7 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
             </span>
           </div>
 
-          <div className="pixelLabel sectionTitle">Dhee memory</div>
+          <div className="dialogSection">Dhee memory</div>
           <div className="field">
             <Segmented
               value={settings.memory_mode}
@@ -221,29 +227,70 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
             </div>
           ) : null}
 
-          <div className="pixelLabel sectionTitle">Tools & defaults</div>
-          <div className="fieldRow">
-            <div className="field">
-              <label>Web search</label>
-              <Segmented
-                value={settings.web_search ? "on" : "off"}
-                options={[
-                  { value: "on", label: "On" },
-                  { value: "off", label: "Off" },
-                ]}
-                onChange={(v) => set("web_search", v === "on")}
-              />
-              <span className="help">Through OpenRouter’s web plugin ({settings.search_model}).</span>
-            </div>
-            <div className="field">
-              <label htmlFor="mode">New sessions start in</label>
-              <select id="mode" className="input" value={settings.default_permission_mode} onChange={(e) => set("default_permission_mode", e.target.value as Settings["default_permission_mode"])}>
-                <option value="default">Ask before acting</option>
-                <option value="accept_edits">Accept edits</option>
-                <option value="plan">Plan</option>
-                <option value="yolo">Auto-approve all</option>
-              </select>
-            </div>
+          <div className="dialogSection">Web search</div>
+          <div className="field">
+            <Segmented
+              value={settings.web_search ? "on" : "off"}
+              options={[
+                { value: "on", label: "On" },
+                { value: "off", label: "Off" },
+              ]}
+              onChange={(v) => set("web_search", v === "on")}
+            />
+            <span className="help">
+              Free, no key needed: Parallel's search first, then Firecrawl Keyless. Both limit keyless use per IP address; a key lifts the limit (worth it on a shared server).
+            </span>
+          </div>
+          {settings.web_search ? (
+            <>
+              <div className="fieldRow">
+                <div className="field">
+                  <label htmlFor="pk">Parallel key (optional)</label>
+                  <input id="pk" className="input" type="password" autoComplete="off" placeholder={settings.parallel_key_set ? "Saved — leave blank to keep" : "not needed"} value={parallelKey} onChange={(e) => setParallelKey(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label htmlFor="fk">Firecrawl key (optional)</label>
+                  <input id="fk" className="input" type="password" autoComplete="off" placeholder={settings.firecrawl_key_set ? "Saved — leave blank to keep" : "not needed"} value={firecrawlKey} onChange={(e) => setFirecrawlKey(e.target.value)} />
+                </div>
+              </div>
+              <div className="field">
+                <label>
+                  <input type="checkbox" checked={settings.web_search_paid_fallback} onChange={(e) => set("web_search_paid_fallback", e.target.checked)} /> If both free searches fail, fall back to
+                  OpenRouter's paid web plugin ({settings.search_model})
+                </label>
+              </div>
+            </>
+          ) : null}
+
+          <div className="dialogSection">Learning</div>
+          <div className="field">
+            <Segmented
+              value={settings.learning_mode}
+              options={[
+                { value: "review", label: "Ask me" },
+                { value: "auto", label: "Automatic" },
+                { value: "off", label: "Off" },
+              ]}
+              onChange={(v) => set("learning_mode", v)}
+            />
+            <span className="help">
+              After substantial turns a reviewer proposes skills and memories. “Ask me” waits for you on the Learning page; “Automatic” keeps what passes the overfit filter.
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="lm">Reviewer and judge model</label>
+            <input id="lm" className="input mono" placeholder={`${settings.model} (the coding model)`} value={settings.learning_model} onChange={(e) => set("learning_model", e.target.value.trim())} />
+          </div>
+
+          <div className="dialogSection">Defaults</div>
+          <div className="field">
+            <label htmlFor="mode">New sessions start in</label>
+            <select id="mode" className="input" value={settings.default_permission_mode} onChange={(e) => set("default_permission_mode", e.target.value as Settings["default_permission_mode"])}>
+              <option value="default">Ask before acting</option>
+              <option value="accept_edits">Accept edits</option>
+              <option value="plan">Plan</option>
+              <option value="yolo">Auto-approve all</option>
+            </select>
           </div>
           {error ? <p className="small" style={{ color: "var(--err)" }}>{error}</p> : null}
         </div>
@@ -251,10 +298,10 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
           <span className="faint small" style={{ marginRight: "auto", alignSelf: "center" }}>
             Changes apply from the next message.
           </span>
-          <button className="button" onClick={onClose}>
+          <button className="pill" onClick={onClose}>
             Cancel
           </button>
-          <button className="button primary" onClick={save} disabled={saving}>
+          <button className="pill ink" onClick={save} disabled={saving}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

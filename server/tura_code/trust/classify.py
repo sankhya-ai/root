@@ -272,6 +272,25 @@ def _git(args: list[str]) -> tuple[str, str, str]:
     return TIER_TRUST, sub, f"git_{sub}_changes_state"
 
 
+def _command_class(program: str, args: list[str]) -> str:
+    """The trust key's name for a command: specific enough that trusting a
+    project check (`python3 -m unittest`) never trusts a script run (`python3 x.py`)."""
+    positional = _positional(args)
+    lowered = [a.lower() for a in args]
+    if (program in {"python", "python3"} or re.fullmatch(r"python3\.\d+", program)) and len(lowered) >= 2 and lowered[0] == "-m":
+        return f"{program} -m {lowered[1]}"
+    if program in {"uv", "poetry"} and positional[:1] == ["run"] and len(positional) > 1:
+        return f"{program} run {positional[1].rsplit('/', 1)[-1]}"
+    if program in {"npx", "bunx"} and positional:
+        return f"{program} {positional[0].split('@')[0]}"
+    if program in _VERIFY_SUBCOMMANDS and positional:
+        sub = positional[0].lower()
+        if sub in {"run", "run-script", "exec"} and len(positional) > 1:
+            return f"{program} {sub} {positional[1]}"
+        return f"{program} {sub}"
+    return program
+
+
 def _classify_words(words: list[str]) -> tuple[str, str, str, str]:
     """(tier, reason, program, trust key) for one command's words."""
     words = list(words)
@@ -284,16 +303,15 @@ def _classify_words(words: list[str]) -> tuple[str, str, str, str]:
     args = words[1:]
     if program == "git":
         tier, sub, reason = _git(args)
-        return tier, reason, program, f"{ACTION_RUN_COMMAND}:git {sub}".rstrip() if tier == TIER_TRUST else ""
+        return tier, reason, program, f"{ACTION_RUN_COMMAND}:git {sub}".rstrip()
     if program in _READ_PROGRAMS:
         reason = _read_exception(program, args)
-        return (TIER_TRUST, reason, program, f"{ACTION_RUN_COMMAND}:{program}") if reason else (TIER_READ, "", program, "")
+        return (TIER_TRUST if reason else TIER_READ), reason, program, f"{ACTION_RUN_COMMAND}:{program}"
     tier, reason = _check_command(program, args)
-    if tier != TIER_TRUST:
-        return tier, reason, program, ""
-    positional = _positional(args)
-    sub = positional[0].lower() if program in _VERIFY_SUBCOMMANDS and positional else ""
-    return tier, reason, program, f"{ACTION_RUN_COMMAND}:{program}{f' {sub}' if sub else ''}"
+    return tier, reason, program, f"{ACTION_RUN_COMMAND}:{_command_class(program, args)}"
+
+
+_RANK = {TIER_READ: 0, TIER_VERIFY: 1, TIER_TRUST: 2}
 
 
 def classify_command(command: str) -> Classification:
@@ -315,16 +333,19 @@ def classify_command(command: str) -> Classification:
 
     programs: list[str] = []
     tiers: list[str] = []
-    trust_key = ""
+    # The key names the segment that decided the tier: in `cd app && pytest`
+    # that is `pytest`, not `cd`.
+    key, key_rank = "", -1
     for segment in segments:
-        tier, reason, program, key = _classify_words(segment)
+        tier, reason, program, segment_key = _classify_words(segment)
         if not program:
             continue
         programs.append(program)
         tiers.append(tier)
         if tier == TIER_TRUST:
             reasons.append(reason)
-            trust_key = trust_key or key
+        if _RANK[tier] > key_rank:
+            key, key_rank = segment_key, _RANK[tier]
 
     if not programs:
         return Classification(TIER_TRUST, f"{ACTION_RUN_COMMAND}:(empty)", effects=("unknown",), reasons=tuple(reasons or ["no_command"]))
@@ -336,10 +357,9 @@ def classify_command(command: str) -> Classification:
     if not effects:
         effects.add("read")
     if TIER_TRUST in tiers or reasons:
-        key = trust_key or f"{ACTION_RUN_COMMAND}:{programs[0]}"
         return Classification(TIER_TRUST, key, tuple(programs), tuple(sorted(effects)), tuple(r for r in reasons if r))
     tier = TIER_VERIFY if TIER_VERIFY in tiers else TIER_READ
-    return Classification(tier, f"{ACTION_RUN_COMMAND}:{programs[0]}", tuple(programs), tuple(sorted(effects)))
+    return Classification(tier, key, tuple(programs), tuple(sorted(effects)))
 
 
 def command_of(payload: dict[str, Any]) -> str:

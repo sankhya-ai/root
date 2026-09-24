@@ -12,6 +12,7 @@ mod read;
 mod read_media;
 mod replace;
 mod tolerant;
+mod walk;
 mod write;
 
 pub use glob::{Glob, GlobParams};

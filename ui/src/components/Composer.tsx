@@ -1,5 +1,5 @@
 import { ArrowUp, Paperclip, Square, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import type { Attachment, SlashCommand } from "../lib/types.ts";
 
@@ -32,7 +32,9 @@ export function Composer({
   onSend,
   onStop,
   draftKey,
+  chips,
 }: {
+  chips?: ReactNode;
   running: boolean;
   disabled: boolean;
   placeholder: string;
@@ -234,9 +236,18 @@ export function Composer({
         }}
         aria-label="Message root"
       />
+      {running ? (
+        <button className="sendButton" onClick={onStop} title="Stop (Esc)" aria-label="Stop">
+          <Square size={13} fill="currentColor" />
+        </button>
+      ) : (
+        <button className="sendButton" onClick={submit} disabled={disabled || (!text.trim() && !attachments.length)} title="Send (Enter)" aria-label="Send">
+          <ArrowUp size={18} />
+        </button>
+      )}
       <div className="composerBar">
-        <button className="iconButton" onClick={() => picker.current?.click()} title="Attach files or images" disabled={disabled}>
-          <Paperclip size={16} />
+        <button className="chip" onClick={() => picker.current?.click()} title="Attach files or images" disabled={disabled} aria-label="Attach">
+          <Paperclip size={15} />
         </button>
         <input
           ref={picker}
@@ -248,19 +259,11 @@ export function Composer({
             e.target.value = "";
           }}
         />
-        <span className="faint small">
+        {chips}
+        <span className="spacer" />
+        <span className="faint small hideNarrow">
           <span className="kbd">/</span> commands · <span className="kbd">@</span> files
         </span>
-        <span className="spacer" />
-        {running ? (
-          <button className="stopButton" onClick={onStop} title="Stop (Esc)">
-            <Square size={13} fill="currentColor" /> Stop
-          </button>
-        ) : (
-          <button className="sendButton" onClick={submit} disabled={disabled || (!text.trim() && !attachments.length)} title="Send (Enter)">
-            <ArrowUp size={18} />
-          </button>
-        )}
       </div>
     </div>
   );

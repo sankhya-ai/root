@@ -54,6 +54,21 @@ def test_trust_keys_name_the_action_class():
     assert trust.classify_command("git push --force").key == "run command:git push"
     assert trust.classify_command("npm install").key == "run command:npm install"
     assert trust.classify_command("FOO=1 python3 x.py").key == "run command:python3"
+    # The segment that decided the tier names the key, not the first one.
+    assert trust.classify_command("cd app && python3 -m unittest -q test_stats").key == "run command:python3 -m unittest"
+    assert trust.classify_command("ls && rm -rf build").key == "run command:rm"
+    assert trust.classify_command("npm run dev").key == "run command:npm run dev"
+
+
+def test_trusting_a_check_never_trusts_a_script(tmp_path):
+    """Approving `python3 -m unittest` must not auto-approve `python3 anything.py`."""
+    ledger = trust.TrustLedger(tmp_path / "t.json")
+    check = trust.classify_command("python3 -m unittest -q")
+    script = trust.classify_command("python3 deploy.py")
+    assert check.key != script.key
+    for _ in range(3):
+        ledger.record(check.key, approved=True)
+    assert trust.decide(_command("python3 deploy.py"), mode="default", ledger=ledger).response is None
 
 
 def test_ledger_promotes_after_three_and_demotes_on_reject(tmp_path):

@@ -1,4 +1,4 @@
-use kaos::KaosPath;
+use kaos::{KaosPath, get_current_kaos};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -8,6 +8,7 @@ use crate::soul::agent::Runtime;
 use crate::tools::utils::load_desc;
 use crate::utils::{is_within_directory, list_directory};
 
+use super::walk;
 use super::{GLOB_DESC, MAX_MATCHES, resolve_tool_path};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -59,18 +60,6 @@ impl CallableTool2 for Glob {
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
-        if params.pattern.starts_with("**") {
-            let listing = list_directory(&self.work_dir).await;
-            return tool_error(
-                listing,
-                format!(
-                    "Pattern `{}` starts with '**' which is not allowed. This would recursively search all directories and may include large directories like `node_modules`. Use more specific patterns instead. For your convenience, a list of all files and directories in the top level of the working directory is provided below.",
-                    params.pattern
-                ),
-                "Unsafe pattern",
-            );
-        }
-
         let requested_dir = if let Some(directory) = params.directory.as_deref() {
             KaosPath::new(directory).expanduser()
         } else {
@@ -108,17 +97,50 @@ impl CallableTool2 for Glob {
             );
         }
 
-        let matches = match dir.glob(&params.pattern, true).await {
-            Ok(matches) => matches,
-            Err(err) => {
-                return tool_error(
-                    "",
-                    format!(
-                        "Failed to search for pattern {}. Error: {err}",
-                        params.pattern
-                    ),
-                    "Glob failed",
-                );
+        let recursive = params.pattern.starts_with("**");
+        let local = get_current_kaos().name() == "local";
+        if recursive && !local {
+            let listing = list_directory(&self.work_dir).await;
+            return tool_error(
+                listing,
+                format!(
+                    "Pattern `{}` starts with '**', which is only supported on a local workspace. Use a more specific pattern; the top level of the working directory is listed below.",
+                    params.pattern
+                ),
+                "Unsupported pattern",
+            );
+        }
+        let mut walk_truncated = false;
+        let matches = if recursive {
+            // Pruned and bounded: never node_modules, .git, build output.
+            let root = dir.as_path().to_path_buf();
+            let pattern = params.pattern.clone();
+            let include_dirs = params.include_dirs;
+            match tokio::task::spawn_blocking(move || walk::recursive_glob(&root, &pattern, include_dirs)).await {
+                Ok(Ok(walked)) => {
+                    walk_truncated = walked.truncated;
+                    walked.matches.iter().map(|p| KaosPath::unsafe_from_local_path(p)).collect::<Vec<_>>()
+                }
+                Ok(Err(err)) => {
+                    return tool_error("", format!("Invalid pattern {}: {err}", params.pattern), "Glob failed");
+                }
+                Err(err) => {
+                    return tool_error("", format!("Search failed: {err}"), "Glob failed");
+                }
+            }
+        } else {
+            match dir.glob(&params.pattern, true).await {
+                Ok(matches) => matches,
+                Err(err) => {
+                    return tool_error(
+                        "",
+                        format!(
+                            "Failed to search for pattern {}. Error: {err}",
+                            params.pattern
+                        ),
+                        "Glob failed",
+                    );
+                }
             }
         };
 
@@ -140,6 +162,9 @@ impl CallableTool2 for Glob {
             )
         };
 
+        if walk_truncated {
+            message.push_str(" The search stopped early in a very large tree; narrow the pattern or set `directory`.");
+        }
         if filtered.len() > MAX_MATCHES {
             filtered.truncate(MAX_MATCHES);
             message.push_str(&format!(

@@ -107,24 +107,36 @@ async fn test_glob_multiple_matches() {
     assert!(result.message.contains("Found 1 matches"));
 }
 
+/// `**/…` searches the whole workspace, skipping dependency and VCS directories
+/// (root's change: the upstream tool refused any pattern starting with `**`).
 #[tokio::test]
-async fn test_glob_recursive_pattern_prohibited() {
+async fn test_glob_leading_double_star_is_pruned_not_refused() {
     let fixture = RuntimeFixture::new();
     let work_dir = fixture.runtime.builtin_args.KIMI_WORK_DIR.clone();
     setup_test_files(&work_dir).await;
+    (work_dir.clone() / "node_modules" / "dep")
+        .mkdir(true, true)
+        .await
+        .expect("mkdir");
+    (work_dir.clone() / "node_modules" / "dep" / "vendored.py")
+        .write_text("x")
+        .await
+        .expect("write file");
     let tool = Glob::new(&fixture.runtime);
 
     let result = tool
-        .call_typed(params("**/*.py", Some(&work_dir), true))
+        .call_typed(params("**/*.py", Some(&work_dir), false))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
-    assert_eq!(result.brief(), "Unsafe pattern");
+    assert!(!result.is_error, "{}", result.message);
+    let output = match result.output {
+        kosong::tooling::ToolOutput::Text(text) => text.replace("\\", "/"),
+        _ => String::new(),
+    };
+    assert!(output.contains("setup.py"));
+    assert!(output.contains("src/main/app.py"));
+    assert!(output.contains("src/test/test_app.py"));
+    assert!(!output.contains("node_modules"), "{output}");
 }
 
 #[tokio::test]
@@ -453,25 +465,13 @@ async fn test_glob_enhanced_double_star_validation() {
         .call_typed(params("**/*.txt", Some(&work_dir), true))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
-    assert!(
-        result
-            .message
-            .contains("Use more specific patterns instead")
-    );
+    assert!(!result.is_error);
     let output = match result.output {
         kosong::tooling::ToolOutput::Text(text) => text,
         _ => String::new(),
     };
-    assert!(output.contains("file1.txt"));
-    assert!(output.contains("file2.py"));
-    assert!(output.contains("src"));
-    assert!(output.contains("docs"));
+    // Real matches now, not the top-level listing the refusal used to return.
+    assert_eq!(output.trim(), "file1.txt");
 }
 
 #[tokio::test]
@@ -571,12 +571,12 @@ async fn test_glob_wildcard_with_double_star_patterns() {
         .call_typed(params("**/main/*.py", Some(&work_dir), true))
         .await;
 
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
+    assert!(!result.is_error);
+    let found = match &result.output {
+        kosong::tooling::ToolOutput::Text(text) => text.replace("\\", "/"),
+        _ => String::new(),
+    };
+    assert!(found.contains("src/main/app.py"), "{found}");
 
     let result = tool
         .call_typed(params("src/**/test_*.py", Some(&work_dir), true))
@@ -609,10 +609,5 @@ async fn test_glob_pattern_edge_cases() {
     let result = tool
         .call_typed(params("**/*.txt", Some(&work_dir), true))
         .await;
-    assert!(result.is_error);
-    assert!(
-        result
-            .message
-            .contains("starts with '**' which is not allowed")
-    );
+    assert!(!result.is_error);
 }

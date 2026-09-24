@@ -73,6 +73,38 @@ export function describeTool(name: string, rawArgs: string, workspace?: string):
       return { icon: "memory", verb: "Checkpoint", subject: short(args.summary) };
     case "Think":
       return { icon: "agent", verb: "Think", subject: short(args.thought) };
+    case "process": {
+      const id = String(args.process_id ?? "");
+      switch (args.action) {
+        case "start":
+          return { icon: "terminal", verb: "Start in the background", subject: short(args.command, 120) };
+        case "list":
+          return { icon: "terminal", verb: "List background processes", subject: "" };
+        case "kill":
+          return { icon: "terminal", verb: "Stop process", subject: id };
+        case "write":
+        case "submit":
+        case "close":
+          return { icon: "terminal", verb: "Send input to", subject: id };
+        default:
+          return { icon: "terminal", verb: "Check process", subject: id };
+      }
+    }
+    case "coding_flow": {
+      const id = String(args.flow_id ?? "");
+      const verbs: Record<string, string> = {
+        create: "Prepare a coding flow",
+        start: "Run coding flow",
+        status: "Check coding flow",
+        list: "List coding flows",
+        review: "Review coding flow",
+        stop: "Stop coding flow",
+        cancel: "Discard coding flow",
+        apply: "Apply coding flow",
+        rollback: "Roll back coding flow",
+      };
+      return { icon: "agent", verb: verbs[String(args.operation)] ?? "Coding flow", subject: args.operation === "create" ? short(args.task) : id };
+    }
     default:
       return { icon: "plug", verb: name, subject: short(Object.values(args)[0] ?? "") };
   }

@@ -1,11 +1,11 @@
-import { Brain, Compass, Cpu, PanelRight, WifiOff, X } from "lucide-react";
+import { Brain, Compass, Cpu, PanelRight, Shield, WifiOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api.ts";
 import { useSession } from "../lib/useSession.ts";
 import type { Attachment, Health, PermissionMode, Session, SlashCommand } from "../lib/types.ts";
 import { Composer } from "./Composer.tsx";
-import { Inspector, type InspectorTab } from "./Inspector.tsx";
+import { Inspector, type InspectorTab } from "./inspector/Inspector.tsx";
 import { MODE_ORDER, ModeMenu } from "./ModeMenu.tsx";
 import { Transcript } from "./Transcript.tsx";
 
@@ -25,6 +25,8 @@ const SUGGESTIONS = [
 export function SessionView({
   sessionId,
   health,
+  initialPrompt,
+  onInitialSent,
   inspectorOpen,
   onToggleInspector,
   onSessionChange,
@@ -32,6 +34,8 @@ export function SessionView({
 }: {
   sessionId: string;
   health: Health | null;
+  initialPrompt?: string;
+  onInitialSent?: () => void;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
   onSessionChange: (session: Session) => void;
@@ -39,11 +43,12 @@ export function SessionView({
 }) {
   const handle = useSession(sessionId, onSessionChange);
   const { transcript, session, connection, error } = handle;
-  const [tab, setTab] = useState<InspectorTab>("plan");
+  const [tab, setTab] = useState<InspectorTab>("changes");
   const [files, setFiles] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [injected, setInjected] = useState<{ text: string; n: number } | null>(null);
   const turnsSeen = useRef(0);
+  const sentInitial = useRef(false);
 
   const workspace = session?.workspace ?? "";
   const turnEnds = transcript.blocks.filter((b) => b.kind === "turn_end").length;
@@ -60,17 +65,20 @@ export function SessionView({
     api.files(workspace).then((d) => setFiles(d.files), () => setFiles([]));
   }, [workspace, refreshKey]);
 
+  useEffect(() => {
+    if (initialPrompt && connection === "open" && session && !sentInitial.current) {
+      sentInitial.current = true;
+      handle.send(initialPrompt, []);
+      onInitialSent?.();
+    }
+  }, [initialPrompt, connection, session, handle, onInitialSent]);
+
   const slashCommands = useMemo(() => {
     const fromRuntime = session?.runtime?.slash_commands;
     return fromRuntime && fromRuntime.length ? fromRuntime : DEFAULT_COMMANDS;
   }, [session]);
 
-  const setMode = useCallback(
-    (mode: PermissionMode) => {
-      handle.setMode(mode);
-    },
-    [handle],
-  );
+  const setMode = useCallback((mode: PermissionMode) => handle.setMode(mode), [handle]);
 
   // Esc: reject a waiting approval, else stop the turn. Shift+Tab: cycle modes.
   useEffect(() => {
@@ -87,8 +95,7 @@ export function SessionView({
       }
       if (e.key === "Tab" && e.shiftKey && session) {
         e.preventDefault();
-        const next = MODE_ORDER[(MODE_ORDER.indexOf(session.permission_mode) + 1) % MODE_ORDER.length];
-        setMode(next);
+        setMode(MODE_ORDER[(MODE_ORDER.indexOf(session.permission_mode) + 1) % MODE_ORDER.length]);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -96,20 +103,22 @@ export function SessionView({
   }, [transcript, handle, session, setMode]);
 
   const send = (text: string, attachments: Attachment[]) => handle.send(text, attachments);
+  const approvePlan = () => {
+    setMode("accept_edits");
+    handle.send("The plan is approved. Implement it now, then verify the result.", []);
+  };
 
   const context = transcript.contextUsage;
   const needsKey = health && !health.api_key_set && !health.scripted;
-  const runtimeMissing = health?.runtime.error;
+  const runtime = session?.runtime;
 
   const empty = (
-    <div className="empty">
-      <h2>What should we build?</h2>
-      <div className="muted">
-        Working in <span className="mono">{workspace || "…"}</span>
-      </div>
-      <div className="suggestions">
+    <div className="home" style={{ minHeight: 360 }}>
+      <div className="eyebrow">{workspace.split("/").filter(Boolean).pop() ?? "workspace"}</div>
+      <h2 className="greeting">What should we build?</h2>
+      <div className="homeActions">
         {SUGGESTIONS.map((s) => (
-          <button key={s} className="suggestion" onClick={() => setInjected({ text: s, n: Date.now() })}>
+          <button key={s} className="pill" onClick={() => setInjected({ text: s, n: Date.now() })}>
             {s}
           </button>
         ))}
@@ -127,39 +136,38 @@ export function SessionView({
               {workspace}
             </div>
           </div>
-          {session?.runtime?.model ? (
-            <button className="chip" onClick={onOpenSettings} title="Model (change in settings)">
-              <Cpu size={13} /> {session.runtime.model}
-            </button>
-          ) : null}
-          {session?.runtime?.director && session.runtime.director !== "off" ? (
-            <span className="chip" title="Jev step director">
-              <Compass size={13} /> Jev{session.runtime.director === "shadow" ? " (shadow)" : ""}
+          {runtime?.director && runtime.director !== "off" ? (
+            <span className="chip quiet" title="Jev decides each step: reply, or which tool to call">
+              <Compass size={13} /> Jev{runtime.director === "shadow" ? " (shadow)" : ""}
             </span>
           ) : null}
-          {session?.runtime?.memory && session.runtime.memory !== "off" ? (
-            <span className="chip" title="Dhee memory">
+          {runtime?.memory && runtime.memory !== "off" ? (
+            <span className="chip quiet" title="Dhee long-term memory">
               <Brain size={13} /> Dhee
+            </span>
+          ) : null}
+          {runtime?.sandbox && runtime.sandbox !== "none" ? (
+            <span className="chip quiet" title="Commands run in a sandbox">
+              <Shield size={13} /> Sandboxed
             </span>
           ) : null}
           {context != null ? (
             <span className="meter" title={`Context used: ${Math.round(context * 100)}%`}>
               <span className="track">
-                <span className="fill" style={{ width: `${Math.min(100, Math.round(context * 100))}%`, display: "block" }} />
+                <span className="fill" style={{ width: `${Math.min(100, Math.round(context * 100))}%` }} />
               </span>
               {Math.round(context * 100)}%
             </span>
           ) : null}
-          {session ? <ModeMenu mode={session.permission_mode} onChange={setMode} /> : null}
-          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Toggle panel">
+          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files, plan, memory, processes">
             <PanelRight size={17} />
           </button>
         </header>
-        {runtimeMissing ? <div className="banner error">{runtimeMissing}</div> : null}
+        {health?.runtime.error ? <div className="banner error">{health.runtime.error}</div> : null}
         {needsKey ? (
           <div className="banner">
             <span className="grow">Add an OpenRouter API key to start working.</span>
-            <button className="button primary" onClick={onOpenSettings}>
+            <button className="pill ink small" onClick={onOpenSettings}>
               Open settings
             </button>
           </div>
@@ -177,7 +185,16 @@ export function SessionView({
             </button>
           </div>
         ) : null}
-        <Transcript state={transcript} workspace={workspace} onApprove={handle.approve} empty={empty} />
+        <Transcript
+          state={transcript}
+          workspace={workspace}
+          onApprove={handle.approve}
+          empty={empty}
+          hasMore={handle.hasMore}
+          onLoadEarlier={() => void handle.loadEarlier()}
+          planMode={session?.permission_mode === "plan"}
+          onApprovePlan={approvePlan}
+        />
         <div className="composerWrap">
           <div className="column">
             <ComposerWithInjection
@@ -191,8 +208,17 @@ export function SessionView({
               onSend={send}
               onStop={handle.cancel}
               draftKey={sessionId}
+              chips={
+                <>
+                  {session ? <ModeMenu mode={session.permission_mode} onChange={setMode} /> : null}
+                  {runtime?.model ? (
+                    <button className="chip quiet" onClick={onOpenSettings} title="Model (change in settings)">
+                      <Cpu size={13} /> {runtime.model}
+                    </button>
+                  ) : null}
+                </>
+              }
             />
-            <div className="composerHint">root can make mistakes. Review changes before you ship them.</div>
           </div>
         </div>
       </main>
@@ -202,8 +228,9 @@ export function SessionView({
           onTab={setTab}
           onClose={onToggleInspector}
           workspace={workspace}
-          sessionId={sessionId}
+          session={session}
           todos={transcript.todos}
+          processes={[...transcript.processes.values()]}
           refreshKey={refreshKey}
           files={files}
           onMention={(path) => setInjected({ text: `@${path} `, n: Date.now() })}

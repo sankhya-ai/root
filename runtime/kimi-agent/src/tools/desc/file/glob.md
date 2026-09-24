@@ -14,5 +14,5 @@ The optional `directory` parameter accepts either an absolute path inside the wo
 - `*.config.{js,ts}` - Config files with .js or .ts extension
 
 **Bad example patterns:**
-- `**`, `**/*.py` - Any pattern starting with '**' will be rejected. Because it would recursively search all directories and subdirectories, which is very likely to yield large result that exceeds your context size. Always use more specific patterns like `src/**/*.py` instead.
+- `**` alone - matches everything. `**/*.py` is fine: it searches the whole workspace but skips dependency, VCS, build and cache directories (`node_modules`, `.git`, `target`, `dist`, `.venv`, `__pycache__`…). Prefer `src/**/*.py` when you know where to look.
 - `node_modules/**/*.js` - Although this does not start with '**', it would still highly possible to yield large result because `node_modules` is well-known to contain too many directories and files. Avoid recursively searching in such directories, other examples include `venv`, `.venv`, `__pycache__`, `target`. If you really need to search in a dependency, use more specific patterns like `node_modules/react/src/*` instead.

@@ -1,0 +1,135 @@
+/* Home, sign-in, and the full pages (Learning, Coding flows, Trust). */
+
+/* ---------- home ---------- */
+
+.home {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  justify-content: center;
+  min-height: 100%;
+  padding: 24px;
+  text-align: center;
+}
+.eyebrow {
+  color: var(--ink-muted);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.19em;
+  text-transform: uppercase;
+}
+.greeting {
+  font-family: var(--font-display);
+  font-size: 36px;
+  font-weight: 400;
+  letter-spacing: -0.038em;
+  line-height: 1.15;
+  margin: 0;
+}
+.homeActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 760px;
+}
+.homeNote {
+  color: var(--ink-muted);
+  font-size: 13px;
+  max-width: 520px;
+}
+
+/* ---------- home ---------- */
+
+.homeComposer {
+  max-width: 760px;
+  width: 100%;
+}
+.homeList {
+  max-width: 760px;
+  text-align: left;
+  width: 100%;
+}
+.homeRow {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  display: flex;
+  gap: 10px;
+  padding: 9px 8px;
+  text-align: left;
+  width: 100%;
+}
+.homeRow:hover,
+.homeRow.active {
+  background: var(--hover);
+}
+.homeRow .grow {
+  flex: 1;
+}
+.homeRow .mono {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- pages ---------- */
+
+.page {
+  padding-bottom: 40px;
+  padding-top: 18px;
+}
+.pageHead {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin: 6px 0 8px;
+}
+.pageTitle {
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+.page .sectionLabel {
+  padding-left: 0;
+}
+.skillText {
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+/* ---------- sign-in ---------- */
+
+.signin {
+  align-items: center;
+  background: var(--ground);
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  padding: 24px;
+}
+.signinCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 420px;
+  padding: 28px;
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .hideNarrow {
+    display: none;
+  }
+}
