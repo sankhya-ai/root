@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import boundary
 from .classify import (
     ACTION_EDIT_FILE,
+    ACTION_EDIT_OUTSIDE,
+    ACTION_READ_OUTSIDE,
     ACTION_RUN_COMMAND,
     TIER_READ,
     TIER_VERIFY,
@@ -40,6 +43,8 @@ class Decision:
         }
         if self.classification is not None:
             info.update(tier=self.classification.tier, effects=list(self.classification.effects), reasons=list(self.classification.reasons))
+        if self.extra.get("outside"):
+            info["outside"] = self.extra["outside"]
         return info
 
 
@@ -50,14 +55,34 @@ def decide(
     ledger: TrustLedger,
     grants: set[str] | frozenset[str] = frozenset(),
     ask_owner: bool = True,
+    workspace: str | None = None,
 ) -> Decision:
     """Settle an approval request by policy, or say it needs the owner.
 
     ``ask_owner=False`` is for unattended work (coding-flow candidates): what
     would go to the owner is rejected instead, and the agent adapts.
+
+    With ``workspace``, anything that reaches outside it — a command's paths,
+    a read or an edit of an outside file — is settled only by a session grant
+    for that folder, in every mode: see ``boundary``.
     """
     action = str(payload.get("action") or "").strip()
     sender = str(payload.get("sender") or "").strip()
+
+    def fence(path: str, reason: str, classification: Classification | None = None) -> Decision:
+        key = boundary.grant_key(path)
+        if boundary.granted(path, grants):
+            return Decision(key, "approve", "allowed for this session", False, classification)
+        if not ask_owner:
+            return Decision(key, "reject", "outside the workspace, and this run is unattended", False, classification)
+        return Decision(key, None, reason, False, classification, extra={"outside": path})
+
+    if workspace and action in (ACTION_READ_OUTSIDE, ACTION_EDIT_OUTSIDE):
+        path = boundary.path_in(str(payload.get("description") or ""))
+        if path and action == ACTION_READ_OUTSIDE and boundary.allowed(path):
+            return Decision(boundary.grant_key(path), "approve", "system or toolchain location", False)
+        if path:
+            return fence(path, "outside the workspace")
 
     def settle(key: str, reason: str, promotable: bool, classification: Classification | None = None) -> Decision:
         if mode == "yolo":
@@ -72,6 +97,10 @@ def decide(
 
     if action == ACTION_RUN_COMMAND:
         classification = classify_command(command_of(payload))
+        reaches = boundary.outside_paths(command_of(payload), workspace) if workspace else []
+        ungranted = [p for p in reaches if not boundary.granted(p, grants)]
+        if ungranted:
+            return fence(ungranted[0], "reaches outside the workspace", classification)
         if classification.tier == TIER_READ:
             return Decision(classification.key, "approve", "read-only command", True, classification)
         if classification.tier == TIER_VERIFY and mode in ("accept_edits", "plan", "flow"):

@@ -55,6 +55,29 @@ class TurnState:
     #: Tool calls that came back as errors, and approvals the owner refused.
     errors: int = 0
     rejections: int = 0
+    #: Commands this turn that ran something (tests, a script, a build) rather
+    #: than only read, and whether an edit has come after the last of them.
+    checks: int = 0
+    unchecked_edits: bool = False
+
+    def note_edit(self) -> None:
+        self.unchecked_edits = True
+
+    def note_check(self) -> None:
+        self.checks += 1
+        self.unchecked_edits = False
+
+    def note_command(self, command: str) -> None:
+        """A command that exercises code checks the edits made before it."""
+        from ..trust import classify_command
+
+        if command.strip() and classify_command(command).tier != "read":
+            self.note_check()
+
+    @property
+    def verified(self) -> bool:
+        """No edit this turn is left without a check run after it."""
+        return not self.unchecked_edits
 
     def reply(self) -> str:
         return " ".join("".join(self.text).split())

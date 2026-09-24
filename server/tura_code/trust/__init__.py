@@ -29,6 +29,7 @@ without surrounding spaces and treats newlines as command separators, so
 from .classify import (
     ACTION_EDIT_FILE,
     ACTION_EDIT_OUTSIDE,
+    ACTION_READ_OUTSIDE,
     ACTION_RUN_COMMAND,
     TIER_READ,
     TIER_TRUST,
@@ -43,6 +44,7 @@ from .policy import Decision, decide
 __all__ = [
     "ACTION_EDIT_FILE",
     "ACTION_EDIT_OUTSIDE",
+    "ACTION_READ_OUTSIDE",
     "ACTION_RUN_COMMAND",
     "PROMOTE_AFTER",
     "TIER_READ",

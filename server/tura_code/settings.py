@@ -47,9 +47,13 @@ class Settings(BaseModel):
     base_url: str = OPENROUTER_BASE_URL
     # Cheap and fast; the harness (Jev, Dhee, tolerant edits, argument repair)
     # is built so a model of this class can do real multi-file work.
-    model: str = "deepseek/deepseek-v4-flash"
+    model: str = "deepseek/deepseek-v4.1-flash"
     max_context_size: int = Field(default=200_000, ge=8_000, le=4_000_000)
     reasoning_effort: ReasoningEffort = ""
+    # Which of the model's OpenRouter providers to prefer. Speed and price
+    # differ a lot between providers of the same model: "" keeps OpenRouter's
+    # own balancing.
+    provider_sort: Literal["", "throughput", "price", "latency"] = ""
     max_steps_per_turn: int = Field(default=100, ge=1, le=1_000)
     # Jev (`typesafe/jev-1.13`) decides, before each step, whether the model
     # should reply or which tool it should call. See runtime/.../director.rs.

@@ -354,7 +354,7 @@ fn question(tools: &[Tool], reply_key: &str, detailed: bool, phase: Phase) -> Va
                     "the request says the reply itself is the work, or says to stop after the steps already taken",
                     "the assistant has to ask the user something only the user can answer"
                 ],
-                "not_when": "the request asks for an action or lookup that no step this turn has done yet and that should come before the reply"
+                "not_when": "the request asks for an action or lookup that no step this turn has done yet and that should come before the reply, or the turn changed files and context.turn_facts says edits_not_yet_exercised"
             }),
             json!({
                 "question": "What should the assistant do next?",
@@ -362,6 +362,8 @@ fn question(tools: &[Tool], reply_key: &str, detailed: bool, phase: Phase) -> Va
                     "Judge the NEXT single action from the request and the steps already taken this turn.",
                     "The request is the authority. When it names the next tool, says NOT to use a kind of tool (for example 'do not draw'), or says to stop, that wins over any tool's own description of when it is useful.",
                     "A step already done successfully does not need doing again unless the request asks for more of it.",
+                    "A file listed in context.turn_facts.files_read_this_turn has been read: do not choose to read it again unless it was edited since or a part not yet seen is needed.",
+                    "When context.turn_facts says edits_not_yet_exercised, the next action runs something that exercises the change (the project's tests, a script that reproduces the problem, the build) — not more reading and not the reply.",
                     "A step the request marks optional ('if it would help') is chosen only when it clearly would."
                 ]
             }),
@@ -373,13 +375,14 @@ fn question(tools: &[Tool], reply_key: &str, detailed: bool, phase: Phase) -> Va
                     "everything the request asks for is done",
                     "a lookup or read the request mentioned was skipped — it existed to inform the reply, and the reply is already written, so it is too late to matter"
                 ],
-                "not_when": "the request requires a tool action AFTER the reply (recording a verdict or grade, saving, sending, drawing that was asked for), or the reply only describes or promises work the request asked the assistant to actually do"
+                "not_when": "the request requires a tool action AFTER the reply (recording a verdict or grade, saving, sending, drawing that was asked for), or the reply only describes or promises work the request asked the assistant to actually do, or the turn changed files and context.turn_facts says edits_not_yet_exercised"
             }),
             json!({
                 "question": "The assistant has just written its reply to the user, which would end the turn. Does the request still require a tool call after that reply, and if so which one?",
                 "rules": [
                     "The request is the authority. When it says a tool is called LAST or after the reply, that call is still owed until a step shows it done.",
                     "Tools that only gather information for the reply are not owed once the reply is written.",
+                    "Changed code is not done until something has run it: when context.turn_facts says edits_not_yet_exercised, a command that exercises the change is still owed.",
                     "Never choose a tool the request says not to use."
                 ]
             }),
@@ -593,6 +596,23 @@ pub fn parse_arguments(text: &str) -> Option<String> {
         return None;
     }
     serde_json::to_string(&value).ok()
+}
+
+/// Whether directed arguments are for this tool at all: every required field
+/// is present. When the harness chose `Shell` and the model answers with an
+/// edit (`{"old", "new"}`), the model meant another step; dispatching the call
+/// would only fail, so the caller lets the model take the step instead.
+pub fn fits(arguments: &str, tool: &Tool) -> bool {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(arguments) else {
+        return false;
+    };
+    let required = tool.parameters.get("required").and_then(Value::as_array);
+    required.map_or(true, |fields| {
+        fields
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|field| map.get(field).is_some_and(|v| !v.is_null()))
+    })
 }
 
 fn schema_name(name: &str) -> String {
@@ -882,5 +902,33 @@ mod tests {
             overrides["response_format"]["json_schema"]["name"],
             "read_learner_record"
         );
+    }
+
+    #[test]
+    fn unexercised_edits_are_part_of_the_state_and_both_questions() {
+        let history = vec![text(Role::User, "fix the bug")];
+        let facts = json!({"turn_facts": {"edits_not_yet_exercised": true, "files_read_this_turn": ["a.py"]}});
+        let state = render_state("You are root.", &history, Some(&facts)).unwrap();
+        assert_eq!(state["context"]["turn_facts"]["edits_not_yet_exercised"], true);
+        let tools = [tool("Shell", "Run a command.")];
+        for phase in [Phase::BeforeStep, Phase::TurnEnd] {
+            let asked = question(&tools, REPLY, true, phase).to_string();
+            assert!(asked.contains("edits_not_yet_exercised"), "{phase:?}");
+        }
+        let before = question(&tools, REPLY, true, Phase::BeforeStep).to_string();
+        assert!(before.contains("files_read_this_turn"));
+    }
+
+    #[test]
+    fn arguments_for_a_different_tool_do_not_fit() {
+        let shell = Tool::new(
+            "Shell",
+            "Run a command.",
+            json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
+        );
+        assert!(fits(r#"{"command": "pytest -q"}"#, &shell));
+        assert!(!fits(r#"{"old": "a", "new": "b"}"#, &shell));
+        assert!(!fits(r#"{"command": null}"#, &shell));
+        assert!(fits(r#"{"q": "x"}"#, &tool("find", "x")));
     }
 }

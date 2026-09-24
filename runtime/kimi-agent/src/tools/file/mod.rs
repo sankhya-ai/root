@@ -49,7 +49,42 @@ pub(super) enum FileKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileKind, detect_file_type};
+    use super::{FileKind, detect_file_type, not_found, repair_path};
+
+    #[test]
+    fn a_missing_file_names_where_files_of_that_name_are() {
+        let ws = tempfile::tempdir().unwrap();
+        let ws = ws.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ws.join("app/docs")).unwrap();
+        std::fs::create_dir_all(ws.join("node_modules/x")).unwrap();
+        std::fs::write(ws.join("app/DESIGN.md"), "x").unwrap();
+        std::fs::write(ws.join("node_modules/x/DESIGN.md"), "x").unwrap();
+        let message = not_found("DESIGN.md", &ws.join("DESIGN.md"), &ws);
+        assert_eq!(message, "`DESIGN.md` does not exist. Did you mean `app/DESIGN.md`? (relative to the working directory)");
+        assert_eq!(not_found("nope.md", &ws.join("nope.md"), &ws), "`nope.md` does not exist.");
+    }
+
+    #[test]
+    fn a_doubled_workspace_or_a_url_suffix_is_put_right_only_when_it_helps() {
+        let ws = tempfile::tempdir().unwrap();
+        let ws = ws.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ws.join("app")).unwrap();
+        std::fs::write(ws.join("app/x.py"), "x").unwrap();
+        let bare = ws.to_string_lossy().trim_start_matches('/').to_string();
+
+        let doubled = ws.join(&bare).join("app/x.py");
+        assert_eq!(repair_path(&doubled, &ws), Some(ws.join("app/x.py")));
+        // A new file in a real directory, written through a doubled path.
+        let new_file = ws.join(&bare).join("app/new.py");
+        assert_eq!(repair_path(&new_file, &ws), Some(ws.join("app/new.py")));
+        assert_eq!(repair_path(&ws.join("app/x.py?after"), &ws), Some(ws.join("app/x.py")));
+        assert_eq!(repair_path(&ws.join("app/x.py#L3"), &ws), Some(ws.join("app/x.py")));
+
+        // Real paths, and misses with nothing to land on, are left alone.
+        assert_eq!(repair_path(&ws.join("app/x.py"), &ws), None);
+        assert_eq!(repair_path(&ws.join("app/missing.py"), &ws), None);
+        assert_eq!(repair_path(&ws.join("app/missing.py?x"), &ws), None);
+    }
 
     fn kind_name(kind: &FileKind) -> &'static str {
         match kind {
@@ -510,6 +545,27 @@ pub(super) fn validate_absolute_path(
     None
 }
 
+pub(super) const FILE_ACTION_READ_OUTSIDE: &str = "read file outside of working directory";
+
+/// With `ROOT_READ_BOUNDARY` set (root; see VENDORED.md), reading outside the
+/// working directory asks, the way editing there does, and the host decides —
+/// in every permission mode. `None` means go ahead; `Some` is the refusal.
+pub(super) async fn approve_outside_read(
+    approval: &crate::soul::approval::Approval,
+    tool: &str,
+    path: &KaosPath,
+    work_dir: &KaosPath,
+) -> Option<ToolReturnValue> {
+    if !env_truthy("ROOT_READ_BOUNDARY") || is_within_directory(&path.canonical(), work_dir) {
+        return None;
+    }
+    let approved = approval
+        .request(tool, FILE_ACTION_READ_OUTSIDE, &format!("Read `{}`", path), None)
+        .await
+        .unwrap_or(false);
+    if approved { None } else { Some(crate::tools::utils::tool_rejected_error()) }
+}
+
 pub(super) fn workspace_scoped_file_tools() -> bool {
     env_truthy("CHOTU_WORKSPACE_SCOPED_FILE_TOOLS")
 }
@@ -526,11 +582,74 @@ fn env_truthy(name: &str) -> bool {
 }
 
 pub(super) fn resolve_tool_path(path: &KaosPath, work_dir: &KaosPath) -> KaosPath {
-    if path.is_absolute() {
+    let resolved = if path.is_absolute() {
         path.canonical()
     } else {
         KaosPath::from(work_dir.as_path().join(path.as_path())).canonical()
+    };
+    match repair_path(resolved.as_path(), work_dir.as_path()) {
+        Some(repaired) => KaosPath::from(repaired),
+        None => resolved,
     }
+}
+
+/// "`x` does not exist." — and, when files of that name exist elsewhere in the
+/// workspace, where they are, so a wrong directory costs one step, not a hunt.
+pub(super) fn not_found(requested: &str, resolved: &std::path::Path, work_dir: &std::path::Path) -> String {
+    let mut message = format!("`{requested}` does not exist.");
+    let Some(name) = resolved.file_name().and_then(|n| n.to_str()) else {
+        return message;
+    };
+    let found = walk::find_by_name(work_dir, name, 5);
+    if !found.is_empty() {
+        let listed = found
+            .iter()
+            .map(|p| format!("`{}`", p.strip_prefix(work_dir).unwrap_or(p).display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(" Did you mean {listed}? (relative to the working directory)"));
+    }
+    message
+}
+
+/// A path a weaker model mangled, put right — only when the path as written
+/// does not exist and the repair lands on something that does (or, for a new
+/// file, in a directory that does). Two shapes seen in practice (root; see
+/// VENDORED.md): the workspace path written twice (`<ws>/<ws>/app/x.py`, from
+/// joining an absolute path onto the workspace), and a stray URL-ish suffix
+/// (`DESIGN.md?after`, `x.py#L10`).
+pub(super) fn repair_path(resolved: &std::path::Path, work_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if resolved.exists() {
+        return None;
+    }
+    let usable = |candidate: &std::path::Path| {
+        candidate != resolved
+            && (candidate.exists()
+                || (!resolved.parent().is_some_and(|p| p.exists())
+                    && candidate.parent().is_some_and(|p| p.is_dir())))
+    };
+    let text = resolved.to_string_lossy();
+    let root = work_dir.to_string_lossy();
+    let bare = root.trim_start_matches('/');
+    if !bare.is_empty() {
+        if let Some(at) = text.rfind(bare) {
+            if at > 1 {
+                let tail = text[at + bare.len()..].trim_start_matches('/');
+                let candidate = work_dir.join(tail);
+                if usable(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    let name = resolved.file_name()?.to_string_lossy();
+    if let Some(cut) = name.find(['?', '#']).filter(|&i| i > 0) {
+        let candidate = resolved.with_file_name(&name[..cut]);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub(super) async fn read_text_lossy(path: &KaosPath) -> Result<String> {

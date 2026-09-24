@@ -12,6 +12,7 @@ function headline(action: string, description: string, workspace: string): strin
   if (action === "run command") return description.startsWith("Start in the background") ? "Start this in the background?" : "Run this command?";
   if (action === "edit file") return `${description.replace(/^Edit file/, "Edit").replace(/^Write file/, "Write").replace(workspace + "/", "")}?`;
   if (action === "edit file outside of working directory") return `${description} — outside the workspace?`;
+  if (action === "read file outside of working directory") return `${description} — outside the workspace?`;
   if (action === "apply coding flow") return "Merge the reviewed patch into your checkout?";
   if (action === "roll back coding flow") return "Roll back the applied patch?";
   return `${description || action}?`;
@@ -30,7 +31,8 @@ export function ApprovalCard({ approval, workspace, onApprove }: { approval: App
   const { request } = approval;
   const trust = request.trust;
   const tier = trust?.tier === "verify" ? "runs project code" : trust?.tier === "needs_trust" ? "changes state" : null;
-  const keyLabel = trust?.key.replace(/^run command:/, "") ?? request.action;
+  const outsideFolder = trust?.key.startsWith("outside workspace: ") ? trust.key.slice("outside workspace: ".length) : "";
+  const keyLabel = outsideFolder || (trust?.key.replace(/^run command:/, "") ?? request.action);
   return (
     <div className="approvalCard" role="alertdialog" aria-label="Approval needed">
       <header>
@@ -44,6 +46,11 @@ export function ApprovalCard({ approval, workspace, onApprove }: { approval: App
       </header>
       {trust ? (
         <div className="approvalMeta">
+          {trust.outside ? (
+            <span className="approvalChip outside" title="Outside the session's folder, root asks in every mode — Auto-approve all included.">
+              outside the workspace: <code>{trust.outside}</code>
+            </span>
+          ) : null}
           {tier ? <span className="approvalChip">{tier}</span> : null}
           {trust.promotable ? (
             <span className={`approvalChip${trust.approvals > 0 ? " trusted" : ""}`} title="root stops asking after this many approvals in a row; one rejection resets it">
@@ -61,7 +68,7 @@ export function ApprovalCard({ approval, workspace, onApprove }: { approval: App
         <button className="pill ink" autoFocus onClick={() => onApprove(request.id, "approve")}>
           {request.action === "run command" ? "Run" : "Approve"} <span className="kbd">↵</span>
         </button>
-        <button className="pill" onClick={() => onApprove(request.id, "approve_for_session")} title={`Stop asking about “${keyLabel}” in this session`}>
+        <button className="pill" onClick={() => onApprove(request.id, "approve_for_session")} title={outsideFolder ? `Allow reaching ${outsideFolder} for the rest of this session` : `Stop asking about “${keyLabel}” in this session`}>
           Allow for session
         </button>
         <button className="pill danger" onClick={() => onApprove(request.id, "reject")}>

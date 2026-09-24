@@ -22,9 +22,11 @@ pub mod decision;
 pub mod denwarenji;
 pub mod director;
 pub mod kimisoul;
+pub mod leaked_calls;
 pub mod message;
 pub mod repeat_guard;
 pub mod toolset;
+pub mod verify_gate;
 
 #[derive(Debug, Error)]
 #[error("LLM not set")]

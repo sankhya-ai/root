@@ -25,7 +25,7 @@ import json
 import re
 from typing import Any
 
-from ..llm import extract_json_object
+from ..llm import loads_lenient
 
 REVIEW_SCHEMA = "root.learning_review.v1"
 
@@ -47,7 +47,9 @@ Skills are reusable procedures for a kind of task, loaded into later sessions. I
 
 Memories are single durable facts: an owner preference (user_preference), a fact about this project such as a build or test command (project_fact), or a rule of this codebase (constraint).
 
-If nothing is worth keeping, return should_save false with empty lists. Most turns teach nothing new. Return only JSON:
+`verified` says whether every edit in the turn was followed by a command that exercised it (tests, a script, a build). When it is false, the turn's claims of success are unproven: never record them as facts or as a procedure that worked. The lesson, if any, is how this kind of change should have been checked.
+
+If nothing is worth keeping, return should_save false with empty lists. Most turns teach nothing new. Keep it compact: at most two skills and three memories, each list item one short sentence. Return only JSON:
 {"should_save": true, "summary": "one sentence", "skill_candidates": [{"name": "kebab-case-name", "trigger": "when to use it", "lesson": "what to do and why", "steps": ["..."], "verification": ["..."], "pitfalls": ["..."]}], "memory_candidates": [{"kind": "user_preference|project_fact|constraint", "content": "one standalone sentence"}], "rejected_overfit": ["..."]}"""
 
 
@@ -86,6 +88,8 @@ def build_messages(turn: dict[str, Any], skills: list[dict[str, str]]) -> list[d
         "status": turn.get("status"),
         "files_touched": turn.get("files_touched", [])[:30],
         "tool_trace": [{**step, "arguments": clip(redact(step.get("arguments", "")), 300)} for step in turn.get("trace", [])[:40]],
+        "verified": turn.get("verified", True),
+        "checks_run": turn.get("checks", 0),
         "tool_errors": turn.get("errors", 0),
         "owner_rejections": turn.get("rejections", 0),
         "existing_skills": [{"name": s["name"], "description": clip(s.get("description", ""), 200)} for s in skills[:40]],
@@ -103,7 +107,7 @@ def _strings(value: Any, limit: int) -> list[str]:
 
 def parse(text: str) -> dict[str, Any]:
     """The reviewer's answer, normalised and filtered. Raises ValueError on garbage."""
-    raw = json.loads(extract_json_object(text))
+    raw = loads_lenient(text)
     if not isinstance(raw, dict):
         raise ValueError("the review must be a JSON object")
     rejected = _strings(raw.get("rejected_overfit"), 10)

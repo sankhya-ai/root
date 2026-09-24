@@ -26,7 +26,7 @@ Three parts, one product. Read `README.md` for the architecture.
 ## Rules
 
 - No runtime ever holds an API key when the server runs: runtimes reach the model through `llm_proxy` with a per-launch token. Without the proxy (tests) the key is in a 0600 file, never the environment. Commands see `launcher.scrubbed_environment()`.
-- Every approval goes through `trust.decide`. Trust keys name the command class that set the tier (`python3 -m unittest`, never just `python3`), so trusting a check never trusts a script.
+- Every approval goes through `trust.decide`, with the session's workspace: anything reaching outside it (`trust.boundary`) asks in every mode and is never ledger-promoted. Trust keys name the command class that set the tier (`python3 -m unittest`, never just `python3`), so trusting a check never trusts a script.
 - Hosted mode never runs anything unsandboxed: runtimes, `process` starts, flow checks and clones all go through `tenant.sandbox`.
 - A Dhee, reviewer or judge failure is never a failed turn.
 - Nothing reads a whole event log: use `EventLog.page`.

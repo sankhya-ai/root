@@ -21,7 +21,7 @@ Every model call goes through **OpenRouter**. Web search is **free**: keyless Pa
 
 ## Built for weaker, cheaper models
 
-The default model is `deepseek/deepseek-v4-flash`. The harness carries what a small model gets wrong:
+The default model is `deepseek/deepseek-v4.1-flash`. The harness carries what a small model gets wrong:
 
 - **Jev** picks reply-or-tool before each step.
 - **Argument repair** — almost-JSON tool arguments (code fences, raw newlines in a `WriteFile` string, trailing commas, double encoding) are recovered losslessly; cut-off arguments are completed only for read-only tools, never for writes or commands.
@@ -43,7 +43,7 @@ The default model is `deepseek/deepseek-v4-flash`. The harness carries what a sm
 
 ## Quick start (local app)
 
-Prerequisites: Rust (stable), Python 3.11+, Node 22.
+Prerequisites: Rust (stable), Python 3.11–3.13 (3.14 is not supported yet — if it is your default, run `make build PYTHON=python3.12`), Node 22.
 
 ```bash
 make build                         # runtime (cargo), host (venv + pip), UI (vite)
@@ -89,7 +89,9 @@ Settings live in the UI and in `settings.json` (0600) under the data directory.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Coding model | `deepseek/deepseek-v4-flash` | Any OpenRouter model with tool support. |
+| Coding model | `deepseek/deepseek-v4.1-flash` | Any OpenRouter model with tool support. |
+| Reasoning effort | model default | `none` (off), `low`, `medium`, `high`. Some models ignore the effort levels; only `none` is reliably honoured. |
+| Provider preference | balanced | `throughput` (fastest), `price` (cheapest), or OpenRouter's own balancing. |
 | Jev director | on | `on`, `shadow` (record only), `off`. |
 | Dhee memory | local | `local` (offline, lexical), `openrouter` (embeddings), `off`. |
 | Web search | on, keyless | Parallel, then Firecrawl; optional keys; optional paid OpenRouter fallback. |
@@ -107,11 +109,28 @@ Settings live in the UI and in `settings.json` (0600) under the data directory.
 | `TURA_CODE_RUNTIME`, `TURA_CODE_AGENT` | A `kimi-agent` binary / agent spec other than the repository's. |
 | `TURA_CODE_SCRIPTED_ECHO`, `TURA_CODE_SCRIPTED_LLM` | Scripted model and reviewer/judge, for tests and demos. |
 
+## Running benchmarks
+
+`bench/harbor_root.py` runs root on [Terminal-Bench](https://www.tbench.ai/) (or any [Harbor](https://github.com/harbor-framework/harbor) dataset) the official way: each task in its own container, graded by the task's own verifier. It installs a static Linux build of the runtime and the agent spec into the container; the web host's extras (Dhee, learning, processes, flows) are not used there.
+
+```bash
+uv tool install harbor && colima start          # or any Docker
+./bench/build-linux.sh                          # once, and after runtime changes
+export OPENROUTER_API_KEY=sk-or-…
+PYTHONPATH="$PWD" harbor run -d terminal-bench/terminal-bench@latest \
+  -i terminal-bench/<task> --env docker -a bench.harbor_root:Root \
+  -m openrouter/deepseek/deepseek-v4.1-flash -o "$PWD/bench/jobs" \
+  [--ak provider_sort=throughput] [--ak reasoning_effort=none] [--ak director=off]
+```
+
+Use a dedicated OpenRouter key with a spending limit, so cost is measured exactly. Jev's effect has not been measured yet: to compare, run the same tasks with `--ak director=on`, `shadow` and `off`.
+
 ## Security model
 
 - Local-only by default: the `Host` header is checked (DNS rebinding), the API and WebSocket need the same-site cookie, and the WebSocket checks `Origin`.
 - No credential in any runtime's environment or file (the LLM proxy); `*_API_KEY`, `KIMI_*`, `OPENROUTER_*` are scrubbed from every command's environment.
-- Approvals as above; edits outside the workspace and coding-flow applies always ask; unattended flow candidates can only edit, read and run checks.
+- Approvals as above; coding-flow applies always ask; unattended flow candidates can only edit, read and run checks.
+- **The workspace is a boundary in every mode**, "Auto-approve all" included: reading or editing a file outside the session's folder, or a command that reaches outside it (absolute or home paths, `..`, `cd` out), asks the owner. System and toolchain locations (`/usr`, Homebrew, `~/.cargo/registry`…) are exempt, and "Allow for session" covers one folder. Command paths are read as a reviewer would — a best effort; hosted mode's sandbox is the hard wall.
 - Hosted: bubblewrap per runtime and command, confined workspaces, per-person memory scopes.
 
 ## Repository layout

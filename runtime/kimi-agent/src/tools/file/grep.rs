@@ -16,7 +16,7 @@ use crate::soul::agent::Runtime;
 use crate::tools::utils::ToolResultBuilder;
 use crate::utils::is_within_directory;
 
-use super::{GREP_DESC, resolve_tool_path};
+use super::{GREP_DESC, approve_outside_read, resolve_tool_path};
 
 const RG_VERSION: &str = "15.0.0";
 const RG_BASE_URL: &str = "http://cdn.kimi.com/binaries/kimi-cli/rg";
@@ -95,6 +95,7 @@ fn default_output_mode() -> String {
 pub struct Grep {
     description: String,
     work_dir: KaosPath,
+    approval: std::sync::Arc<crate::soul::approval::Approval>,
 }
 
 impl Grep {
@@ -102,6 +103,7 @@ impl Grep {
         Self {
             description: GREP_DESC.to_string(),
             work_dir: runtime.builtin_args.KIMI_WORK_DIR.clone(),
+            approval: runtime.approval.clone(),
         }
     }
 
@@ -200,6 +202,12 @@ impl CallableTool2 for Grep {
 
         if params.pattern.starts_with('-') {
             command.arg("--");
+        }
+        let searched = KaosPath::new(if params.path.trim().is_empty() { "." } else { params.path.as_str() }).expanduser();
+        if searched.is_absolute() {
+            if let Some(refused) = approve_outside_read(&self.approval, "Grep", &searched, &self.work_dir).await {
+                return refused;
+            }
         }
         let grep_path = match self.command_path(&params.path) {
             Ok(path) => path,

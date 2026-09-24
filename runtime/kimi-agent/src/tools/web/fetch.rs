@@ -206,6 +206,17 @@ impl CallableTool2 for FetchURL {
     }
 
     async fn call_typed(&self, params: Self::Params) -> ToolReturnValue {
+        if let Some(path) = local_path(&params.url) {
+            // (root; see VENDORED.md) A local file is not a web page.
+            return tool_error(
+                "",
+                format!(
+                    "FetchURL fetches web pages over http(s); `{}` is a local file. Read it with ReadFile (path `{}`), or list a directory with Glob.",
+                    params.url, path
+                ),
+                "Local path: use ReadFile",
+            );
+        }
         if self.service.is_some() {
             let result = self.fetch_with_service(&params).await;
             if !result.is_error {
@@ -215,6 +226,19 @@ impl CallableTool2 for FetchURL {
         }
         self.fetch_with_http_get(&params).await
     }
+}
+
+/// The filesystem path a "URL" names, when it is a local file rather than a
+/// web address: `file://…`, an absolute or relative path, or `~/…`.
+fn local_path(url: &str) -> Option<String> {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("file://") {
+        return Some(rest.to_string());
+    }
+    if url.starts_with('/') || url.starts_with("./") || url.starts_with("../") || url.starts_with("~/") {
+        return Some(url.to_string());
+    }
+    None
 }
 
 struct ExtractedMetadata {
@@ -537,5 +561,19 @@ categories: ['issue:123']
 ---
 Hello `world`."#;
         assert_eq!(output, expected);
+    }
+}
+
+#[cfg(test)]
+mod local_path_tests {
+    use super::local_path;
+
+    #[test]
+    fn local_files_are_told_apart_from_web_pages() {
+        assert_eq!(local_path("file:///ws/app/x.py").as_deref(), Some("/ws/app/x.py"));
+        assert_eq!(local_path("/ws/README.md").as_deref(), Some("/ws/README.md"));
+        assert_eq!(local_path("./docs/a.md").as_deref(), Some("./docs/a.md"));
+        assert_eq!(local_path("https://example.com/a"), None);
+        assert_eq!(local_path("example.com"), None);
     }
 }

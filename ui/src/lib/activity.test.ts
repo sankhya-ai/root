@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { groupBlocks, type Activity } from "./activity.ts";
+import { groupBlocks, liveStatus, type Activity } from "./activity.ts";
 import { applyEvent, createTranscript } from "./transcript.ts";
 import type { WireEvent } from "./types.ts";
 
@@ -61,4 +61,43 @@ test("a finished turn with an unanswered call reads as interrupted, not running"
   call(s, "1", "Shell", { command: "sleep 100" }, null);
   const [act] = groupBlocks(s.blocks, { running: false }).filter((i): i is Activity => i.kind === "activity");
   assert.equal(act.tone, "muted");
+});
+
+test("thinking between calls folds into the line instead of splitting it", () => {
+  const s = createTranscript();
+  applyEvent(s, ev("UserPrompt", { text: "go" }));
+  applyEvent(s, ev("ContentPart", { type: "think", think: "look first" }));
+  call(s, "1", "ReadFile", { path: "a.py" });
+  applyEvent(s, ev("ContentPart", { type: "think", think: "and the test" }));
+  call(s, "2", "ReadFile", { path: "test_a.py" });
+  applyEvent(s, ev("ContentPart", { type: "think", think: "   " }));
+  applyEvent(s, ev("ContentPart", { type: "text", text: "Found it." }));
+  const items = groupBlocks(s.blocks, { running: false });
+  assert.deepEqual(items.map((i) => i.kind), ["user", "activity", "text"]);
+  const act = items[1] as Activity;
+  assert.equal(act.label, "Read 2 files");
+  assert.deepEqual(act.rows.map((r) => r.kind), ["think", "tool", "think", "tool"]);
+});
+
+test("thinking with no call after it stands alone", () => {
+  const s = createTranscript();
+  applyEvent(s, ev("ContentPart", { type: "think", think: "hmm" }));
+  applyEvent(s, ev("ContentPart", { type: "text", text: "Hello" }));
+  assert.deepEqual(groupBlocks(s.blocks, { running: false }).map((i) => i.kind), ["think", "text"]);
+});
+
+test("the live status names what is happening now, inside a subagent too", () => {
+  const s = createTranscript();
+  applyEvent(s, ev("UserPrompt", { text: "go" }));
+  assert.equal(liveStatus(s.blocks), "Working");
+  applyEvent(s, ev("ContentPart", { type: "think", think: "plan" }));
+  assert.equal(liveStatus(s.blocks), "Thinking");
+  call(s, "1", "ReadFile", { path: "/ws/src/app.py" }, null);
+  assert.equal(liveStatus(s.blocks, "/ws"), "Reading app.py");
+  applyEvent(s, ev("ToolResult", { tool_call_id: "1", return_value: ok }));
+  assert.equal(liveStatus(s.blocks), "Thinking");
+  call(s, "2", "Task", { subagent_name: "explorer", description: "map it", prompt: "..." }, null);
+  assert.equal(liveStatus(s.blocks), "explorer · Starting");
+  applyEvent(s, ev("SubagentEvent", { task_tool_call_id: "2", event: { type: "ToolCall", payload: { id: "c1", function: { name: "Shell", arguments: JSON.stringify({ command: "ls" }) } } } }));
+  assert.equal(liveStatus(s.blocks), "explorer · Running ls");
 });

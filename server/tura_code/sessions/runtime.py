@@ -373,7 +373,15 @@ def _observe(turn: TurnState, kind: str, payload: dict) -> None:
         call["status"] = "failed" if failed else "completed"
         call["brief"] = next((d.get("text", "") for d in result.get("display") or [] if d.get("type") == "brief"), "") or str(result.get("message") or "")[:200]
         turn.errors += int(failed)
+        if call["name"] == "Shell":
+            try:
+                turn.note_command(str(json.loads(call["arguments"] or "{}").get("command") or ""))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        elif call["name"] == "coding_flow":
+            turn.note_check()  # a flow runs its verification commands on every candidate
         if call["name"] in EDIT_TOOLS and not failed:
+            turn.note_edit()
             try:
                 path = str(json.loads(call["arguments"] or "{}").get("path") or "")
             except json.JSONDecodeError:

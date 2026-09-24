@@ -5,13 +5,14 @@
 import { Brain, ClipboardList, Paperclip, Sparkles } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-import { groupBlocks, type RenderItem } from "../lib/activity.ts";
+import { groupBlocks, liveStatus, type RenderItem } from "../lib/activity.ts";
 import type { Block, ToolBlock, TranscriptState } from "../lib/transcript.ts";
 import type { Flow } from "../lib/types.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Activity } from "./turn/Activity.tsx";
 import { ApprovalCard, type ApproveFn } from "./turn/ApprovalCard.tsx";
 import { FlowCard } from "./turn/FlowCard.tsx";
+import { ThoughtRow } from "./turn/Steps.tsx";
 import { Working } from "./turn/Working.tsx";
 
 type UserBlock = Extract<Block, { kind: "user" }>;
@@ -91,7 +92,8 @@ export function Items({ items, workspace, running, onApprove, onFlow }: { items:
     step.children ? <Items items={groupBlocks(step.children.blocks, { running: running && !step.result, workspace })} workspace={workspace} running={running && !step.result} onApprove={onApprove} /> : null;
   return (
     <>
-      {items.map((item) => {
+      {items.map((item, index) => {
+        const live = running && index === items.length - 1;
         switch (item.kind) {
           case "text":
             return (
@@ -100,14 +102,9 @@ export function Items({ items, workspace, running, onApprove, onFlow }: { items:
               </div>
             );
           case "think":
-            return (
-              <details key={item.key} className="thinking">
-                <summary>Thinking</summary>
-                <div className="thoughts">{item.text}</div>
-              </details>
-            );
+            return item.text.trim() ? <ThoughtRow key={item.key} text={item.text} live={live} /> : null;
           case "activity":
-            return <Activity key={item.key} item={item} workspace={workspace} running={running} onApprove={onApprove} renderChildren={children} />;
+            return <Activity key={item.key} item={item} workspace={workspace} running={running} live={live} onApprove={onApprove} renderChildren={children} />;
           case "approval":
             return item.approval.status === "pending" ? <ApprovalCard key={item.key} approval={item.approval} workspace={workspace} onApprove={onApprove} /> : null;
           case "notice":
@@ -127,7 +124,8 @@ export function Items({ items, workspace, running, onApprove, onFlow }: { items:
                     {item.promoted ? `Learned and kept ${item.promoted} lesson${item.promoted === 1 ? "" : "s"}` : "Found something worth learning"}
                     {item.skills.length ? ` — skill ${item.skills.map((s) => `“${s}”`).join(", ")}` : ""}
                     {item.memories ? `${item.skills.length ? " and" : " —"} ${item.memories} memor${item.memories === 1 ? "y" : "ies"}` : ""}.{" "}
-                    {item.mode === "review" ? <a href="#/learning">Review</a> : null}
+                    {!item.verified && item.mode === "auto" ? "Not kept on its own: the change was never run. " : null}
+                    {item.mode === "review" || item.promoted < item.skills.length + item.memories ? <a href="#/learning">Review</a> : null}
                   </span>
                 ) : (
                   <span>The learning review did not run: {item.error}</span>
@@ -229,7 +227,7 @@ export function Transcript({
                 <div className="message assistant">
                   {turn.user ? <div className="messageLabel">root</div> : null}
                   <Items items={items} workspace={workspace} running={running} onApprove={onApprove} />
-                  {running && !waiting && turn.user ? <Working since={turn.user.ts * 1000} label={state.compacting ? "Compacting context…" : "Working…"} /> : null}
+                  {running && !waiting && turn.user ? <Working since={turn.user.ts * 1000} label={state.compacting ? "Compacting context…" : `${liveStatus(turn.blocks, workspace)}…`} /> : null}
                   {turn.end ? <Footer end={turn.end} text={answer} /> : null}
                 </div>
               ) : null}

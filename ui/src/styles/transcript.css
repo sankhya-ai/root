@@ -114,133 +114,7 @@
   padding-left: 12px;
 }
 
-.thinking {
-  color: var(--ink-faint);
-  font-size: 13px;
-  margin: 2px 0 8px;
-}
-.thinking summary {
-  cursor: pointer;
-  list-style: none;
-}
-.thinking summary::before {
-  content: "▸ ";
-}
-.thinking[open] summary::before {
-  content: "▾ ";
-}
-.thinking .thoughts {
-  border-left: 1px solid var(--line);
-  margin: 6px 0 0 3px;
-  padding-left: 12px;
-  white-space: pre-wrap;
-}
-
-/* ---------- activity: Chotu's quiet trace lines ---------- */
-
-.activity {
-  margin: 2px 0;
-}
-.activityLine {
-  align-items: center;
-  background: none;
-  border: 0;
-  border-radius: 6px;
-  color: var(--ink-muted);
-  display: flex;
-  font-size: 13.5px;
-  gap: 8px;
-  margin-left: -6px;
-  max-width: 100%;
-  padding: 3px 6px;
-  text-align: left;
-}
-.activityLine[aria-disabled="false"]:hover {
-  background: var(--hover);
-  color: var(--ink);
-}
-.activityLine[aria-disabled="true"] {
-  cursor: default;
-}
-.activityLine .label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.activityLine .icon {
-  flex: 0 0 auto;
-  opacity: 0.85;
-}
-.activity.working .activityLine {
-  color: var(--ink);
-}
-.activity.working .icon {
-  animation: pulse 1.2s ease-in-out infinite;
-  color: var(--accent);
-}
-.activity.permission .activityLine {
-  color: var(--accent);
-}
-.activity.error .activityLine {
-  color: var(--err);
-}
-.activity.muted .activityLine {
-  color: var(--ink-faint);
-}
-.activityDetail {
-  border-left: 1px solid var(--line);
-  margin: 4px 0 8px 7px;
-  padding: 2px 0 2px 14px;
-}
-.step + .step {
-  margin-top: 10px;
-}
-.stepHead {
-  align-items: center;
-  color: var(--ink-muted);
-  display: flex;
-  font-size: 12.5px;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-.stepHead code {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-.stepMessage {
-  color: var(--ink-faint);
-  font-size: 12px;
-  margin: 4px 0 0;
-}
-.stepMessage.err {
-  color: var(--err);
-}
-.output {
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  margin: 0;
-  max-height: 320px;
-  overflow: auto;
-  padding: 8px 10px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.subagent {
-  margin-top: 6px;
-}
-
-.spinner {
-  animation: spin 0.9s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
+/* Tool calls, thinking and subagents: tools.css. */
 
 /* ---------- diffs ---------- */
 
@@ -354,6 +228,14 @@
   font-size: 11.5px;
   padding: 1px 9px;
 }
+.approvalChip.outside {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .approvalChip.trusted {
   border-color: var(--accent-line);
   color: var(--ink);
@@ -410,7 +292,9 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
-.working {
+/* Not `.working`: that is also an activity tone (`.activity.working`), and a
+ * flex row there put a running subagent's trace beside its line, not under it. */
+.workingStatus {
   align-items: center;
   color: var(--ink-muted);
   display: flex;
@@ -418,26 +302,17 @@
   gap: 8px;
   margin: 6px 0 10px;
 }
-.orb {
-  animation: breathe 1.6s ease-in-out infinite;
-  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.9), var(--dot) 55%, rgba(78, 131, 176, 0.2) 100%);
-  border-radius: 50%;
-  display: inline-block;
-  height: 14px;
-  width: 14px;
+.workingStatus canvas {
+  flex: 0 0 auto;
 }
-@keyframes breathe {
-  0%,
-  100% {
-    transform: scale(0.85);
-    opacity: 0.75;
-  }
-  50% {
-    transform: scale(1);
-    opacity: 1;
-  }
+.workingStatus .label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.working .elapsed {
+.workingStatus .elapsed {
+  flex: 0 0 auto;
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
 }

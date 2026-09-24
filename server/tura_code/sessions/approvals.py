@@ -42,6 +42,7 @@ class Approvals:
             ledger=ledger,
             grants=set(self.record.grants),
             ask_owner=self.record.kind != "candidate",
+            workspace=self.record.workspace,
         )
         summary = {**approval_summary(payload), "key": decision.key}
         if decision.response is not None:
@@ -134,6 +135,6 @@ class Approvals:
     def _settle_for_mode(self: "SessionRuntime", mode: str) -> None:
         """A more permissive mode also settles what is already waiting."""
         for future, payload in list(self.pending.values()):
-            decision = trust.decide(payload, mode=mode, ledger=self.tenant.trust, grants=set(self.record.grants))
+            decision = trust.decide(payload, mode=mode, ledger=self.tenant.trust, grants=set(self.record.grants), workspace=self.record.workspace)
             if decision.response is not None and not future.done():
                 future.set_result((decision.response, "mode"))

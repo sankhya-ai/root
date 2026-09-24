@@ -11,6 +11,7 @@ use crate::utils::{build_diff_blocks, is_within_directory};
 
 use super::tolerant;
 use super::{
+    not_found,
     FILE_ACTION_EDIT, FILE_ACTION_EDIT_OUTSIDE, REPLACE_DESC, read_text_lossy, resolve_tool_path,
     validate_absolute_path,
 };
@@ -115,7 +116,7 @@ impl CallableTool2 for StrReplaceFile {
         if !path.exists(true).await {
             return tool_error(
                 "",
-                format!("`{}` does not exist.", params.path),
+                not_found(&params.path, path.as_path(), self.work_dir.as_path()),
                 "File not found",
             );
         }

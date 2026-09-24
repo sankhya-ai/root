@@ -16,6 +16,7 @@ use crate::tools::utils::{load_desc, truncate_line};
 use crate::utils::list_directory_relative_to;
 
 use super::{
+    not_found, approve_outside_read,
     FileKind, MAX_BYTES, MAX_LINE_LENGTH, MAX_LINES, MEDIA_SNIFF_BYTES, READ_DESC,
     detect_file_type, resolve_tool_path, validate_absolute_path,
 };
@@ -76,6 +77,7 @@ struct ReadHistoryValue {
 pub struct ReadFile {
     description: String,
     work_dir: KaosPath,
+    approval: std::sync::Arc<crate::soul::approval::Approval>,
     read_history: Mutex<HashMap<ReadHistoryKey, ReadHistoryValue>>,
 }
 
@@ -92,6 +94,7 @@ impl ReadFile {
         Self {
             description: desc,
             work_dir: runtime.builtin_args.KIMI_WORK_DIR.clone(),
+            approval: runtime.approval.clone(),
             read_history: Mutex::new(HashMap::new()),
         }
     }
@@ -172,11 +175,14 @@ impl CallableTool2 for ReadFile {
             return err;
         }
         path = resolve_tool_path(&path, &self.work_dir);
+        if let Some(refused) = approve_outside_read(&self.approval, "ReadFile", &path, &self.work_dir).await {
+            return refused;
+        }
 
         if !path.exists(true).await {
             return tool_error(
                 "",
-                format!("`{}` does not exist.", params.path),
+                not_found(&params.path, path.as_path(), self.work_dir.as_path()),
                 "File not found",
             );
         }

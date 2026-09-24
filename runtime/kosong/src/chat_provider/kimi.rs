@@ -205,6 +205,16 @@ impl Kimi {
             if let Some(effort) = generation_kwargs.remove("reasoning_effort") {
                 generation_kwargs.insert("reasoning".to_string(), json!({"effort": effort}));
             }
+            // (root; see VENDORED.md) Which of a model's providers to prefer:
+            // `throughput`, `price` or `latency`. Unset keeps OpenRouter's own
+            // balancing. Measured for one model, the fastest provider streamed
+            // ~3x the tokens per second of the default one at ~2x the price.
+            if let Ok(sort) = std::env::var("ROOT_OPENROUTER_SORT") {
+                let sort = sort.trim().to_ascii_lowercase();
+                if matches!(sort.as_str(), "throughput" | "price" | "latency") && !generation_kwargs.contains_key("provider") {
+                    generation_kwargs.insert("provider".to_string(), json!({"sort": sort}));
+                }
+            }
         }
         for (key, value) in generation_kwargs {
             body.insert(key, value);
@@ -1065,6 +1075,21 @@ mod tests {
         assert_eq!(body.get("reasoning"), Some(&json!({"effort": "none"})));
         assert!(!body.contains_key("reasoning_effort"));
         assert!(!body.contains_key("thinking"));
+    }
+
+    #[test]
+    fn openrouter_provider_sort_comes_from_the_environment() {
+        // One test owns the variable, so parallel tests never see it half-set.
+        // SAFETY: no other test reads or writes ROOT_OPENROUTER_SORT.
+        unsafe { std::env::set_var("ROOT_OPENROUTER_SORT", "Throughput") };
+        let sorted = openrouter_provider(Map::new()).request_body("", &[], &[]).expect("body");
+        unsafe { std::env::set_var("ROOT_OPENROUTER_SORT", "fastest-please") };
+        let unknown = openrouter_provider(Map::new()).request_body("", &[], &[]).expect("body");
+        unsafe { std::env::remove_var("ROOT_OPENROUTER_SORT") };
+        let unset = openrouter_provider(Map::new()).request_body("", &[], &[]).expect("body");
+        assert_eq!(sorted.get("provider"), Some(&json!({"sort": "throughput"})));
+        assert!(!unknown.contains_key("provider"));
+        assert!(!unset.contains_key("provider"));
     }
 
     #[test]

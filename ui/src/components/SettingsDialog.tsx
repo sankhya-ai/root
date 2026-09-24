@@ -173,12 +173,27 @@ export function SettingsDialog({ onClose, onSaved, health }: { onClose: () => vo
               value={(settings.reasoning_effort || "") as string}
               options={[
                 { value: "", label: "Model default" },
+                { value: "none", label: "Off" },
                 { value: "low", label: "Low" },
                 { value: "medium", label: "Medium" },
                 { value: "high", label: "High" },
               ]}
               onChange={(v) => set("reasoning_effort", v)}
             />
+          </div>
+
+          <div className="field">
+            <label>Provider preference</label>
+            <Segmented
+              value={(settings.provider_sort || "") as string}
+              options={[
+                { value: "", label: "Balanced" },
+                { value: "throughput", label: "Fastest" },
+                { value: "price", label: "Cheapest" },
+              ]}
+              onChange={(v) => set("provider_sort", v)}
+            />
+            <p className="help">OpenRouter serves one model from several providers. The fastest can stream ~3× quicker at ~2× the price.</p>
           </div>
 
           <div className="dialogSection">Jev step director</div>

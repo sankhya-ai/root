@@ -7,7 +7,13 @@
 A promoted skill reaches the agent on its next launch (see ``skills``); a
 promoted memory is in Dhee and comes back in memory packets. In `auto` mode a
 memory is only saved from a turn that went cleanly, as Chotu did: a failed
-turn's "facts" are too often wrong.
+turn's "facts" are too often wrong. Nothing at all is promoted on its own from
+a turn whose edits were never exercised by a check — "fixed it" without a run
+is a claim, not a lesson — so those candidates wait for the owner.
+
+A skill loads into every later session, so `auto` keeps one only once the same
+lesson has come from two sessions: seen once it is an anecdote about one task
+(often the task's own fix, dressed as a procedure); seen twice it is a pattern.
 """
 
 from __future__ import annotations
@@ -57,6 +63,8 @@ class LearningService:
             "trace": turn.trace(),
             "errors": turn.errors,
             "rejections": turn.rejections,
+            "verified": turn.verified,
+            "checks": turn.checks,
         }
         settings = self.tenant.settings.get()
         try:
@@ -66,21 +74,24 @@ class LearningService:
                 api_key=self.tenant.api_key(),
                 model=settings.learning_model or settings.model,
                 purpose="review",
-                max_tokens=1_200,
+                max_tokens=2_500,
+                json_mode=True,
             )
             verdict = review.parse(answer)
         except (llm.LLMError, ValueError) as error:
             logger.info("learning review skipped: %s", error)
             runtime.emit("LearningReviewed", {"ok": False, "error": str(error)[:300], "candidates": []})
             return
-        clean = status == "finished" and turn.errors == 0 and turn.rejections == 0
+        clean = status == "finished" and turn.errors == 0 and turn.rejections == 0 and turn.verified
         items = [self._candidate("skill", s, runtime, verdict) for s in verdict["skills"]]
         items += [self._candidate("memory", m, runtime, verdict) for m in verdict["memories"]]
-        added = self.store.add(items)
+        added, again = self.store.add(items)
         promoted = []
-        if self.mode() == "auto":
-            for record in added:
+        if self.mode() == "auto" and turn.verified:
+            for record in added + again:
                 if record["kind"] == "memory" and not clean:
+                    continue
+                if record["kind"] == "skill" and len(set(record.get("sessions") or [])) < 2:
                     continue
                 promoted.append(await self.promote(record["id"]))
         runtime.emit(
@@ -92,6 +103,7 @@ class LearningService:
                 "candidates": [{"id": r["id"], "kind": r["kind"], "title": r["title"]} for r in added],
                 "promoted": [p["id"] for p in promoted],
                 "rejected_overfit": len(verdict["rejected_overfit"]),
+                "verified": turn.verified,
             },
         )
 

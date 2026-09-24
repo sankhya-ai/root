@@ -21,6 +21,33 @@ const TRUNCATION_SAFE: &[&str] = &["ReadFile", "ReadMediaFile", "Glob", "Grep", 
 
 /// Parse tool arguments, repairing what can be repaired safely for this tool.
 pub fn parse_tool_arguments(tool_name: &str, arguments: &str) -> Result<Value, String> {
+    parse_value(tool_name, arguments).map(|value| reshape(tool_name, value))
+}
+
+/// Right values in the wrong place, moved where the schema wants them. Also
+/// lossless: `StrReplaceFile` called as `{path, old, new}` (the flat shape most
+/// edit tools use) means exactly one edit, and `edits` is the plural of `edit`.
+fn reshape(tool_name: &str, value: Value) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+    if tool_name == "StrReplaceFile" && !map.contains_key("edit") {
+        if let Some(edits) = map.remove("edits") {
+            map.insert("edit".to_string(), edits);
+        } else if map.contains_key("old") && map.contains_key("new") {
+            let mut edit = serde_json::Map::new();
+            for key in ["old", "new", "replace_all"] {
+                if let Some(field) = map.remove(key) {
+                    edit.insert(key.to_string(), field);
+                }
+            }
+            map.insert("edit".to_string(), Value::Object(edit));
+        }
+    }
+    Value::Object(map)
+}
+
+fn parse_value(tool_name: &str, arguments: &str) -> Result<Value, String> {
     let error = match serde_json::from_str::<Value>(arguments) {
         Ok(Value::String(inner)) => match serde_json::from_str::<Value>(&inner) {
             Ok(value @ Value::Object(_)) => return Ok(value),
@@ -253,5 +280,18 @@ mod tests {
         // Nor a half-written command run.
         assert!(parse_tool_arguments("Shell", r#"{"command": "rm -rf build/tm"#).is_err());
         assert_eq!(parse_tool_arguments("Shell", r#"{"command": "ls -la" "#).unwrap(), json!({"command": "ls -la"}));
+    }
+
+    #[test]
+    fn a_flat_edit_is_moved_into_the_edit_list() {
+        let value = parse_tool_arguments("StrReplaceFile", r#"{"path": "a.py", "old": "x", "new": "y"}"#).unwrap();
+        assert_eq!(value, json!({"path": "a.py", "edit": {"old": "x", "new": "y"}}));
+        let plural = parse_tool_arguments("StrReplaceFile", r#"{"path": "a.py", "edits": [{"old": "x", "new": "y"}]}"#).unwrap();
+        assert_eq!(plural, json!({"path": "a.py", "edit": [{"old": "x", "new": "y"}]}));
+        // Other tools, and a correct call, are untouched.
+        let shell = parse_tool_arguments("Shell", r#"{"old": "x", "new": "y"}"#).unwrap();
+        assert_eq!(shell, json!({"old": "x", "new": "y"}));
+        let right = parse_tool_arguments("StrReplaceFile", r#"{"path": "a", "edit": {"old": "x", "new": "y"}}"#).unwrap();
+        assert_eq!(right, json!({"path": "a", "edit": {"old": "x", "new": "y"}}));
     }
 }

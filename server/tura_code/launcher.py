@@ -312,8 +312,15 @@ def child_environment(spec: LaunchSpec, share_dir: Path, binary: Path | None = N
     director = settings.director_mode
     env["CHOTU_DIRECTOR"] = director
     env["CHOTU_DECISIONS_ENABLED"] = "0" if director == "off" else "1"
+    # Edits must be exercised before a turn ends (runtime `verify_gate`). Off
+    # for scripted runs, whose replies are fixed, unless a test asks for it.
+    env["ROOT_VERIFY_GATE"] = os.environ.get("TURA_CODE_VERIFY_GATE", "0" if scripted() else "1")
+    # Reads outside the workspace ask like edits there; `trust.boundary` decides.
+    env["ROOT_READ_BOUNDARY"] = "1"
     if settings.reasoning_effort:
         env["KIMI_MODEL_REASONING_EFFORT"] = settings.reasoning_effort
+    if settings.provider_sort:
+        env["ROOT_OPENROUTER_SORT"] = settings.provider_sort
     if spec.skills_dirs:
         env["KIMI_EXTRA_SKILLS_DIRS"] = os.pathsep.join(str(p) for p in spec.skills_dirs)
     if os.environ.get(SCRIPTED_ECHO_ENV, "").strip():

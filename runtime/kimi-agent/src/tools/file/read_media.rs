@@ -18,6 +18,7 @@ use crate::tools::SkipThisTool;
 use crate::utils::wrap_media_part;
 
 use super::{
+    not_found, approve_outside_read,
     FileKind, FileType, MAX_MEDIA_MEGABYTES, MEDIA_SNIFF_BYTES, READ_MEDIA_DESC, detect_file_type,
     resolve_tool_path, validate_absolute_path,
 };
@@ -35,6 +36,7 @@ pub struct ReadMediaFile {
     work_dir: KaosPath,
     capabilities: HashSet<ModelCapability>,
     llm: Option<std::sync::Arc<LLM>>,
+    approval: std::sync::Arc<crate::soul::approval::Approval>,
 }
 
 impl ReadMediaFile {
@@ -56,6 +58,7 @@ impl ReadMediaFile {
             work_dir: runtime.builtin_args.KIMI_WORK_DIR.clone(),
             capabilities,
             llm,
+            approval: runtime.approval.clone(),
         })
     }
 
@@ -185,11 +188,14 @@ impl CallableTool2 for ReadMediaFile {
             return err;
         }
         path = resolve_tool_path(&path, &self.work_dir);
+        if let Some(refused) = approve_outside_read(&self.approval, "ReadMediaFile", &path, &self.work_dir).await {
+            return refused;
+        }
 
         if !path.exists(true).await {
             return tool_error(
                 "",
-                format!("`{}` does not exist.", params.path),
+                not_found(&params.path, path.as_path(), self.work_dir.as_path()),
                 "File not found",
             );
         }

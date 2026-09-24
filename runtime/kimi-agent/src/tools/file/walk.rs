@@ -25,6 +25,39 @@ pub struct Walked {
     pub truncated: bool,
 }
 
+/// Entries a "did you mean" search may look at: it runs on an error path.
+const NAME_SEARCH_VISITED: usize = 20_000;
+
+/// Files under `root` whose file name is exactly `name`, nearest first, at
+/// most `limit` — the suggestion when a path does not exist.
+pub fn find_by_name(root: &Path, name: &str, limit: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut visited = 0usize;
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > NAME_SEARCH_VISITED || found.len() >= limit {
+                return found;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !PRUNED.iter().any(|pruned| entry.file_name() == *pruned) {
+                    queue.push_back(entry.path());
+                }
+            } else if entry.file_name() == name {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
 /// Paths under `root` matching `pattern` (relative to `root`), pruned and bounded.
 pub fn recursive_glob(root: &Path, pattern: &str, include_dirs: bool) -> Result<Walked, String> {
     let matcher = glob::Pattern::new(pattern).map_err(|err| err.to_string())?;

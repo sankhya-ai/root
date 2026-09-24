@@ -177,3 +177,62 @@ def test_should_review_picks_real_work_trouble_and_preferences():
     assert review.should_review(prompt="fix", **{**base, "status": "max_steps_reached"})
     assert review.should_review(prompt="From now on use tabs", **base)
     assert not review.should_review(prompt="/compact", **{**base, "errors": 5})
+
+
+def test_lenient_json_keeps_what_a_cut_off_review_managed_to_say():
+    whole = _answer()
+    # Cut off mid-way through the second skill: the first skill and the flag survive.
+    cut = whole[: whole.index('"calc task_12"') + 8]
+    kept = llm.loads_lenient(cut)
+    assert kept["should_save"] is True and kept["skill_candidates"][0]["name"] == "Verify Python changes"
+    assert review.parse(cut)["skills"][0]["name"] == "verify-python-changes"
+    # Lossless repairs: a fence, a trailing comma, a raw newline inside a string.
+    assert llm.loads_lenient('```json\n{"a": [1, 2,], "b": "x\ny"}\n```') == {"a": [1, 2], "b": "x\ny"}
+    # An unescaped quote breaks the tail; everything before it is kept.
+    broken = '{"should_save": true, "summary": "ok", "memory_candidates": [{"kind": "project_fact", "content": "uses make"}, {"content": "he said "hi" twice"}]}'
+    assert llm.loads_lenient(broken)["memory_candidates"] == [{"kind": "project_fact", "content": "uses make"}]
+    with pytest.raises(ValueError):
+        llm.loads_lenient("no json here")
+
+
+@requires_runtime
+def test_auto_mode_promotes_nothing_from_edits_that_were_never_run(client, workspace, script, reviewer, home):
+    reviewer([_answer()])
+    script([
+        tool_call("w", "WriteFile", {"path": "calc.py", "content": "def add(a, b):\n    return a - b\n"}),
+        tool_call("d", "Shell", {"command": "git diff"}),
+        tool_call("r", "ReadFile", {"path": "calc.py"}),
+        tool_call("g", "Grep", {"pattern": "def add"}),  # four calls: enough work to be reviewed
+        text("Fixed add."),
+    ])
+    client.put("/api/settings", json={"learning_mode": "auto"})
+    session = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    client.patch(f"/api/sessions/{session}", json={"permission_mode": "yolo"})
+    with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "fix add in calc.py")
+        reviewed = _until(ws, "LearningReviewed")["payload"]
+    assert reviewed["ok"] and reviewed["verified"] is False
+    assert reviewed["candidates"] and reviewed["promoted"] == []  # waiting for the owner, not kept
+    assert all(c["status"] == "candidate" for c in client.get("/api/learning").json()["candidates"])
+
+
+@requires_runtime
+def test_auto_mode_keeps_a_skill_only_when_a_second_session_proposes_it(client, workspace, script, reviewer, home):
+    reviewer([_answer(), _answer()])
+    script(_work_turn() + _work_turn())
+    client.put("/api/settings", json={"learning_mode": "auto"})
+    promoted_kinds = []
+    for prompt in ("add a calc module with a test", "add it again in a fresh session"):
+        session = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+        client.patch(f"/api/sessions/{session}", json={"permission_mode": "yolo"})
+        with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
+            ws.receive_json()
+            run_turn(ws, prompt)
+            reviewed = _until(ws, "LearningReviewed")["payload"]
+        overview = {c["id"]: c for c in client.get("/api/learning").json()["candidates"]}
+        promoted_kinds.append(sorted(overview[i]["kind"] for i in reviewed["promoted"]))
+        if prompt.startswith("add a calc"):
+            assert not (home / "skills" / "verify-python-changes").exists()  # one sighting: an anecdote
+    assert promoted_kinds == [["memory"], ["skill"]]
+    assert (home / "skills" / "verify-python-changes" / "SKILL.md").exists()

@@ -46,14 +46,15 @@ export function Inspector({
   const running = processes.filter((p) => p.status === "running").length;
   return (
     <aside className="card inspector">
-      <div className="tabs">
-        {TABS.map((t) => (
-          <button key={t.id} className={`tab${tab === t.id ? " active" : ""}`} onClick={() => onTab(t.id)}>
-            {t.label}
-            {t.id === "processes" && running ? ` · ${running}` : ""}
-          </button>
-        ))}
-        <span style={{ flex: 1 }} />
+      <div className="inspectorHead">
+        <div className="tabs" role="tablist">
+          {TABS.map((t) => (
+            <button key={t.id} role="tab" aria-selected={tab === t.id} className={`tab${tab === t.id ? " active" : ""}`} onClick={() => onTab(t.id)}>
+              {t.label}
+              {t.id === "processes" && running ? <span className="tabCount">{running}</span> : null}
+            </button>
+          ))}
+        </div>
         <button className="iconButton" onClick={onClose} title="Close panel">
           <X size={15} />
         </button>
@@ -63,7 +64,7 @@ export function Inspector({
         {tab === "files" ? <FilesPanel workspace={workspace} files={files} onMention={onMention} /> : null}
         {tab === "plan" ? (
           todos.length ? (
-            <TodoItems items={todos} />
+            <TodoItems items={todos} live={session.running} />
           ) : (
             <p className="help">The agent writes its plan here with SetTodoList when a task has several steps.</p>
           )

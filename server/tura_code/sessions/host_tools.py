@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .. import processes
 from ..memory import TOOL_NAMES as MEMORY_TOOL_NAMES
+from ..memory import CHECKPOINT_TOOL
 from ..memory import tool_definitions as memory_tool_definitions
 
 if TYPE_CHECKING:
@@ -38,7 +39,17 @@ class MemoryToolset:
         return name in MEMORY_TOOL_NAMES
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return await runtime.tenant.memory.handle_tool(name, arguments, workspace=Path(runtime.record.workspace), session_id=runtime.record.id)
+        unchecked = name == CHECKPOINT_TOOL and runtime.turn is not None and not runtime.turn.verified
+        if unchecked:
+            # A checkpoint outlives the session; an unexercised "fixed it" must not come back as a fact.
+            arguments = {**arguments, "summary": f"UNVERIFIED (no check ran after the last edit): {arguments.get('summary') or ''}".strip()}
+        result = await runtime.tenant.memory.handle_tool(name, arguments, workspace=Path(runtime.record.workspace), session_id=runtime.record.id)
+        if unchecked and not result.get("is_error"):
+            result["output"] = (
+                "Saved as UNVERIFIED: this turn edited files and has run nothing that exercises them. "
+                "Run the tests or a script that reproduces the problem before calling it done.\n\n" + str(result.get("output") or "")
+            )
+        return result
 
 
 class ProcessToolset:

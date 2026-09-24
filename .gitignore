@@ -15,3 +15,5 @@ __pycache__/
 
 # setuptools output from a non-editable install
 server/build/
+runtime/target-linux/
+bench/jobs/

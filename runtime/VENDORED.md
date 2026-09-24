@@ -45,12 +45,62 @@ Keep local changes small and listed here so upstream updates stay mergeable.
    `desc/file/glob.md`). Patterns starting with `**` walk the tree, pruning
    dependency, VCS, build and cache directories and bounding the walk, instead
    of being refused (local workspaces only).
+10. **Verify gate** (`kimi-agent/src/soul/verify_gate.rs`, wired in
+    `kimisoul.rs`). With `ROOT_VERIFY_GATE` set (the host sets it), a step that
+    would end the turn while a successful `WriteFile`/`StrReplaceFile` has no
+    later non-read-only `Shell` command gets a note and the turn continues — at
+    most twice per turn. Off by default, so the runtime is upstream's elsewhere.
+11. **Director turn facts and rules** (`soul/director.rs`, `kimisoul.rs`). The
+    director's `context` slot carries `turn_facts` (files read and edited this
+    turn, whether an edit is still unexercised); the before-step and turn-end
+    questions gained rules on not re-reading and on exercising edits; and while
+    an edit is unexercised the harness does not force another
+    `ReadFile`/`Glob`/`Grep`.
+12. **Path repair** (`tools/file/mod.rs`, `repair_path`). A path that does not
+    exist is put right when the workspace path was written twice or a
+    `?…`/`#…` suffix was appended, and only when the repair exists (or, for a
+    new file, its directory does).
+13. **Argument reshaping** (`soul/args_repair.rs`, `reshape`). Lossless: a
+    `StrReplaceFile` call written flat (`{path, old, new}`) or with `edits` is
+    moved into `edit`.
+14. **Directed arguments must fit** (`soul/director.rs` `fits`, `kimisoul.rs`).
+    When the director chose a tool and the model's arguments lack that tool's
+    required fields (it wrote an edit for a directed `Shell`), the model takes
+    the step itself instead of the harness dispatching a call that must fail.
+15. **"Did you mean"** (`tools/file/mod.rs` `not_found`, `walk.rs`
+    `find_by_name`). `ReadFile`, `ReadMediaFile` and `StrReplaceFile` name up
+    to five files of the same name in the workspace when a path does not exist
+    (bounded, pruned walk).
+16. **`FetchURL` on local paths** (`tools/web/fetch.rs`). A `file://` URL or a
+    filesystem path is refused with a pointer to `ReadFile`/`Glob`.
+17. **Tool calls written as text** (`soul/leaked_calls.rs`, wired in
+    `kimisoul.rs`). A step with no tool call whose text carries tool-call markup
+    (DeepSeek DSML, `<tool_call>`, …) keeps the turn open with a note to make the
+    call properly, at most twice per turn.
+18. **Test fix** (`tests/create_llm.rs`). The non-streaming transport test now
+    holds `ENV_LOCK`; it read env vars other tests set in parallel.
+19. **Read boundary** (`tools/file/mod.rs` `approve_outside_read`; `read.rs`,
+    `read_media.rs`, `grep.rs`). With `ROOT_READ_BOUNDARY` set, reading a path
+    outside the working directory requests approval (action `read file outside
+    of working directory`), as editing there already did. `Glob` already refused.
+20. **Reasoning that runs out the reply** (`soul/kimisoul.rs`). A step that
+    comes back empty (all reasoning, no answer or call) is retried with
+    reasoning off, not with the same settings: measured on OpenRouter,
+    effort and `reasoning.max_tokens` did not bound reasoning for
+    `deepseek-v4.1-flash`, so an identical retry reasoned to the limit again.
+21. **Director arguments without reasoning** (`soul/kimisoul.rs`
+    `directed_step`). The call that writes a decided tool's arguments runs
+    with reasoning off.
+22. **OpenRouter provider preference** (`kosong/src/chat_provider/kimi.rs`).
+    `ROOT_OPENROUTER_SORT` = `throughput`|`price`|`latency` sends
+    `provider: {sort}`.
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were
 updated for 3 and 9; `tests/extra_skills_dirs.rs` for 5; unit tests in
 `args_repair.rs`, `tolerant.rs`, `repeat_guard.rs` and `walk.rs`, and
-`tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9.
+`tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9; unit tests in
+`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22.
 
 ## Updating from Tura
 

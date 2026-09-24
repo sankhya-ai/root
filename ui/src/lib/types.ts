@@ -40,6 +40,8 @@ export interface TrustInfo {
   tier?: "read" | "verify" | "needs_trust";
   effects?: string[];
   reasons?: string[];
+  /** Set when the request reaches outside the session's workspace. */
+  outside?: string;
 }
 
 export interface ApprovalRequest {
@@ -108,6 +110,7 @@ export interface Settings {
   model: string;
   max_context_size: number;
   reasoning_effort: string;
+  provider_sort: string;
   max_steps_per_turn: number;
   director_mode: "on" | "shadow" | "off";
   memory_mode: "local" | "openrouter" | "off";

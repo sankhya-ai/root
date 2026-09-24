@@ -4,9 +4,15 @@
 //
 // Ported from Chotu's AssistantMessage.jsx (groupToolSteps, inspectionGroupLabel,
 // editGroupLabel), keyed on kimi-agent's tool names instead of the hub's.
+//
+// Thinking between calls folds into the line it sits in: a weak model thinks
+// before nearly every call, and a "Thinking" row between each would break one
+// "Read 8 files" into eight.
 
 import { describeTool } from "./tools.ts";
 import { parseArgs, type Block, type ToolBlock } from "./transcript.ts";
+
+export type ThinkBlock = Extract<Block, { kind: "think" }>;
 
 export type StepKind = "read" | "search" | "command" | "web" | "edit" | "plan" | "memory" | "remember" | "agent" | "flow" | "process" | "tool";
 export type Tone = "done" | "working" | "permission" | "error" | "muted";
@@ -19,6 +25,8 @@ export interface Activity {
   label: string;
   icon: StepKind;
   steps: ToolBlock[];
+  /** The steps with the thinking between them, in order. */
+  rows: (ToolBlock | ThinkBlock)[];
 }
 
 export type RenderItem = Exclude<Block, ToolBlock> | Activity;
@@ -162,8 +170,22 @@ export function groupBlocks(blocks: Block[], { running, workspace }: { running: 
   const items: RenderItem[] = [];
   const groups: Activity[] = [];
   let current: Activity | null = null;
+  // Thoughts with no line before them wait for the next one.
+  let thoughts: ThinkBlock[] = [];
+  const settle = () => {
+    if (current) current.rows.push(...thoughts);
+    else items.push(...thoughts);
+    thoughts = [];
+  };
   for (const block of blocks) {
+    if (block.kind === "think") {
+      if (!block.text.trim()) continue;
+      if (current) current.rows.push(block);
+      else thoughts.push(block);
+      continue;
+    }
     if (block.kind !== "tool") {
+      settle();
       current = null;
       items.push(block);
       continue;
@@ -172,13 +194,17 @@ export function groupBlocks(blocks: Block[], { running, workspace }: { running: 
     const tone = stepTone(block, running);
     if (current !== null && canMerge(current, kind, tone)) {
       current.steps.push(block);
+      current.rows.push(...thoughts, block);
+      thoughts = [];
       current.tone = mergedTone(current.tone, tone);
       continue;
     }
-    current = { kind: "activity", key: `act-${block.key}`, groupKind: groupKindOf(kind, tone), tone, label: "", icon: kind, steps: [block] };
+    current = { kind: "activity", key: `act-${block.key}`, groupKind: groupKindOf(kind, tone), tone, label: "", icon: kind, steps: [block], rows: [...thoughts, block] };
+    thoughts = [];
     groups.push(current);
     items.push(current);
   }
+  settle();
   for (const group of groups) {
     group.label = activityLabel(group.groupKind, group.steps, group.tone, workspace);
     if (group.groupKind === "inspection" && group.steps.some((s) => stepKind(s.name) === "read")) group.icon = "read";
@@ -190,4 +216,43 @@ export function groupBlocks(blocks: Block[], { running, workspace }: { running: 
 /** The pending approvals of a transcript, oldest first. */
 export function pendingSteps(blocks: Block[]): ToolBlock[] {
   return blocks.filter((b): b is ToolBlock => b.kind === "tool" && b.approval?.status === "pending");
+}
+
+const PROGRESSIVE: Record<string, string> = {
+  Read: "Reading",
+  View: "Viewing",
+  Run: "Running",
+  Search: "Searching",
+  Find: "Finding",
+  Edit: "Editing",
+  Write: "Writing",
+  Append: "Appending to",
+  Fetch: "Fetching",
+  "Search the web": "Searching the web for",
+  Recall: "Recalling",
+  Remember: "Remembering",
+  "Update plan": "Updating the plan",
+};
+
+/** What the agent is doing right now, for the working line: "Reading app.py",
+ * "explorer · Searching useAuth", "Thinking". */
+export function liveStatus(blocks: Block[], workspace?: string): string {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i];
+    if (block.kind === "think") return "Thinking";
+    if (block.kind === "text") return block.text.trim() ? "Writing" : "Thinking";
+    if (block.kind !== "tool") continue;
+    if (block.result) return "Thinking";
+    if (block.approval?.status === "pending") return "Waiting for your approval";
+    if (stepKind(block.name) === "agent") {
+      const name = String(parseArgs(block.args)?.subagent_name ?? "subagent");
+      return `${name} · ${block.children?.blocks.length ? liveStatus(block.children.blocks, workspace) : "Starting"}`;
+    }
+    const view = describeTool(block.name, block.args, workspace);
+    const verb = PROGRESSIVE[view.verb];
+    if (!verb) return view.subject ? `${view.verb} ${view.subject}` : view.verb;
+    const subject = stepKind(block.name) === "read" || stepKind(block.name) === "edit" ? basename(view.subject.split(" · ")[0]) : view.subject;
+    return subject ? `${verb} ${subject}` : verb;
+  }
+  return "Working";
 }

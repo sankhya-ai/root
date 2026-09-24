@@ -41,22 +41,36 @@ class CandidateStore:
         tmp.write_text(json.dumps(data, indent=1), "utf-8")
         tmp.replace(self.path)
 
-    def add(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Store new candidates; skip any lesson already pending, promoted, or rejected."""
+    def add(self, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Store new candidates; skip any lesson already pending, promoted, or rejected.
+
+        Returns ``(added, seen_again)``: a skill proposed again under the same
+        name from another session is not a new candidate but a second sighting
+        of a pending one, and its record lists every session that proposed it.
+        """
         with self._lock:
             data = self._load()
             known = {c["fingerprint"] for c in data["candidates"]} | set(data["rejected"])
-            added = []
+            pending_skills = {c["title"]: c for c in data["candidates"] if c["status"] == "candidate" and c["kind"] == "skill"}
+            added: list[dict[str, Any]] = []
+            again: list[dict[str, Any]] = []
             for item in items:
+                pending = pending_skills.get(item["title"]) if item["kind"] == "skill" else None
+                if pending is not None:
+                    sessions = pending.setdefault("sessions", [pending.get("session_id")])
+                    if item["session_id"] not in sessions:
+                        sessions.append(item["session_id"])
+                        again.append(pending)
+                    continue
                 if item["fingerprint"] in known:
                     continue
                 known.add(item["fingerprint"])
-                record = {"id": uuid.uuid4().hex[:12], "status": "candidate", "created_at": time.time(), **item}
+                record = {"id": uuid.uuid4().hex[:12], "status": "candidate", "created_at": time.time(), "sessions": [item["session_id"]], **item}
                 data["candidates"].append(record)
                 added.append(record)
-            if added:
+            if added or again:
                 self._save(data)
-            return added
+            return added, again
 
     def get(self, candidate_id: str) -> dict[str, Any] | None:
         return next((c for c in self._load()["candidates"] if c["id"] == candidate_id), None)

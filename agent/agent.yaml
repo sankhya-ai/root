@@ -28,4 +28,4 @@ agent:
       description: "Implements a well-specified, self-contained change (one module, one bug, one test file) and verifies it. Give it the exact files, the goal, and how to check the result."
     explorer:
       path: ./explorer.yaml
-      description: "Read-only codebase researcher. Answers 'where is X', 'how does Y work', 'what calls Z' across many files and returns a concise report with file:line references. Cannot edit files."
+      description: "Read-only codebase researcher for LARGE codebases. Answers 'where is X', 'how does Y work', 'what calls Z' across many files you have not read, and returns a concise report with file:line references. Not for a handful of files or files you already read — read those yourself. Cannot edit files."

@@ -27,6 +27,9 @@ export type Block =
       id: string;
       name: string;
       args: string;
+      /** Event times (seconds) of the call and its result. */
+      started?: number;
+      finished?: number;
       result?: ToolReturnValue;
       approval?: ApprovalState;
       children?: TranscriptState;
@@ -34,7 +37,7 @@ export type Block =
   | { kind: "approval"; key: string; turn: string | null; approval: ApprovalState }
   | { kind: "notice"; key: string; turn: string | null; tone: "info" | "warn" | "error"; text: string }
   | { kind: "flow"; key: string; turn: string | null; flow: Flow }
-  | { kind: "learned"; key: string; turn: string | null; ok: boolean; summary: string; mode: string; skills: string[]; memories: number; promoted: number; error?: string }
+  | { kind: "learned"; key: string; turn: string | null; ok: boolean; summary: string; mode: string; skills: string[]; memories: number; promoted: number; verified: boolean; error?: string }
   | {
       kind: "turn_end";
       key: string;
@@ -190,6 +193,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         id: String(p.id ?? ""),
         name: String(fn.name ?? p.name ?? "tool"),
         args: String(fn.arguments ?? ""),
+        started: event.ts || undefined,
       });
       break;
     }
@@ -203,6 +207,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       const value = p.return_value as ToolReturnValue | undefined;
       if (tool && value) {
         tool.result = value;
+        tool.finished = event.ts || undefined;
         if (tool.name === "SetTodoList") {
           const todos = todosFrom(value.display);
           if (todos) state.todos = todos;
@@ -315,6 +320,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         skills: candidates.filter((c) => c.kind === "skill").map((c) => c.title),
         memories: candidates.filter((c) => c.kind === "memory").length,
         promoted,
+        verified: p.verified !== false,
         error: p.error ? String(p.error) : undefined,
       });
       break;

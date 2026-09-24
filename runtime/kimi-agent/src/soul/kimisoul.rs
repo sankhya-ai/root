@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use kosong::chat_provider::{ChatProviderError, ChatProviderErrorKind};
+use kosong::chat_provider::{ChatProvider, ChatProviderError, ChatProviderErrorKind, ThinkingEffort};
 use kosong::message::{ContentPart, Message, Role, StreamedMessagePart, TextPart, ToolCall};
 use kosong::tooling::{ToolOutput, Toolset};
 use kosong::{StepResult, dispatch as kosong_dispatch, generate as kosong_generate, step as kosong_step};
@@ -19,6 +19,8 @@ use crate::council_budget::{CouncilBudgetExceeded, WALL_CLOCK_BUDGET_EXHAUSTED};
 use crate::skill::flow::{Flow, FlowEdge, FlowLabel, FlowNode, FlowNodeKind, parse_choice};
 use crate::skill::{Skill, SkillType, read_skill_text};
 use crate::soul::repeat_guard::RepeatGuard;
+use crate::soul::leaked_calls::LeakedCalls;
+use crate::soul::verify_gate::VerifyGate;
 use crate::soul::agent::{Agent, Runtime};
 use crate::soul::decision::JevClient;
 use crate::soul::director::{self, Director, DirectorConfig, DirectorMode, Directive, Phase};
@@ -100,6 +102,10 @@ pub struct KimiSoul {
     follow_ups: AtomicUsize,
     /// Identical calls with identical results this turn; see [`RepeatGuard`].
     repeat_guard: std::sync::Mutex<RepeatGuard>,
+    /// Edits this turn that nothing has run since; see [`VerifyGate`].
+    verify_gate: std::sync::Mutex<VerifyGate>,
+    /// Tool calls written as reply text this turn; see [`LeakedCalls`].
+    leaked_calls: std::sync::Mutex<LeakedCalls>,
     slash_commands: Vec<SlashCommandInfo>,
     slash_handlers: HashMap<String, SlashHandler>,
 }
@@ -161,6 +167,8 @@ impl KimiSoul {
             next_directive: std::sync::Mutex::new(None),
             follow_ups: AtomicUsize::new(0),
             repeat_guard: std::sync::Mutex::new(RepeatGuard::default()),
+            verify_gate: std::sync::Mutex::new(VerifyGate::from_env()),
+            leaked_calls: std::sync::Mutex::new(LeakedCalls::default()),
             slash_commands: Vec::new(),
             slash_handlers: HashMap::new(),
         };
@@ -451,6 +459,12 @@ impl KimiSoul {
         if let Ok(mut guard) = self.repeat_guard.lock() {
             guard.reset();
         }
+        if let Ok(mut gate) = self.verify_gate.lock() {
+            gate.reset();
+        }
+        if let Ok(mut leaked) = self.leaked_calls.lock() {
+            leaked.reset();
+        }
         self.checkpoint().await?;
         {
             let mut context = self.context.lock().await;
@@ -601,8 +615,19 @@ impl KimiSoul {
 
         let mut attempts = 0usize;
         let mut retry_hint: Option<Message> = None;
+        // (root; see VENDORED.md) A step that came back empty spent its whole
+        // output on reasoning. Measured on OpenRouter, effort and budget caps
+        // do not bound that for some models — only switching reasoning off
+        // does — so the retry acts without it instead of reasoning out again.
+        let mut exhausted = false;
+        let mut unthinking: Option<Box<dyn ChatProvider>> = None;
         let (result, forward_task) = loop {
             attempts += 1;
+            if exhausted && unthinking.is_none() {
+                info!("The last attempt reasoned to the output limit; retrying with reasoning off");
+                unthinking = Some(provider.with_thinking(ThinkingEffort::Off));
+            }
+            let provider: &dyn ChatProvider = unthinking.as_deref().unwrap_or(provider);
             let (message_tx, mut message_rx) = mpsc::unbounded_channel();
             let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
 
@@ -666,6 +691,7 @@ impl KimiSoul {
                         return Err(anyhow::Error::new(err));
                     }
                     retry_hint = retry_hint_for_error(&err);
+                    exhausted |= matches!(err.kind, ChatProviderErrorKind::EmptyResponse);
                     let delay = retry_delay(attempts);
                     info!(
                         "Retrying step for the {} time. Waiting {} seconds.",
@@ -723,6 +749,9 @@ impl KimiSoul {
             .lock()
             .await
             .observe(&result.tool_calls, &tool_results);
+        if let Ok(mut gate) = self.verify_gate.lock() {
+            gate.observe(&result.tool_calls, &tool_results);
+        }
         let tool_results = match self.repeat_guard.lock() {
             Ok(mut guard) => guard.annotate(&result.tool_calls, &tool_results),
             Err(_) => tool_results,
@@ -766,6 +795,21 @@ impl KimiSoul {
                     missing_completion_gates.join(", ")
                 ))],
             );
+            self.context.lock().await.append_messages(message).await?;
+            return Ok(None);
+        }
+        let written = director::message_text(&result.message);
+        let leaked = self.leaked_calls.lock().ok().and_then(|mut calls| calls.hold(&written));
+        if let Some(note) = leaked {
+            info!("A tool call was written as reply text; holding the turn open");
+            let message = Message::new(Role::User, vec![system(note)]);
+            self.context.lock().await.append_messages(message).await?;
+            return Ok(None);
+        }
+        let hold = self.verify_gate.lock().ok().and_then(|mut gate| gate.hold());
+        if let Some(note) = hold {
+            info!("Verify gate: the turn edited files and ran nothing since; holding it open");
+            let message = Message::new(Role::User, vec![system(&note)]);
             self.context.lock().await.append_messages(message).await?;
             return Ok(None);
         }
@@ -827,11 +871,25 @@ impl KimiSoul {
         let director = self.director.as_ref()?;
         let tools = { self.agent.toolset.lock().await.tools() };
         let history = { self.context.lock().await.history().to_vec() };
+        let (facts, unchecked) = match self.verify_gate.lock() {
+            Ok(gate) => (Some(serde_json::json!({ "turn_facts": gate.facts() })), gate.unchecked()),
+            Err(_) => (None, false),
+        };
         let started = std::time::Instant::now();
         let mut decision = director
-            .decide(&self.agent.system_prompt, &history, &tools, None, phase)
+            .decide(&self.agent.system_prompt, &history, &tools, facts.as_ref(), phase)
             .await?;
         let mode = director.config().mode;
+
+        // Reading is not a check. With edits nothing has exercised, the harness
+        // does not force another look; the model (and the gate) move it on.
+        if unchecked
+            && matches!(&decision.directive, Directive::Call { tool, .. } if matches!(tool.as_str(), "ReadFile" | "Glob" | "Grep"))
+        {
+            decision.directive = Directive::Free {
+                why: "edits not yet exercised",
+            };
+        }
 
         // Past the cap the model steers alone: a wrong read may cost a few
         // steps, never the whole turn.
@@ -881,6 +939,10 @@ impl KimiSoul {
             debug!("Provider cannot take per-call fields; the model takes this step");
             return Ok(None);
         };
+        // Writing the arguments of a call already decided needs no reasoning;
+        // with it, a reasoning model can think to the output limit and return
+        // nothing (root; see VENDORED.md).
+        let provider = provider.with_thinking(ThinkingEffort::Off);
         let mut history = { self.context.lock().await.history().to_vec() };
         history.push(director::argument_request(&tool));
 
@@ -905,6 +967,10 @@ impl KimiSoul {
             info!("Director got no argument object for {tool_name}; the model takes this step");
             return Ok(None);
         };
+        if !director::fits(&arguments, &tool) {
+            info!("Director's arguments do not fit {tool_name} (the model meant another step); the model takes this step");
+            return Ok(None);
+        }
 
         let mut call = ToolCall::new(
             format!("directed_{}", uuid::Uuid::new_v4().simple()),

@@ -13,6 +13,7 @@ from typing import Any
 ACTION_RUN_COMMAND = "run command"
 ACTION_EDIT_FILE = "edit file"
 ACTION_EDIT_OUTSIDE = "edit file outside of working directory"
+ACTION_READ_OUTSIDE = "read file outside of working directory"
 
 TIER_READ = "read"
 TIER_VERIFY = "verify"

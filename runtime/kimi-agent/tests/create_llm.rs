@@ -190,6 +190,8 @@ async fn test_create_llm_kimi_model_parameters() {
 
 #[tokio::test]
 async fn test_create_llm_honors_non_streaming_provider_transport() {
+    // Reads the model env vars, which other tests set: hold the lock too.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let provider = LLMProvider {
         provider_type: ProviderType::Kimi,
         base_url: "https://api.test/v1".to_string(),
