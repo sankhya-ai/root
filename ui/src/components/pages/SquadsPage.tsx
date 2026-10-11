@@ -222,18 +222,31 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
     setTimeout(() => setCopiedLinkId(null), 2500);
   }, []);
 
+  const selectIssue = useCallback((id: string | null) => {
+    setActiveIssueId(id);
+    if (id) {
+      if (window.location.hash !== `#/squads?issue=${id}`) {
+        window.history.replaceState(null, "", `#/squads?issue=${id}`);
+      }
+    } else {
+      if (window.location.hash.includes("issue=")) {
+        window.history.replaceState(null, "", `#/squads`);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (initialIssueId) {
-      setActiveIssueId(initialIssueId);
+      selectIssue(initialIssueId);
     }
-  }, [initialIssueId]);
+  }, [initialIssueId, selectIssue]);
 
   useEffect(() => {
     const hashIssue = /^#\/(?:i\/([a-zA-Z0-9_-]+)|squads\?(?:.*&)?issue=([a-zA-Z0-9_-]+))/.exec(window.location.hash);
     if (hashIssue) {
-      setActiveIssueId(hashIssue[1] || hashIssue[2]);
+      selectIssue(hashIssue[1] || hashIssue[2]);
     }
-  }, []);
+  }, [selectIssue]);
 
   // Actions & Messaging state
   const [loading, setLoading] = useState(false);
@@ -696,7 +709,7 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                           className={`squadCard ${isSelected ? "selected" : ""} ${
                             issue.status === "in_review" ? "inReview" : ""
                           }`}
-                          onClick={() => setActiveIssueId(issue.id)}
+                          onClick={() => selectIssue(issue.id)}
                         >
                           {/* Row 1: Priority + Identifier (left), Live Agent Working Badge (right) */}
                           <div className="squadCardTop">
@@ -789,7 +802,7 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
 
       {/* Squad Issue Execution Workspace Room */}
       {activeIssue ? (
-        <div className="squadDrawerBackdrop" onClick={() => setActiveIssueId(null)}>
+        <div className="squadDrawerBackdrop" onClick={() => selectIssue(null)}>
           <aside className="squadDrawer wideWorkspace" onClick={(e) => e.stopPropagation()}>
             {/* Top Bar */}
             <div className="workspaceTopBar">
@@ -842,7 +855,7 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                   <Zap size={12} style={{ color: "var(--accent)" }} />
                   <span>{triggeringStep ? "Advancing..." : "Advance Step"}</span>
                 </button>
-                <button className="iconButton" onClick={() => setActiveIssueId(null)}>
+                <button className="iconButton" onClick={() => selectIssue(null)}>
                   <X size={15} />
                 </button>
               </div>

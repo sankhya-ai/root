@@ -23,6 +23,13 @@ from ..tenancy import LOCAL
 from .directive import build_agent_runner_script, render_agent_directive
 
 
+def clean_issue_id(issue_id: str) -> str:
+    for ext in (".md", ".sh", ".json", ".spec"):
+        if issue_id.endswith(ext):
+            return issue_id[: -len(ext)]
+    return issue_id
+
+
 def router(app_state) -> APIRouter:
     link_api = APIRouter()
 
@@ -53,18 +60,16 @@ def router(app_state) -> APIRouter:
         fmt = (request.query_params.get("format") or "").lower()
 
         if issue_id.endswith(".md"):
-            issue_id = issue_id[:-3]
             fmt = fmt or "md"
         elif issue_id.endswith(".sh"):
-            issue_id = issue_id[:-3]
             fmt = fmt or "sh"
         elif issue_id.endswith(".json"):
-            issue_id = issue_id[:-5]
             fmt = fmt or "json"
 
-        issue = service.get_issue(issue_id)
+        clean_id = clean_issue_id(issue_id)
+        issue = service.get_issue(clean_id)
         if not issue:
-            raise HTTPException(404, f"Issue {issue_id} not found")
+            raise HTTPException(404, f"Issue {clean_id} not found")
 
         if fmt == "json":
             return {"issue": issue, "directive": render_agent_directive(issue, base_url)}
@@ -109,18 +114,20 @@ def router(app_state) -> APIRouter:
     @link_api.get("/i/{issue_id}/spec")
     async def get_issue_directive_markdown(issue_id: str, request: Request):
         service = get_service(request)
-        issue = service.get_issue(issue_id)
+        clean_id = clean_issue_id(issue_id)
+        issue = service.get_issue(clean_id)
         if not issue:
-            raise HTTPException(404, f"Issue {issue_id} not found")
+            raise HTTPException(404, f"Issue {clean_id} not found")
         base_url = str(request.base_url).rstrip("/")
         return Response(content=render_agent_directive(issue, base_url), media_type="text/markdown; charset=utf-8")
 
     @link_api.get("/i/{issue_id}.sh")
     async def get_issue_launcher_script(issue_id: str, request: Request):
         service = get_service(request)
-        issue = service.get_issue(issue_id)
+        clean_id = clean_issue_id(issue_id)
+        issue = service.get_issue(clean_id)
         if not issue:
-            raise HTTPException(404, f"Issue {issue_id} not found")
+            raise HTTPException(404, f"Issue {clean_id} not found")
         base_url = str(request.base_url).rstrip("/")
         return Response(
             content=build_agent_runner_script(issue, base_url), media_type="text/x-shellscript; charset=utf-8"
@@ -132,6 +139,7 @@ def router(app_state) -> APIRouter:
     @link_api.post("/api/issues/{issue_id}/pulse/public")
     async def agent_pulse_public(issue_id: str, request: Request) -> dict[str, Any]:
         service = get_service(request)
+        clean_id = clean_issue_id(issue_id)
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         agent_name = str(body.get("agent_name") or "Coding Agent").strip()
         user_name = str(body.get("user_name") or "Teammate").strip()
@@ -144,7 +152,7 @@ def router(app_state) -> APIRouter:
 
         try:
             issue = service.record_agent_pulse(
-                issue_id,
+                clean_id,
                 agent_name=agent_name,
                 user_name=user_name,
                 activity=activity,
@@ -154,7 +162,7 @@ def router(app_state) -> APIRouter:
                 phase=phase,
                 output_snippet=output_snippet,
             )
-            return {"ok": True, "issue_id": issue_id, "status": issue.get("status")}
+            return {"ok": True, "issue_id": clean_id, "status": issue.get("status")}
         except KeyError as error:
             raise HTTPException(404, str(error)) from error
 
@@ -162,6 +170,7 @@ def router(app_state) -> APIRouter:
     @link_api.post("/api/issues/{issue_id}/submit/public")
     async def submit_diff_public(issue_id: str, request: Request) -> dict[str, Any]:
         service = get_service(request)
+        clean_id = clean_issue_id(issue_id)
         content_type = request.headers.get("content-type", "")
 
         if content_type.startswith("application/json"):
@@ -187,13 +196,13 @@ def router(app_state) -> APIRouter:
 
         try:
             issue = service.submit_for_review(
-                issue_id,
+                clean_id,
                 diff=raw_diff,
                 verification_output=verification_output,
                 passed=passed,
             )
             service.record_agent_pulse(
-                issue_id,
+                clean_id,
                 agent_name=agent_name,
                 user_name=user_name,
                 activity="Pushed solution patch to Review Gate",
@@ -203,9 +212,9 @@ def router(app_state) -> APIRouter:
             )
             return {
                 "ok": True,
-                "issue_id": issue_id,
+                "issue_id": clean_id,
                 "status": "in_review",
-                "message": f"Diff submitted successfully. Issue {issue_id} is now in Review Gate.",
+                "message": f"Diff submitted successfully. Issue {clean_id} is now in Review Gate.",
             }
         except KeyError as error:
             raise HTTPException(404, str(error)) from error
@@ -214,6 +223,7 @@ def router(app_state) -> APIRouter:
     @link_api.post("/api/issues/{issue_id}/messages/public")
     async def send_message_public(issue_id: str, request: Request) -> dict[str, Any]:
         service = get_service(request)
+        clean_id = clean_issue_id(issue_id)
         body = await request.json()
         content = str(body.get("content") or "").strip()
         if not content:
@@ -224,7 +234,7 @@ def router(app_state) -> APIRouter:
 
         try:
             issue = service.add_intercom_message(
-                issue_id,
+                clean_id,
                 sender_id=sender_name.lower().replace(" ", "_"),
                 sender_name=sender_name,
                 sender_type="agent",
@@ -232,7 +242,7 @@ def router(app_state) -> APIRouter:
                 recipient=recipient,
                 content=content,
             )
-            return {"ok": True, "issue_id": issue_id}
+            return {"ok": True, "issue_id": clean_id}
         except KeyError as error:
             raise HTTPException(404, str(error)) from error
 

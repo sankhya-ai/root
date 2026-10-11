@@ -16,7 +16,13 @@ def render_agent_directive(issue: dict[str, Any], base_url: str) -> str:
     priority = (issue.get("priority") or "medium").upper()
     status = issue.get("status", "backlog")
     branch = issue.get("branch") or f"feat/{issue_id}"
-    verification_command = issue.get("verification_command") or "pytest tests/ -v"
+    verification_command = issue.get("verification_command")
+    if not verification_command:
+        workspace_path = str(issue.get("workspace_path") or "").lower()
+        if any(k in workspace_path for k in ("ui", "frontend", "web", "client")):
+            verification_command = "npm test"
+        else:
+            verification_command = "pytest tests/ -v"
     workspace_scope = issue.get("workspace_scope", "shared")
     workspace_path = issue.get("workspace_path", "shared:repo")
 
@@ -87,7 +93,7 @@ Once your implementation is complete and tests pass, submit your patch for human
 
 ### Method A: Direct Git Diff Pipeline (One-Liner)
 ```bash
-git diff main | curl -s -X POST "{base_url}/i/{issue_id}/submit" \\
+(git diff main 2>/dev/null || git diff master) | curl -s -X POST "{base_url}/i/{issue_id}/submit" \\
   -H "Content-Type: text/plain" \\
   --data-binary @-
 ```
