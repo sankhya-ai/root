@@ -4,6 +4,7 @@ import { Home } from "./components/Home.tsx";
 import { NewSessionDialog } from "./components/NewSessionDialog.tsx";
 import { FlowsPage } from "./components/pages/FlowsPage.tsx";
 import { LearningPage } from "./components/pages/LearningPage.tsx";
+import { SquadsPage } from "./components/pages/SquadsPage.tsx";
 import { TrustPage } from "./components/pages/TrustPage.tsx";
 import { Rail, type View } from "./components/Rail.tsx";
 import { SessionView } from "./components/SessionView.tsx";
@@ -34,7 +35,7 @@ function persist(key: string, value: string) {
 function routeFromHash(): Route {
   const session = /^#\/s\/([0-9a-f]+)$/.exec(location.hash);
   if (session) return { view: "session", id: session[1] };
-  const page = /^#\/(learning|flows|trust)$/.exec(location.hash);
+  const page = /^#\/(learning|flows|trust|squads)$/.exec(location.hash);
   return { view: page ? (page[1] as View) : "home", id: null };
 }
 
@@ -177,6 +178,7 @@ export function App() {
       {route.view === "learning" ? <LearningPage /> : null}
       {route.view === "flows" ? <FlowsPage /> : null}
       {route.view === "trust" ? <TrustPage /> : null}
+      {route.view === "squads" ? <SquadsPage /> : null}
       {dialog === "settings" ? (
         <SettingsDialog
           health={health}

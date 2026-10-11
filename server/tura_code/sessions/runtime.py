@@ -28,6 +28,7 @@ from ..memory import packet_envelope
 from ..wire import WireError, WireProcess
 from .approvals import Approvals
 from .host_tools import tool_error
+from .context_mgmt import ContextManager
 from .prompting import attachment_meta, build_parts, expand_mentions, title_of
 from .record import MODES, SessionRecord, TurnState
 
@@ -61,6 +62,13 @@ class SessionRuntime(Approvals):
         self.runtime_state = "stopped"
         self.runtime_info: dict[str, Any] = {}
         self._processes: processes.ProcessManager | None = None
+        # T4 context manager
+        self.context_mgr = ContextManager(self, budget=tenant.settings.get().max_context_size)
+        # Token accounting
+        self._token_usage: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
+        # ContentPart delta coalescing buffer
+        self._content_buffer: dict[str, dict] = {}
+        self._buffer_flush_task: asyncio.Task | None = None
         #: Set while the host itself stops the process (a restart, eviction, close).
         self._stopping = False
 
@@ -71,6 +79,19 @@ class SessionRuntime(Approvals):
 
     def emit(self, kind: str, payload: dict, *, persist: bool = True) -> dict:
         self._seq += 1
+        # Update token usage based on event type
+        if kind == "UserPrompt":
+            self._token_usage["prompt"] += len(payload.get("text", "")) + sum(len(p.get("text", "")) for p in payload.get("attachments", []))
+        elif kind == "TurnFinished":
+            # Estimate tokens from duration and complexity
+            duration = payload.get("duration", 0)
+            if duration > 5:
+                self._token_usage["completion"] += 2000  # estimate for complex turn
+            elif duration > 2:
+                self._token_usage["completion"] += 1000
+            elif duration > 0.5:
+                self._token_usage["completion"] += 500
+            self._token_usage["total"] = self._token_usage["prompt"] + self._token_usage["completion"]
         event = {"seq": self._seq, "ts": time.time(), "turn": self.turn.id if self.turn else None, "type": kind, "payload": payload}
         if persist:
             self.log.record(event)
@@ -209,7 +230,29 @@ class SessionRuntime(Approvals):
     async def _on_wire_event(self, kind: str, payload: dict) -> None:
         if self.turn is not None:
             _observe(self.turn, kind, payload)
+        # Coalesce ContentPart deltas (text/think) to reduce event count and token burn
+        if kind == "ContentPart":
+            ptype = payload.get("type")
+            if ptype in ("text", "think"):
+                key = f"ContentPart:{ptype}"
+                if key not in self._content_buffer:
+                    self._content_buffer[key] = {"type": "ContentPart", "payload": {"type": ptype, ptype: ""}}
+                self._content_buffer[key]["payload"][ptype] += payload.get(ptype, "")
+                # Schedule flush if not already scheduled
+                if self._buffer_flush_task is None or self._buffer_flush_task.done():
+                    self._buffer_flush_task = asyncio.create_task(self._flush_content_buffer())
+                return
+        # Flush any pending content before emitting other events
+        await self._flush_content_buffer()
         self.emit(kind, payload)
+
+    async def _flush_content_buffer(self) -> None:
+        await asyncio.sleep(0.01)  # small delay to batch deltas
+        for key, event in list(self._content_buffer.items()):
+            if event["payload"].get(event["payload"]["type"]):
+                self.emit("ContentPart", event["payload"])
+            del self._content_buffer[key]
+        self._buffer_flush_task = None
 
     async def _on_wire_request(self, request_id: str, kind: str, payload: dict) -> dict:
         if kind == "ApprovalRequest":
@@ -286,6 +329,28 @@ class SessionRuntime(Approvals):
         self._turn_task = asyncio.create_task(self._run_turn(process, turn, user_input))
 
     async def _run_turn(self, process: WireProcess, turn: TurnState, user_input: str | list) -> None:
+        # T4 context management: if configured, compact prior conversation history
+        # into a concise summary and prepend it to the user input, so the runtime's
+        # context window never overflows with full history. The recall_event tool
+        # stays available for the model to recover elided details.
+        strategy = self.tenant.settings.get().context_strategy
+        if strategy not in ("off", "T0"):
+            try:
+                page = self.log.page()
+                history = page.get("events") or []
+                # Only summarize meaningful conversation history (need at least
+                # one completed turn with a UserPrompt)
+                if len(history) > 2 and any(e.get("type") == "UserPrompt" for e in history):
+                    context_hint = self.context_mgr.manage_and_summarize(history)
+                    if context_hint:
+                        # Don't prepend context to slash commands
+                        if isinstance(user_input, str) and not user_input.lstrip().startswith("/"):
+                            user_input = context_hint + user_input
+                        elif isinstance(user_input, list):
+                            user_input = [{"type": "text", "text": context_hint}] + user_input
+            except Exception:  # noqa: BLE001 - never fail a turn over context management
+                logger.exception("context management summary failed, continuing without it")
+
         status, extra = "error", {}
         try:
             result = await process.prompt(user_input)

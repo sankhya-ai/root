@@ -49,10 +49,22 @@ def router(app_state) -> APIRouter:
         except (workspace.WorkspaceError, OSError) as error:
             raise HTTPException(400, str(error)) from error
 
+    @api.get("/workspaces")
+    async def list_workspaces(tenant: Tenant = Depends(tenant_of)) -> dict:
+        personal = []
+        if tenant.workspace_root and tenant.workspace_root.is_dir():
+            personal = [{"name": d.name, "path": str(d), "scope": "personal"} for d in sorted(tenant.workspace_root.iterdir()) if d.is_dir() and not d.name.startswith(".")]
+        shared = []
+        if tenant.server.shared_workspaces and tenant.server.shared_workspaces.is_dir():
+            shared = [{"name": d.name, "path": str(d), "scope": "shared"} for d in sorted(tenant.server.shared_workspaces.iterdir()) if d.is_dir() and not d.name.startswith(".")]
+        return {"workspaces": personal + shared, "personal": personal, "shared": shared}
+
     @api.post("/workspaces")
     async def create_workspace(body: dict[str, Any], tenant: Tenant = Depends(tenant_of)) -> dict:
-        """A new folder in the workspace folder, empty or cloned from an https Git URL."""
-        if tenant.workspace_root is None:
+        """A new folder in the personal or shared workspace folder, empty or cloned from an https Git URL."""
+        scope = str(body.get("scope") or "personal").strip()
+        base_dir = tenant.server.shared_workspaces if scope == "shared" else tenant.workspace_root
+        if base_dir is None:
             raise HTTPException(400, "Open a folder on this machine instead.")
         name = str(body.get("name") or "").strip()
         url = str(body.get("git_url") or "").strip()
@@ -60,12 +72,12 @@ def router(app_state) -> APIRouter:
             name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         if not _NAME.match(name):
             raise HTTPException(400, "Use a name of letters, digits, `.`, `-` or `_`.")
-        target = tenant.workspace_root / name
+        target = base_dir / name
         if target.exists():
             raise HTTPException(409, "A workspace with that name exists.")
         if not url:
             target.mkdir(parents=True)
-            return {"path": str(target)}
+            return {"path": str(target), "scope": scope, "name": name}
         if not _GIT_URL.match(url):
             raise HTTPException(400, "Clone from an https:// Git URL.")
         argv = tenant.sandbox.wrap(

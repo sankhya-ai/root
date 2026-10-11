@@ -1,13 +1,13 @@
 // The sidebar as Tura's: the mark, a few places (each with its wayfinding
 // colour), then the workspaces with their sessions nested under them.
 
-import { ChevronDown, ChevronRight, Folder, GitMerge, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, ShieldCheck, Sparkles, SquarePen, Sun, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, FolderKanban, GitMerge, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, ShieldCheck, Sparkles, SquarePen, Sun, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import type { Session } from "../lib/types.ts";
 import { Brand, TuraMark } from "./TuraBrand.tsx";
 
-export type View = "home" | "session" | "learning" | "flows" | "trust";
+export type View = "home" | "session" | "learning" | "flows" | "trust" | "squads";
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
@@ -48,7 +48,7 @@ export function Rail({
   learningBadge: number;
   user: string | null;
   onToggleCollapsed: () => void;
-  onNavigate: (view: "home" | "learning" | "flows" | "trust") => void;
+  onNavigate: (view: "home" | "learning" | "flows" | "trust" | "squads") => void;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (session: Session) => void;
@@ -63,6 +63,7 @@ export function Rail({
   const nav = (
     <nav className="railNav">
       <NavItem collapsed={collapsed} icon={<SquarePen size={16} className="icon-red" />} label="New session" active={view === "home"} onClick={() => onNavigate("home")} />
+      <NavItem collapsed={collapsed} icon={<FolderKanban size={16} className="icon-blue" />} label="Squads & Issues" active={view === "squads"} onClick={() => onNavigate("squads")} />
       <NavItem collapsed={collapsed} icon={<Sparkles size={16} className="icon-gold" />} label="Learning" badge={learningBadge} active={view === "learning"} onClick={() => onNavigate("learning")} />
       <NavItem collapsed={collapsed} icon={<GitMerge size={16} className="icon-green" />} label="Coding flows" active={view === "flows"} onClick={() => onNavigate("flows")} />
       <NavItem collapsed={collapsed} icon={<ShieldCheck size={16} className="icon-blue" />} label="Trust" active={view === "trust"} onClick={() => onNavigate("trust")} />

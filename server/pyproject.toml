@@ -18,7 +18,7 @@ dependencies = [
 # Dhee is the memory layer. Without it the agent still runs; it simply has no
 # long-term memory tools and no per-turn memory context.
 memory = [
-  "dhee[openai,zvec]>=7.4.3,<8",
+  "dhee[openai,zvec]>=7.4.4,<8",
 ]
 dev = [
   "pytest>=8.0.0",

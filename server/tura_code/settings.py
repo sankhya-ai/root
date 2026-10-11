@@ -27,6 +27,9 @@ PermissionMode = Literal["default", "accept_edits", "plan", "yolo"]
 DirectorMode = Literal["on", "shadow", "off"]
 MemoryMode = Literal["local", "openrouter", "off"]
 LearningMode = Literal["review", "auto", "off"]
+PlanningMode = Literal["default", "scaffold", "cost_saver", "off"]
+ContextStrategy = Literal["T0", "T1", "T2", "T3", "T4", "off"]
+ActionSpaceMode = Literal["predefined", "bash_only", "auto"]
 ReasoningEffort = Literal["", "none", "low", "medium", "high", "xhigh"]
 
 #: Credentials: never sent to the UI, and a blank field in a form means "unchanged".
@@ -76,6 +79,9 @@ class Settings(BaseModel):
     learning_model: str = ""
     default_permission_mode: PermissionMode = "default"
     recent_workspaces: list[str] = Field(default_factory=list)
+    planning_mode: PlanningMode = "default"
+    context_strategy: ContextStrategy = "T4"
+    action_space_mode: ActionSpaceMode = "predefined"
 
     @field_validator("base_url")
     @classmethod

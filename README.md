@@ -1,179 +1,232 @@
 # root
 
-A coding agent in your browser — as a local app, or hosted for many people — built from Tura's own parts:
+A collaborative coding agent platform in your browser — run locally or hosted for your entire engineering team. 
 
-- **kimi-agent-rs** — Tura's agent runtime (Rust): the observe-plan-act loop, file/search/shell/web/todo/subagent tools, approvals, compaction, sessions, skills, MCP.
-- **Jev** (`typesafe/jev-1.13`) — the step director inside that runtime. Before each step it decides whether the model should reply or which tool to call, so smaller models stop *describing* work and start *doing* it.
-- **Dhee** — the memory layer: project conventions, commands, decisions and your preferences persist across sessions and come back when relevant.
-- **Chotu Coder's machinery, working** — the trust ledger, the Hermes-style learning loop, background processes, and native coding flows, ported and tested end to end.
-- **The Tura UI** — Tura's deployed identity (mark, ruled-paper grounds, glass cards, outlined and ink pills) and Chotu's coding-mode transcript.
+**root** unites local developer agents (Claude Code, Antigravity, Codex, Cursor) with a shared workspace powered by Tura's runtime engine:
 
-Every model call goes through **OpenRouter**. Web search is **free**: keyless Parallel and Firecrawl search, no key needed.
+* **Multi-Agent Shared Workspaces** — Teammates connect their own local agents to a central workspace. Agents stream real-time progress, share context, claim optimistic file locks, and negotiate code contracts autonomously.
+* **Internal Execution Rooms** — Granular, step-by-step visibility into what agents are doing (search, inspect, edit, test, gate) with live progress bars, target file links, and expandable stdout/diff traces.
+* **kimi-agent-rs** — Tura's high-performance agent runtime (Rust): observe-plan-act loop, native tools, subagents, approvals, compaction, skills, and MCP.
+* **Jev Director** (`typesafe/jev-1.13`) — Pre-step director inside the runtime that steers models toward active execution rather than conversational filler.
+* **Engram Bus & Dhee Memory** — High-concurrency event bus (SQLite WAL) with optimistic file leases, cross-agent messaging, and cross-session memory that persists project conventions, preferences, and verified patterns.
+* **Trust Ledger & Learning Loop** — Default-deny command classifier that promotes trusted commands over time, coupled with an automatic reviewer that extracts reusable `SKILL.md` playbooks.
+* **Deployable UI** — Tura's design identity (glass cards, ruled-paper ground, outlined & ink pills, micro-signals) with full light and dark mode support.
+
+---
+
+## Architecture
 
 ```text
- browser (ui/) ──WebSocket──► host (server/tura_code) ──JSON-RPC/stdio──► kimi-agent (runtime/)  [in a bubblewrap jail when hosted]
-   transcript, approvals,       tenants · sessions · trust policy           agent loop + Jev director
-   flows, learning, trust       Dhee · learning loop · coding flows         Read/Edit/Glob/Grep/Shell/Web/Todo/Task
-                                processes · LLM proxy · runtime pool               │
-                                      │                                             ├─► host tools: memory_*, process, coding_flow
-                                      └──── OpenRouter ◄── /llm/api (token → key) ──┘
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                                   HOSTED ROOT PLATFORM                                 │
+ │                              (http://localhost:8787)                                   │
+ │                                                                                        │
+ │   ┌───────────────────────┐   ┌──────────────────────────┐   ┌─────────────────────┐   │
+ │   │  Collaborative Board  │   │   Multica Internal       │   │  Tura Web UI        │   │
+ │   │  (Issues & Squads)    │   │   Execution Rooms        │   │  (React + Vite)     │   │
+ │   └───────────┬───────────┘   └────────────┬─────────────┘   └──────────┬──────────┘   │
+ │               │                            │                            │              │
+ │   ┌───────────┴────────────────────────────┴────────────────────────────┴──────────┐   │
+ │   │                      HOST SERVER (server/tura_code)                            │   │
+ │   │  • Tenancy & Authentication        • LLM Proxy (Token-to-Key swapping)         │   │
+ │   │  • Sessions & Approvals            • Bubblewrap Jail Sandbox                   │   │
+ │   │  • Trust Ledger & Coding Flows     • Runtime Pool Manager                      │   │
+ │   └───────────┬─────────────────────────────────────────────────────────┬──────────┘   │
+ │               │                                                         │              │
+ │   ┌───────────┴────────────────────────┐       ┌────────────────────────┴──────────┐   │
+ │   │     ENGRAM BUS (SQLite / WAL)      │       │     kimi-agent-rs (runtime/)      │   │
+ │   │  • Cross-Agent Messaging & Queues  │       │  • Agent Loop + Jev Director      │   │
+ │   │  • Optimistic File Leases (Locks)  │       │  • File / Grep / Shell / Subagents│   │
+ │   │  • Dhee Long-Term Continuity       │       │  • Free Web Search (Keyless)      │   │
+ │   └───────────────────▲────────────────┘       └────────────────────────┬──────────┘   │
+ └───────────────────────┼─────────────────────────────────────────────────┼──────────────┘
+                         │ REST / SSE / Bridge CLI                         │
+         ┌───────────────┴───────────────┐                 ┌───────────────▼──────────────┐
+         ▼                               ▼                 ▼                              ▼
+  [ Teammate: Nitin ]          [ Teammate: Chitranjan ]  [ OpenRouter ]          [ Sandboxed Subprocess ]
+  • Running Claude Code        • Running Antigravity     (Model Provider)        (Dev servers & tests)
+  • Bridge Pulse & Steps       • Autonomous Dialogue
 ```
 
-## Built for weaker, cheaper models
+---
 
-The default model is `deepseek/deepseek-v4.1-flash`. The harness carries what a small model gets wrong:
+## Key Capabilities
 
-- **Jev** picks reply-or-tool before each step.
-- **Argument repair** — almost-JSON tool arguments (code fences, raw newlines in a `WriteFile` string, trailing commas, double encoding) are recovered losslessly; cut-off arguments are completed only for read-only tools, never for writes or commands.
-- **Whitespace-tolerant edits** — a `StrReplaceFile` whose `old` text is right but mis-indented is matched line by line (uniquely) and the replacement re-indented to the file.
-- **Repeat nudge** — the third identical call with an identical result gets a note to change approach, instead of looping to the step limit.
-- **`Glob("**/*.py")` works** — recursive patterns walk the tree and skip `node_modules`, `.git`, build and cache directories, instead of being refused.
-- **Dhee** attaches the relevant memories and learned skills, so the model does not have to rediscover the project each session.
+### 1. Multi-Agent Squads & Shared Workspaces
+* **Zero Agent Lock-In**: Developers on the team keep using whatever coding tool they prefer locally (Claude Code, Antigravity, Codex, Cursor, or CLI scripts).
+* **Instant Bridge Connection**: A teammate connects to the team workspace by running a single command:
+  ```bash
+  python -m tura_code.squads.bridge connect --url "http://localhost:8787" --user "Nitin" --agent "Claude Code"
+  ```
+* **Optimistic File Leases**: Prevents overwrite collisions across distributed agents. If an agent begins editing `server/api.py`, it claims an optimistic file lease recorded on the Engram Bus.
+* **Cross-Agent Intercom & Autonomous Dialogue**: Agents can send direct queries to other agents across the cloud or enter autonomous negotiations to align frontend/backend contract schemas without human bottlenecks.
 
-## What it does
+### 2. Deep Realtime Execution Rooms
+Clicking any issue opens a comprehensive execution workspace:
+* **Active Run Spotlight**: Real-time status banner with running duration, runner identity, step progress bar (`Step 4 of 6 (66%)`), and active tool/file targets.
+* **SWE-Bench Trajectory Timeline**: Chronological stream of agent actions split into clear phases:
+  * `Search` — Symbol scanning, grepping, AST search
+  * `Inspect` — Reading files and directory structures
+  * `Edit` — Applying targeted diffs and replacements
+  * `Test` — Running pytest, cargo test, or vitest suites
+  * `Gate` — Review checklist and merge verification
+* **Collapsible Traces**: Inspect raw stdout/stderr logs, execution traces, and unified diffs with a 1-click **Copy Trace** button.
 
-- **Multi-file changes** with diffs, verified by the project's own tests or build.
-- **Chotu-style turns** — your message, then root's answer with quiet trace lines (“Read 2 files, searched code”, “Edited 2 files”) that open to diffs and output; approval cards inline; a working orb with elapsed time; time and Copy under each turn.
-- **Permission modes** (Shift+Tab): *Ask before acting* · *Accept edits* · *Plan* (read-only, ends with an **Approve plan** bar) · *Auto-approve all*.
-- **Trust ledger** — read-only commands run at once; project checks (tests, lint, type checks) run in *Accept edits*; anything that can change state asks. Approve a command class three times in a row and root stops asking; one rejection takes the trust back. The classifier is default-deny and splits shell punctuation, so `echo hi;rm x` is two commands. See **Trust** in the sidebar.
-- **Learning loop** — after a turn that did real work, failed, or stated a preference, a reviewer proposes **skills** (written as `SKILL.md`, loaded into every later session) and **memories** (Dhee). Lessons tied to one task are filtered out; secrets are redacted. *Ask me* (default) queues them on the **Learning** page; *Automatic* keeps them. Skills keep their history and roll back.
-- **Coding flows** — for a substantial change, root builds 1–3 candidates in isolated Git worktrees, each with its own agent, runs your verification commands on every candidate, repairs failures from the exact test output, and a judge picks the best verified patch. You review the diff and apply it (bound to its hash) as a merge; rollback reverts exactly that merge.
-- **Background processes** — the `process` tool starts dev servers and watchers, polls them, reads their logs, sends stdin, and stops them; the **Processes** panel shows them.
-- **Memory**, **subagents** (`explorer`, `coder`), **skills**, **slash commands** (`/init`, `/compact`, `/clear`, `/yolo`, `/skill:…`), **`@file` mentions**, image and file attachments, **web search and fetch**, **MCP servers** from `~/.tura-code/mcp.json` (never a project's own `.mcp.json`).
+### 3. Built for Cheaper, Faster Models
+The default model is `deepseek/deepseek-v4.1-flash`. The harness carries the edge cases that smaller models typically struggle with:
+* **Jev Director**: Evaluates tool-vs-reply decisions before each turn so the model acts rather than chatting.
+* **Lossless Argument Repair**: Fixes almost-valid JSON (code fences, unescaped newlines in strings, trailing commas) without discarding turns.
+* **Whitespace-Tolerant Edits**: Re-indents search blocks to match file indentation cleanly.
+* **Repeat Nudge**: Detects repetitive identical tool calls and nudges the agent to adopt a different approach.
+* **Recursive Globbing**: Intelligently walks trees while pruning `.git`, `node_modules`, and build artifacts.
 
-## Quick start (local app)
+### 4. Security, Trust & Sandboxing
+* **Workspace Boundary**: Reaching outside the workspace folder requires owner confirmation in every mode.
+* **Credential Scrubbing**: No API key is ever exposed to runtimes or commands. The LLM proxy swaps transient launch tokens for operator keys on the fly.
+* **Bubblewrap Jail**: In hosted mode, every runtime, process, and test run executes inside an isolated `bwrap` container.
+* **Trust Ledger**: Automatically learns safe check commands over time through continuous developer usage.
 
-Prerequisites: Rust (stable), Python 3.11–3.13 (3.14 is not supported yet — if it is your default, run `make build PYTHON=python3.12`), Node 22.
+---
+
+## Quick Start (Local)
+
+### Prerequisites
+* **Rust** (stable)
+* **Python** 3.11–3.13 (Python 3.14 not yet supported for server dependencies; use `PYTHON=python3.12` if needed)
+* **Node.js** 22+
+
+### 1. Build & Run
+```bash
+# Build the runtime, server venv, and UI bundle
+make build
+
+# Configure your OpenRouter API key (or set it in UI Settings)
+export OPENROUTER_API_KEY=sk-or-...
+
+# Start the platform on http://localhost:8787
+make run
+```
+
+### 2. Connect Your Coding Agent
+In your project directory, paste the bridge command corresponding to your agent:
 
 ```bash
-make build                         # runtime (cargo), host (venv + pip), UI (vite)
-export OPENROUTER_API_KEY=sk-or-…  # or paste it in Settings
-make run                           # http://localhost:8787
+# Claude Code:
+claude "Run: python -m tura_code.squads.bridge connect --user 'Nitin' --agent 'Claude Code'"
+
+# Antigravity / Codex / Terminal:
+python -m tura_code.squads.bridge connect --user "Chitranjan" --agent "Antigravity"
 ```
 
-Type what you want on the home page, choose a folder, press Enter. `make doctor` checks the runtime, the agent spec, Dhee, the sandbox and the key.
+### 3. Stream Live Progress
+```bash
+# Send live activity pulse
+python -m tura_code.squads.bridge pulse \
+  --issue iss-002 \
+  --user "Nitin" \
+  --agent "Claude Code" \
+  --phase "Edit" \
+  --file "server/tura_code/squads/bridge.py" \
+  --tool "edit_file" \
+  --output "diff --git a/bridge.py\n+ exponential_backoff(retry=3)"
 
-### Try it without a key
+# Advance the next execution step
+python -m tura_code.squads.bridge step --issue iss-002 --agent "Claude Code" --user "Nitin"
+
+# Message another agent across the cloud
+python -m tura_code.squads.bridge message \
+  --issue iss-002 \
+  --user "Chitranjan" \
+  --agent "Antigravity" \
+  --to "@Claude-Code" \
+  --content "Please expose the WebSocket heartbeat payload schema."
+```
+
+---
+
+## Hosting for Teams
+
+On a Linux server with Bubblewrap installed (`apt install bubblewrap`):
 
 ```bash
-TURA_CODE_SCRIPTED_ECHO=script.json TURA_CODE_SCRIPTED_LLM=answers.json server/.venv/bin/tura-code
+# 1. Create a tenant user (outputs sign-in token once)
+server/.venv/bin/tura-code user add alice --name "Alice"
+
+# 2. Launch the hosted server behind an HTTPS reverse proxy
+TURA_CODE_ALLOWED_HOSTS=agents.company.internal \
+OPENROUTER_API_KEY=sk-or-... \
+  server/.venv/bin/tura-code serve --hosted --host 0.0.0.0 --port 8787
 ```
 
-`script.json` holds the model's replies in the runtime's echo DSL (`text: …`, `tool_call: {…}`), as a list — or an object mapping a process role (`main`, `candidate_1`…) to a list. `answers.json` maps `review`/`judge` to the reviewer's and judge's answers. See `server/tests/`.
+In hosted mode:
+* Each team member receives their own private tenant, settings, trust ledger, and workspace.
+* Runtimes run in Bubblewrap jails with read-only root filesystems.
+* Sessions are pooled and idle runtimes are cleanly evicted and restored on demand.
 
-## Hosting it
+---
 
-On a Linux host with bubblewrap (`apt install bubblewrap`), from a clone after `make build`:
+## Configuration Reference
 
-```bash
-server/.venv/bin/tura-code user add alice --name "Alice"   # prints Alice's sign-in token once
-TURA_CODE_ALLOWED_HOSTS=root.example.com \
-OPENROUTER_API_KEY=sk-or-… \
-  server/.venv/bin/tura-code serve --hosted --host 0.0.0.0  # behind an HTTPS reverse proxy
-```
-
-(`make build` installs the host in editable mode, so it finds `agent/` and the runtime binary in the clone; a packaged install sets `TURA_CODE_AGENT` and `TURA_CODE_RUNTIME`.)
-
-Each person gets a private tenant: their own sessions, settings (and optionally their own key), trust ledger, learned skills, Dhee owner scope, and a workspace folder they can create or `git clone` into. In hosted mode:
-
-- **Every runtime, background process, coding-flow check and clone runs in bubblewrap**: the system read-only, only the session's workspace, runtime directory and the person's home writable; other people's data and the server's own directory do not exist inside. The server refuses to start hosted without a working sandbox.
-- **No runtime holds an API key.** Runtimes talk to the model through the host's LLM proxy (`/llm/api`) with a per-launch token; the proxy swaps it for the person's key or the operator's.
-- **Runtimes are pooled**: per-person and total caps, least-recently-active idle runtimes are stopped to make room (their conversations resume on the next prompt), and idle ones are reaped.
-- Sign-in is a token in an `HttpOnly`, `SameSite=Strict`, `Secure` cookie. `tura-code user list|rotate|remove` manage people.
-
-Web search's keyless tiers are limited per IP address, so a shared server should set Parallel and Firecrawl keys in Settings.
-
-## Configuration
-
-Settings live in the UI and in `settings.json` (0600) under the data directory.
+Settings can be changed directly in the UI or in `~/.tura-code/settings.json` (0600):
 
 | Setting | Default | Notes |
-| --- | --- | --- |
-| Coding model | `deepseek/deepseek-v4.1-flash` | Any OpenRouter model with tool support. |
-| Reasoning effort | model default | `none` (off), `low`, `medium`, `high`. Some models ignore the effort levels; only `none` is reliably honoured. |
-| Provider preference | balanced | `throughput` (fastest), `price` (cheapest), or OpenRouter's own balancing. |
-| Jev director | on | `on`, `shadow` (record only), `off`. |
-| Dhee memory | local | `local` (offline, lexical), `openrouter` (embeddings), `off`. |
-| Web search | on, keyless | Parallel, then Firecrawl; optional keys; optional paid OpenRouter fallback. |
-| Learning | Ask me | `review`, `auto`, `off`; the reviewer and judge use the coding model unless set. |
-| New sessions start in | Ask before acting | Default permission mode. |
+| :--- | :--- | :--- |
+| **Coding Model** | `deepseek/deepseek-v4.1-flash` | Any tool-compatible model on OpenRouter. |
+| **Reasoning Effort** | `model default` | `none`, `low`, `medium`, `high`. |
+| **Provider Sort** | `balanced` | `throughput` (fastest), `price` (cheapest), or balanced. |
+| **Jev Director** | `on` | `on`, `shadow` (log only), `off`. |
+| **Dhee Memory** | `local` | `local` (lexical SQLite), `openrouter` (embeddings), `off`. |
+| **Web Search** | `on (keyless)` | Free Parallel + Firecrawl search tiers out of the box. |
+| **Permission Mode** | `Ask before acting` | `Ask before acting`, `Accept edits`, `Plan`, `Auto-approve all`. |
 
-| Variable | Purpose |
-| --- | --- |
-| `OPENROUTER_API_KEY` | The key (local: overrides settings; hosted: the operator's default). |
-| `TURA_CODE_HOME` | Data directory (default `~/.tura-code`). |
-| `TURA_CODE_HOST`, `TURA_CODE_PORT` | Listen address (default `127.0.0.1:8787`). |
-| `TURA_CODE_MODE`, `TURA_CODE_SANDBOX` | `hosted` / `bwrap`, as the CLI flags. |
-| `TURA_CODE_ALLOWED_HOSTS` | Hostnames to accept; required to listen beyond localhost. |
-| `TURA_CODE_TOKEN` | Fixed local API token for scripts. |
-| `TURA_CODE_RUNTIME`, `TURA_CODE_AGENT` | A `kimi-agent` binary / agent spec other than the repository's. |
-| `TURA_CODE_SCRIPTED_ECHO`, `TURA_CODE_SCRIPTED_LLM` | Scripted model and reviewer/judge, for tests and demos. |
+---
 
-## Running benchmarks
-
-`bench/harbor_root.py` runs root on [Terminal-Bench](https://www.tbench.ai/) (or any [Harbor](https://github.com/harbor-framework/harbor) dataset) the official way: each task in its own container, graded by the task's own verifier. It installs a static Linux build of the runtime and the agent spec into the container; the web host's extras (Dhee, learning, processes, flows) are not used there.
-
-```bash
-uv tool install harbor && colima start          # or any Docker
-./bench/build-linux.sh                          # once, and after runtime changes
-export OPENROUTER_API_KEY=sk-or-…
-PYTHONPATH="$PWD" harbor run -d terminal-bench/terminal-bench@latest \
-  -i terminal-bench/<task> --env docker -a bench.harbor_root:Root \
-  -m openrouter/deepseek/deepseek-v4.1-flash -o "$PWD/bench/jobs" \
-  [--ak provider_sort=throughput] [--ak reasoning_effort=none] [--ak director=off]
-```
-
-Use a dedicated OpenRouter key with a spending limit, so cost is measured exactly. Jev's effect has not been measured yet: to compare, run the same tasks with `--ak director=on`, `shadow` and `off`.
-
-## Security model
-
-- Local-only by default: the `Host` header is checked (DNS rebinding), the API and WebSocket need the same-site cookie, and the WebSocket checks `Origin`.
-- No credential in any runtime's environment or file (the LLM proxy); `*_API_KEY`, `KIMI_*`, `OPENROUTER_*` are scrubbed from every command's environment.
-- Approvals as above; coding-flow applies always ask; unattended flow candidates can only edit, read and run checks.
-- **The workspace is a boundary in every mode**, "Auto-approve all" included: reading or editing a file outside the session's folder, or a command that reaches outside it (absolute or home paths, `..`, `cd` out), asks the owner. System and toolchain locations (`/usr`, Homebrew, `~/.cargo/registry`…) are exempt, and "Allow for session" covers one folder. Command paths are read as a reviewer would — a best effort; hosted mode's sandbox is the hard wall.
-- Hosted: bubblewrap per runtime and command, confined workspaces, per-person memory scopes.
-
-## Repository layout
+## Repository Layout
 
 ```text
-agent/            the agent spec: tools, subagents, system prompt
-runtime/          kimi-agent-rs, vendored from Tura (runtime/VENDORED.md lists every change)
+agent/                   Base agent spec: tool definitions, subagents, system prompt
+runtime/                 kimi-agent-rs runtime vendored from Tura (Rust)
 server/tura_code/
-  app/              HTTP + WebSocket API (routes split by area), auth
-  sessions/         a session: runtime process, turns, approvals, host tools, prompts
-  tenancy.py        local vs hosted: the server and each person's tenant
-  trust/            command classifier, trust ledger, approval policy
-  memory/           Dhee gateway, per-person views, memory tools
-  learning/         the reviewer, candidate store, skill library
-  flows/            coding flows: worktrees, runner, judge, apply/rollback, tool
-  processes.py      background processes (the `process` tool)
-  sandbox.py        bubblewrap
-  llm_proxy.py      runtimes reach the model with a token, not a key
-  pool.py           runtime caps and eviction
-  events.py         the event log, read in bounded pages
-server/tests/     unit + end-to-end tests against the real runtime binary
-ui/               React + Vite + TypeScript
+  app/                   FastAPI routes (sessions, auth, workspaces, health)
+  squads/                Multi-agent collaboration subsystem:
+    bus.py                 Engram Bus (SQLite WAL, event queues, pub/sub)
+    models.py              Issue, Squad, ExecutionStep, ExecutionRun dataclasses
+    store.py               Thread-safe persistent JSON store with automatic backfill
+    service.py             Squad coordination, step state machine, review gate
+    routes.py              REST API endpoints (/api/squads, /api/issues, /bridge)
+    bridge.py              Standalone CLI bridge for local agent integration
+  sessions/              Runtime processes, turns, approvals, host tools
+  trust/                 Command classifier & trust ledger
+  memory/                Dhee persistent memory gateway
+  learning/              Automatic skill extraction & review loop
+  flows/                 Git worktree candidate branches & judge evaluation
+  launcher.py            Process arguments & credential-scrubbed environments
+ui/                      React 19 + TypeScript + Vite frontend:
+  src/components/pages/    SquadsPage (Kanban & Multica Execution Room), Trust, Learning
+  src/lib/                 API clients, diff parser, transcript folding
+server/tests/            End-to-end Python test suites
 ```
 
-## Development
+---
+
+## Development & Testing
 
 ```bash
-make test     # runtime (cargo test), host (pytest, end to end), UI (node --test + tsc)
-make dev      # host on :8787 + Vite on :5173
+# Run all test suites across the stack
+make test
+
+# Individual test runners:
+cargo test --manifest-path runtime/Cargo.toml --workspace   # Runtime Rust tests
+cd server && .venv/bin/python -m pytest -q                 # Host Python tests
+cd ui && npm test && npm run typecheck                     # UI tests & TypeScript check
+
+# Run with Vite hot-reloading:
+make dev   # UI on :5173, Host on :8787
 ```
 
-The end-to-end tests drive the real runtime with scripted replies: multi-file edits and approvals, every permission mode, the trust ledger (promotion, session grants, revocation), background processes, the learning loop (a promoted skill loaded by the next runtime), coding flows (repair, judging, apply, rollback), hosted isolation inside a real bubblewrap jail, the LLM proxy, runtime eviction, Dhee across sessions, and paging. `TURA_CODE_LIVE_SEARCH=1` also runs a real keyless web search.
+---
 
-## Where the parts come from
+## License
 
-- `runtime/` — `subsystems/sankhya/third_party/kimi-agent-rs` from `tura-learn/tura` (Moonshot AI's Kimi Code CLI in Rust, Apache-2.0; `runtime/LICENSE`, `runtime/NOTICE`) with Tura's Jev director, completion gate and Dhee continuity hook.
-- Trust ledger, learning reviewer, coding flows — ported from Chotu (`apps/hub/chotu_hub/agent_core/coder_approvals.py`, `assistant_runtime/self_improvement.py`, `assistant_runtime/native_coding.py`), with the fixes noted in each module.
-- Dhee — the `dhee` package (7.4.x), in-process through a typed gateway.
-- UI identity — the Tura mark, palette, textures and GeistPixel (Vercel, SIL OFL 1.1) from `apps/dashboard`.
-
-## Not there yet
-
-- No file-level checkpoints to rewind edits outside coding flows (use git; the Changes panel shows everything).
-- No terminal UI; no lifecycle hooks.
-- Jev needs an OpenRouter-shaped endpoint; elsewhere the model steers alone.
-- Local memory recall is lexical; switch Dhee to `openrouter` for semantic recall.
+* **Runtime**: Apache-2.0 (`runtime/LICENSE`, Moonshot AI / Kimi Code CLI).
+* **UI Typography**: GeistPixel (SIL OFL 1.1, Vercel).

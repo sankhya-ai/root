@@ -31,7 +31,7 @@ from pathlib import Path
 from .memory import CHECKPOINT_TOOL as MEMORY_CHECKPOINT_TOOL
 from .memory import MEMORY_ROLE
 from .sandbox import Mounts, Sandbox
-from .settings import PermissionMode, Settings
+from .settings import PermissionMode, Settings, PlanningMode, ContextStrategy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ENV = "TURA_CODE_RUNTIME"
@@ -124,6 +124,9 @@ class LaunchSpec:
     home: Path | None = None
     #: More writable places, e.g. the main repository's `.git` for a worktree.
     extra_writable: tuple[Path, ...] = ()
+    planning_mode: PlanningMode = "default"
+    context_strategy: ContextStrategy = "T4"
+    action_space_mode: ActionSpaceMode = "predefined"
 
     def key(self) -> str:
         return self.api_key or self.settings.api_key()
@@ -140,6 +143,8 @@ class LaunchSpec:
             s.max_steps_per_turn,
             s.director_mode,
             (s.web_search, s.web_search_paid_fallback, _digest(s.parallel_api_key), _digest(s.firecrawl_api_key), s.search_model),
+            s.planning_mode,
+            s.context_strategy,
             self.permission_mode == "plan",
             self.memory_enabled,
             tuple(sorted(self.capabilities)),
@@ -195,12 +200,42 @@ def write_agent_overlay(spec: LaunchSpec, runtime_dir: Path) -> Path:
         role += MEMORY_ROLE.splitlines()
     if spec.permission_mode == "plan":
         role += ["", *PLAN_MODE_ROLE.splitlines()] if role else PLAN_MODE_ROLE.splitlines()
+    # Planning mode: scaffold (weak models) vs cost_saver (strong models) vs off
+    if spec.planning_mode == "scaffold":
+        role += ["", "PLANNING: Maintain an explicit task plan using update_plan. Update it before and after significant steps."] if role else ["PLANNING: Maintain an explicit task plan using update_plan. Update it before and after significant steps."]
+    elif spec.planning_mode == "cost_saver":
+        role += ["", "PLANNING: Keep a lightweight plan. Focus on avoiding redundant verification after edits; trust your initial assessment."] if role else ["PLANNING: Keep a lightweight plan. Focus on avoiding redundant verification after edits; trust your initial assessment."]
+    elif spec.planning_mode == "off":
+        # Strip planning-related tools/subagents from the overlay
+        pass
     if role:
         lines += ["  system_prompt_args:", "    ROLE_ADDITIONAL: |"]
         lines += [f"      {line}" if line else "" for line in role]
+    exclude: list[str] = []
     if spec.permission_mode == "plan":
+        exclude.extend(MUTATING_FILE_TOOLS)
+    if spec.planning_mode == "off":
+        exclude.extend(["kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.multiagent:Task"])
+    if spec.action_space_mode == "bash_only":
+        exclude.extend([
+            "kimi_cli.tools.multiagent:Task",
+            "kimi_cli.tools.todo:SetTodoList",
+            "kimi_cli.tools.file:ReadFile",
+            "kimi_cli.tools.file:ReadMediaFile",
+            "kimi_cli.tools.file:Glob",
+            "kimi_cli.tools.file:Grep",
+            "kimi_cli.tools.file:WriteFile",
+            "kimi_cli.tools.file:StrReplaceFile",
+            "kimi_cli.tools.web:SearchWeb",
+            "kimi_cli.tools.web:FetchURL",
+        ])
+    if exclude:
         lines += ["  exclude_tools:"]
-        lines += [f"    - {json.dumps(name)}" for name in MUTATING_FILE_TOOLS]
+        seen_exclude: set[str] = set()
+        for tool_name in exclude:
+            if tool_name not in seen_exclude:
+                seen_exclude.add(tool_name)
+                lines.append(f"    - {json.dumps(tool_name)}")
     path = runtime_dir / "agent.yaml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

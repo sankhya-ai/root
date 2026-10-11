@@ -24,6 +24,30 @@ def router(app_state) -> APIRouter:
     async def list_flows(tenant: Tenant = Depends(tenant_of)) -> dict:
         return {"flows": tenant.flows.list()}
 
+    @api.post("")
+    async def create_flow(body: dict[str, Any], tenant: Tenant = Depends(tenant_of)) -> dict:
+        task = str(body.get("task") or "").strip()
+        repo = str(body.get("repo") or tenant.workspace_root or ".")
+        verification_commands = body.get("verification_commands") or ["git diff --check"]
+        candidate_count = int(body.get("candidate_count") or 2)
+        owner_session = body.get("owner_session")
+        if not owner_session:
+            active_sessions = tenant.sessions.list()
+            owner_session = active_sessions[0]["id"] if active_sessions else tenant.sessions.create(repo, "Flow Orchestrator").record.id
+        flow = await guarded(lambda: tenant.flows.create(
+            repo,
+            task,
+            owner_session=owner_session,
+            verification_commands=verification_commands,
+            candidate_count=candidate_count,
+        ))
+        if body.get("auto_start", True):
+            try:
+                await guarded(lambda: _sync(tenant.flows.start, flow["id"]))
+            except Exception:
+                pass
+        return {"flow": flow}
+
     @api.get("/{flow_id}")
     async def get_flow(flow_id: str, tenant: Tenant = Depends(tenant_of)) -> dict:
         return await guarded(lambda: _sync(tenant.flows.get, flow_id))

@@ -1,4 +1,23 @@
-import type { Flow, FlowReview, Health, LearnedSkill, LearningCandidate, Me, MemoryItem, ModelInfo, ProcessInfo, Session, Settings, TrustEntry, WireEvent } from "./types.ts";
+import type {
+  BusState,
+  Flow,
+  FlowReview,
+  Health,
+  Issue,
+  LearnedSkill,
+  LearningCandidate,
+  Me,
+  MemoryItem,
+  ModelInfo,
+  ProcessInfo,
+  Session,
+  Settings,
+  Squad,
+  SquadMember,
+  TeamCollaborator,
+  TrustEntry,
+  WireEvent,
+} from "./types.ts";
 
 let bootstrapped: Promise<void> | null = null;
 
@@ -65,7 +84,8 @@ export const api = {
     request<{ git: boolean; branch: string; files: { path: string; status: string }[]; diff: string }>(`/api/workspace/changes?${q({ path: workspace })}`),
   dirs: (path?: string) =>
     request<{ path: string; parent: string | null; git: boolean; entries: { name: string; path: string; git: boolean }[] }>(`/api/fs/dirs${path ? `?${q({ path })}` : ""}`),
-  createWorkspace: (name: string, gitUrl = "") => post<{ path: string }>("/api/workspaces", { name, git_url: gitUrl }),
+  workspaces: () => request<{ workspaces: { name: string; path: string; scope: "personal" | "shared" }[]; personal: { name: string; path: string; scope: "personal" }[]; shared: { name: string; path: string; scope: "shared" }[] }>("/api/workspaces"),
+  createWorkspace: (name: string, gitUrl = "", scope = "personal") => post<{ path: string; scope: string; name: string }>("/api/workspaces", { name, git_url: gitUrl, scope }),
   memory: (workspace: string, query?: string) =>
     request<{ items: MemoryItem[]; status: Health["memory"]; error?: string }>(`/api/memory?${q(query ? { path: workspace, q: query } : { path: workspace })}`),
   forget: (id: string, workspace: string) => request<{ ok: boolean }>(`/api/memory/${encodeURIComponent(id)}?${q({ path: workspace })}`, { method: "DELETE" }),
@@ -79,10 +99,94 @@ export const api = {
   rollbackSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/rollback`),
   forgetSkill: (name: string) => request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   flows: () => request<{ flows: Flow[] }>("/api/flows"),
+  createFlow: (body: { task: string; repo?: string; verification_commands?: string[]; candidate_count?: number; auto_start?: boolean }) =>
+    post<{ flow: Flow }>("/api/flows", body),
   flow: (id: string) => request<Flow>(`/api/flows/${id}`),
   flowReview: (id: string) => request<FlowReview>(`/api/flows/${id}/review`),
   flowAction: (id: string, action: "start" | "stop" | "cancel") => post<Flow>(`/api/flows/${id}/${action}`),
   flowSelect: (id: string, candidate: string) => post<Flow>(`/api/flows/${id}/select`, { candidate_id: candidate }),
   flowApply: (id: string, sha: string) => post<Flow>(`/api/flows/${id}/apply`, { review_sha256: sha }),
   flowRollback: (id: string, commit: string) => post<Flow>(`/api/flows/${id}/rollback`, { applied_commit: commit }),
+
+  // ── Squads, Issues, and Engram Bus ──
+  squads: () => request<{ squads: Squad[] }>("/api/squads"),
+  squad: (id: string) => request<{ squad: Squad }>(`/api/squads/${id}`),
+  createSquad: (body: { name: string; description?: string; lead_agent_id?: string; members?: SquadMember[] }) =>
+    post<{ squad: Squad }>("/api/squads", body),
+  addSquadMember: (squadId: string, member: { user_name: string; user_id?: string; role?: string }) =>
+    post<{ squad: Squad }>(`/api/squads/${squadId}/members`, member),
+  removeSquadMember: (squadId: string, userId: string) =>
+    request<{ squad: Squad }>(`/api/squads/${squadId}/members/${encodeURIComponent(userId)}`, { method: "DELETE" }),
+  issues: (params?: { squad_id?: string; workspace_scope?: string; status?: string }) => {
+    const clean: Record<string, string> = {};
+    if (params?.squad_id) clean.squad_id = params.squad_id;
+    if (params?.workspace_scope) clean.workspace_scope = params.workspace_scope;
+    if (params?.status) clean.status = params.status;
+    const search = Object.keys(clean).length ? `?${q(clean)}` : "";
+    return request<{ issues: Issue[] }>(`/api/issues${search}`);
+  },
+  issue: (id: string) => request<{ issue: Issue }>(`/api/issues/${id}`),
+  createIssue: (body: Partial<Issue>) => post<{ issue: Issue }>("/api/issues", body),
+  updateIssue: (id: string, changes: Partial<Issue>) =>
+    request<{ issue: Issue }>(`/api/issues/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
+  dispatchIssue: (id: string, target_agent?: string) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/dispatch`, { target_agent }),
+  submitIssueReview: (id: string, body: { diff: string; verification_output?: string; passed?: boolean }) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/review`, body),
+  approveIssue: (id: string) => post<{ issue: Issue }>(`/api/issues/${id}/approve`),
+  rejectIssue: (id: string, feedback: string) => post<{ issue: Issue }>(`/api/issues/${id}/reject`, { feedback }),
+  addIssueComment: (id: string, content: string, author_type: "human" | "agent" = "human", author_id?: string) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/comments`, { content, author_type, author_id }),
+  sendIssueMessage: (
+    id: string,
+    message: {
+      content: string;
+      sender_id: string;
+      sender_name: string;
+      sender_type: "human" | "agent";
+      agent_name: string;
+      recipient: string;
+      action_type?: string;
+      files_mentioned?: string[];
+    }
+  ) => post<{ issue: Issue }>(`/api/issues/${id}/messages`, message),
+  updateIssueCollaborators: (id: string, collaborators: TeamCollaborator[]) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/collaborators`, { collaborators }),
+  claimIssueLease: (id: string, filePath: string, agentName: string) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/leases/claim`, { file_path: filePath, agent_name: agentName }),
+  releaseIssueLease: (id: string, filePath: string) =>
+    post<{ issue: Issue }>(`/api/issues/${id}/leases/release`, { file_path: filePath }),
+  sendAgentPulse: (
+    id: string,
+    pulse: {
+      agent_name: string;
+      user_name: string;
+      activity: string;
+      status?: string;
+      active_file?: string;
+      last_tool?: string;
+      phase?: string;
+      output_snippet?: string;
+    }
+  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/pulse`, pulse),
+  triggerAgentStep: (
+    id: string,
+    payload?: {
+      agent_name?: string;
+      user_name?: string;
+    }
+  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/step`, payload || {}),
+  startAutonomousDiscussion: (
+    id: string,
+    payload: {
+      topic: string;
+      agent_a?: string;
+      user_a?: string;
+      agent_b?: string;
+      user_b?: string;
+    }
+  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/discuss`, payload),
+  busState: () => request<BusState>("/api/squads/bus/state"),
 };
+
+

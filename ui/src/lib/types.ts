@@ -258,3 +258,142 @@ export interface FlowReview {
   diff: { sha256: string; changed_paths: string[]; stat: string; patch: string };
   judgment: Flow["judgment"];
 }
+
+// ── Multi-human & Multi-agent Squads ──
+
+export type IssueStatus = "backlog" | "in_progress" | "blocked" | "in_review" | "done";
+export type IssuePriority = "low" | "medium" | "high" | "urgent";
+export type AssigneeType = "human" | "agent" | "unassigned";
+export type WorkspaceScope = "personal" | "shared";
+
+export interface TeamCollaborator {
+  user_id: string; // e.g. "chitranjan", "nitin", "ashish"
+  user_name: string; // e.g. "Chitranjan", "Nitin", "Ashish"
+  agent_id: string; // e.g. "antigravity", "claude_code", "codex", "root"
+  agent_name: string; // e.g. "Antigravity", "Claude Code", "Codex", "Root"
+  status: "active" | "working" | "idle" | "holding_lease" | "waiting_on_human";
+  current_activity: string;
+  last_active?: number;
+}
+
+export interface IntercomMessage {
+  id: string;
+  sender_id: string;
+  sender_name: string;
+  sender_type: "human" | "agent";
+  agent_name: string;
+  recipient: string; // "@all-agents", "@Antigravity", "@Claude-Code", "@Codex", etc.
+  content: string;
+  action_type:
+    | "message"
+    | "instruction"
+    | "lease_notice"
+    | "broadcast"
+    | "handoff"
+    | "agent_query"
+    | "agent_response"
+    | "lease_claimed"
+    | "agreement_synced"
+    | string;
+  files_mentioned?: string[];
+  created_at: number;
+}
+
+export interface SquadMember {
+  id: string;
+  type: "human" | "agent";
+  name: string;
+  role: string;
+  user_id?: string;
+  user_name?: string;
+  agent_id?: string;
+  agent_name?: string;
+}
+
+export interface Squad {
+  id: string;
+  name: string;
+  description: string;
+  members: TeamCollaborator[];
+  created_at: number;
+  updated_at: number;
+}
+
+export interface IssueComment {
+  id: string;
+  author_type: "human" | "agent";
+  author_id: string;
+  content: string;
+  created_at: number;
+}
+
+export interface ExecutionStep {
+  id: string;
+  run_id?: string;
+  timestamp: number;
+  agent_name: string;
+  user_name: string;
+  phase: "Search" | "Inspect" | "Edit" | "Test" | "Verify" | "Gate" | string;
+  tool?: string;
+  target_file?: string;
+  activity: string;
+  output_snippet?: string;
+  status: "completed" | "running" | "failed";
+}
+
+export interface ExecutionRun {
+  id: string;
+  issue_id: string;
+  agent_name: string;
+  user_name: string;
+  status: "running" | "completed" | "failed" | "paused";
+  phase: string;
+  step_count: number;
+  current_step: number;
+  current_activity: string;
+  active_file?: string;
+  last_tool?: string;
+  started_at: number;
+  updated_at: number;
+  completed_at?: number | null;
+}
+
+export interface Issue {
+  id: string;
+  title: string;
+  description: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+  squad_id: string;
+  assignee_type?: AssigneeType;
+  assignee_id?: string;
+  workspace_scope: WorkspaceScope;
+  workspace_path: string;
+  branch?: string;
+  flow_id?: string | null;
+  diff?: string | null;
+  verification_command?: string;
+  verification_output?: string | null;
+  verification_passed?: boolean | null;
+  blocker_reason?: string | null;
+  collaborators?: TeamCollaborator[];
+  messages?: IntercomMessage[];
+  active_leases?: Record<string, string>;
+  active_run?: ExecutionRun | null;
+  runs?: ExecutionRun[];
+  execution_timeline?: ExecutionStep[];
+  comments?: IssueComment[];
+  lane_id?: string | null;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+
+export interface BusState {
+  ready: boolean;
+  lanes: { id: string; session_id: string; from_agent: string; to_agent: string; status: string; context: any }[];
+  signals: { id: number; topic: string; data: any; agent_id: string | null; timestamp: string }[];
+  agents: { agent_id: string; metadata: any; first_seen: string; last_seen: string }[];
+  leases: Record<string, { agent_id: string; acquired_at: number }>;
+}

@@ -25,7 +25,7 @@ from .models import ModelCatalog
 from .pool import RuntimePool
 from .sandbox import Sandbox
 from .sessions import SessionManager
-from .sessions.host_tools import MemoryToolset, ProcessToolset, Toolset
+from .sessions.host_tools import MemoryToolset, ProcessToolset, ContextToolset, Toolset
 from .settings import SettingsStore
 from .trust import TrustLedger
 from .users import UserStore
@@ -53,7 +53,7 @@ class Tenant:
         self.home = home
         self.trust = TrustLedger(root / "trust.json")
         self.memory = MemoryView(server.gateway, owner_scope)
-        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset()]
+        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset(), ContextToolset()]
         #: Awaited when the tenant closes (a service's background work).
         self.closers: list[Any] = []
         self.sessions = SessionManager(self)
@@ -84,14 +84,24 @@ class Tenant:
     # ----- workspaces ----------------------------------------------------------
 
     def check_workspace(self, workspace: str | Path) -> Path:
-        path = Path(workspace).expanduser()
+        raw_str = str(workspace).strip()
+        path = Path(raw_str).expanduser()
         if self.workspace_root is not None and not path.is_absolute():
-            path = self.workspace_root / path
+            if raw_str.startswith("shared:"):
+                clean = raw_str.removeprefix("shared:").strip()
+                path = self.server.shared_workspaces / clean
+            elif (self.server.shared_workspaces / raw_str).is_dir():
+                path = self.server.shared_workspaces / raw_str
+            else:
+                path = self.workspace_root / path
         path = path.resolve()
         if not path.is_dir():
             raise WorkspaceError(f"Workspace does not exist or is not a directory: {path}")
-        if self.workspace_root is not None and not path.is_relative_to(self.workspace_root.resolve()):
-            raise WorkspaceError("Workspaces must be inside your workspace folder.")
+        if self.workspace_root is not None:
+            is_personal = path.is_relative_to(self.workspace_root.resolve())
+            is_shared = path.is_relative_to(self.server.shared_workspaces.resolve())
+            if not (is_personal or is_shared):
+                raise WorkspaceError("Workspaces must be inside your personal or shared workspace folder.")
         return path
 
     def touch(self, record) -> None:
@@ -122,6 +132,8 @@ class Tenant:
             session_dir=runtime.dir,
             home=self.home,
             extra_writable=self._git_dirs(runtime),
+            planning_mode=settings.planning_mode,
+            context_strategy=settings.context_strategy,
         )
 
     @staticmethod
@@ -206,6 +218,8 @@ class Server:
         self.pool = pool or RuntimePool()
         self.sandbox = sandbox or Sandbox()
         self.users = UserStore(home / "users.json")
+        self.shared_workspaces = home / "shared_workspaces"
+        self.shared_workspaces.mkdir(parents=True, exist_ok=True)
         self.model_capabilities: dict[str, list[str]] = {}
         #: Called with each new tenant, to add toolsets and services (learning, flows).
         self.extensions: list[Any] = []
