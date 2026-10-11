@@ -134,9 +134,9 @@
   }
 }
 
-/* ---------- Multica Board, Cards, Drawers & Dialogs ---------- */
+/* ---------- Squad Board, Cards, Drawers & Dialogs ---------- */
 
-.multicaShell {
+.squadShell {
   background: #0f1013;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-card);
@@ -148,14 +148,14 @@
   overflow: hidden;
   padding: 0;
 }
-[data-theme="light"] .multicaShell {
+[data-theme="light"] .squadShell {
   background: #fbfbfc;
   border: 1px solid rgba(0, 0, 0, 0.08);
   color: #17242d;
 }
 
-/* Multica Header */
-.multicaHeader {
+/* Squad Header */
+.squadHeader {
   align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -167,14 +167,14 @@
   padding: 0 14px;
   white-space: nowrap;
 }
-.multicaHeaderLeft,
-.multicaHeaderRight {
+.squadHeaderLeft,
+.squadHeaderRight {
   align-items: center;
   display: flex;
   flex-shrink: 0;
   gap: 8px;
 }
-.multicaTitle {
+.squadTitle {
   align-items: center;
   display: flex;
   flex-shrink: 0;
@@ -185,18 +185,18 @@
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
-.multicaSubTitle {
+.squadSubTitle {
   color: var(--ink-faint);
   font-size: 12px;
   font-weight: 400;
 }
-.multicaDivider {
+.squadDivider {
   color: var(--line-strong);
   font-weight: 400;
   margin: 0 2px;
 }
 
-.multicaScopeSwitch {
+.squadScopeSwitch {
   background: var(--user-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -206,7 +206,7 @@
   margin-left: 4px;
   padding: 2px;
 }
-.multicaScopeTab {
+.squadScopeTab {
   align-items: center;
   background: none;
   border: 0;
@@ -220,17 +220,17 @@
   padding: 2px 7px;
   transition: all 0.12s ease;
 }
-.multicaScopeTab:hover {
+.squadScopeTab:hover {
   color: var(--ink);
 }
-.multicaScopeTab.active {
+.squadScopeTab.active {
   background: var(--raised);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   color: var(--ink);
   font-weight: 600;
 }
 
-.multicaSearch {
+.squadSearch {
   align-items: center;
   background: var(--user-bg);
   border: 1px solid var(--line);
@@ -240,14 +240,14 @@
   padding: 0 8px;
   width: 155px;
 }
-.multicaSearch:focus-within {
+.squadSearch:focus-within {
   border-color: var(--line-strong);
 }
-.multicaSearchIcon {
+.squadSearchIcon {
   color: var(--ink-faint);
   margin-right: 5px;
 }
-.multicaSearch input {
+.squadSearch input {
   background: none;
   border: 0;
   color: var(--ink);
@@ -263,7 +263,7 @@
   padding: 0;
 }
 
-.multicaBusPill {
+.squadBusPill {
   align-items: center;
   background: var(--user-bg);
   border: 1px solid var(--line);
@@ -277,26 +277,26 @@
   height: 28px;
   padding: 0 9px;
 }
-.multicaBusPill:hover {
+.squadBusPill:hover {
   background: var(--hover);
   color: var(--ink);
 }
-.multicaBusPill.active {
+.squadBusPill.active {
   border-color: var(--accent-line);
   color: var(--ink);
 }
-.multicaPulseDot {
+.squadPulseDot {
   background: var(--ink-faint);
   border-radius: 50%;
   display: inline-block;
   height: 6px;
   width: 6px;
 }
-.multicaPulseDot.pulse {
+.squadPulseDot.pulse {
   background: #4ade80;
   box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
 }
-.multicaCountBadge {
+.squadCountBadge {
   background: var(--accent-soft);
   border-radius: 8px;
   color: var(--accent);
@@ -305,7 +305,7 @@
   padding: 0 4px;
 }
 
-.multicaTeammateBtn {
+.squadTeammateBtn {
   align-items: center;
   background: var(--user-bg);
   border: 1px solid var(--line);
@@ -320,13 +320,13 @@
   padding: 0 10px;
   transition: all 0.12s ease;
 }
-.multicaTeammateBtn:hover {
+.squadTeammateBtn:hover {
   background: var(--hover);
   color: var(--ink);
   border-color: var(--line-strong);
 }
 
-.multicaNewIssueBtn {
+.squadNewIssueBtn {
   align-items: center;
   background: var(--ink-button);
   border: 1px solid var(--ink-button);
@@ -341,11 +341,11 @@
   padding: 0 12px;
   transition: opacity 0.12s ease;
 }
-.multicaNewIssueBtn:hover {
+.squadNewIssueBtn:hover {
   opacity: 0.88;
 }
 
-.multicaErrorStrip {
+.squadErrorStrip {
   align-items: center;
   background: rgba(240, 75, 48, 0.1);
   border-bottom: 1px solid rgba(240, 75, 48, 0.25);
@@ -355,12 +355,12 @@
   gap: 8px;
   padding: 6px 16px;
 }
-.multicaErrorStrip span {
+.squadErrorStrip span {
   flex: 1;
 }
 
-/* Multica Board View */
-.multicaBoardContainer {
+/* Squad Board View */
+.squadBoardContainer {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -368,13 +368,13 @@
   overflow-y: hidden;
   padding: 12px 14px;
 }
-.multicaColumnsRow {
+.squadColumnsRow {
   display: flex;
   gap: 10px;
   height: 100%;
   min-height: 0;
 }
-.multicaColumn {
+.squadColumn {
   background: #14151a;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
@@ -386,15 +386,15 @@
   min-width: 280px;
   width: 280px;
 }
-[data-theme="light"] .multicaColumn {
+[data-theme="light"] .squadColumn {
   background: #f4f5f7;
   border: 1px solid rgba(0, 0, 0, 0.07);
 }
-.multicaColumn.reviewGate {
+.squadColumn.reviewGate {
   border-color: var(--accent-line);
 }
 
-.multicaColHeader {
+.squadColHeader {
   align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -402,24 +402,24 @@
   justify-content: space-between;
   padding: 8px 10px;
 }
-.multicaColHeaderTitle {
+.squadColHeaderTitle {
   align-items: center;
   display: flex;
   font-size: 12.5px;
   font-weight: 600;
   gap: 6px;
 }
-.multicaColName {
+.squadColName {
   letter-spacing: 0.01em;
 }
-.multicaColCount {
+.squadColCount {
   color: var(--ink-faint);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 500;
   margin-left: 2px;
 }
-.multicaColAddBtn {
+.squadColAddBtn {
   align-items: center;
   background: none;
   border: 0;
@@ -431,12 +431,12 @@
   justify-content: center;
   width: 20px;
 }
-.multicaColAddBtn:hover {
+.squadColAddBtn:hover {
   background: var(--hover);
   color: var(--ink);
 }
 
-.multicaCardList {
+.squadCardList {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -445,7 +445,7 @@
   overflow-y: auto;
   padding: 6px;
 }
-.multicaEmptyCol {
+.squadEmptyCol {
   align-items: center;
   border: 1px dashed var(--line);
   border-radius: 6px;
@@ -456,8 +456,8 @@
   justify-content: center;
 }
 
-/* Multica Compact Card */
-.multicaCard {
+/* Squad Compact Card */
+.squadCard {
   background: #1a1b22;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
@@ -469,44 +469,44 @@
   padding: 9px 10px;
   transition: all 0.12s ease;
 }
-[data-theme="light"] .multicaCard {
+[data-theme="light"] .squadCard {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
-.multicaCard:hover {
+.squadCard:hover {
   background: #20222a;
   border-color: rgba(255, 255, 255, 0.16);
   transform: translateY(-1px);
 }
-[data-theme="light"] .multicaCard:hover {
+[data-theme="light"] .squadCard:hover {
   background: #f8f9fa;
   border-color: rgba(0, 0, 0, 0.14);
 }
-.multicaCard.selected {
+.squadCard.selected {
   border-color: var(--ink);
 }
-.multicaCard.inReview {
+.squadCard.inReview {
   border-color: var(--accent-line);
 }
 
-.multicaCardTop {
+.squadCardTop {
   align-items: center;
   display: flex;
   justify-content: space-between;
 }
-.multicaCardKeyGroup {
+.squadCardKeyGroup {
   align-items: center;
   display: flex;
   gap: 6px;
 }
-.multicaIdentifier {
+.squadIdentifier {
   color: var(--ink-faint);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 500;
 }
-.multicaAgentWorkingBadge {
+.squadAgentWorkingBadge {
   align-items: center;
   background: rgba(74, 222, 128, 0.12);
   border-radius: 4px;
@@ -526,7 +526,7 @@
   width: 4px;
 }
 
-.multicaCardTitle {
+.squadCardTitle {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   color: var(--ink);
@@ -537,12 +537,12 @@
   overflow: hidden;
 }
 
-.multicaCardChipRow {
+.squadCardChipRow {
   align-items: center;
   display: flex;
   gap: 5px;
 }
-.multicaScopeChip {
+.squadScopeChip {
   align-items: center;
   border-radius: 4px;
   display: inline-flex;
@@ -551,15 +551,15 @@
   gap: 3px;
   padding: 1px 5px;
 }
-.multicaScopeChip.shared {
+.squadScopeChip.shared {
   background: rgba(77, 127, 165, 0.12);
   color: var(--icon-blue);
 }
-.multicaScopeChip.personal {
+.squadScopeChip.personal {
   background: rgba(227, 164, 115, 0.12);
   color: var(--accent);
 }
-.multicaBranchChip {
+.squadBranchChip {
   align-items: center;
   background: var(--user-bg);
   border-radius: 3px;
@@ -575,7 +575,7 @@
   white-space: nowrap;
 }
 
-.multicaCardBottom {
+.squadCardBottom {
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
@@ -585,7 +585,7 @@
   padding-top: 5px;
 }
 
-.multicaCollabsPillRow {
+.squadCollabsPillRow {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -617,7 +617,7 @@
   font-size: 10.5px;
 }
 
-.multicaReviewGatePill {
+.squadReviewGatePill {
   align-items: center;
   background: var(--accent-soft);
   border: 1px solid var(--accent-line);
@@ -665,8 +665,8 @@
   color: var(--ink-muted);
 }
 
-/* Multica Drawers */
-.multicaDrawerBackdrop {
+/* Squad Drawers */
+.squadDrawerBackdrop {
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
   background: rgba(0, 0, 0, 0.5);
@@ -676,8 +676,8 @@
   position: fixed;
   z-index: 80;
 }
-.multicaDrawer,
-.multicaTelemetryDrawer {
+.squadDrawer,
+.squadTelemetryDrawer {
   background: #111114;
   border-left: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: -12px 0 36px rgba(0, 0, 0, 0.45);
@@ -688,18 +688,18 @@
   width: 540px;
   z-index: 90;
 }
-.multicaTelemetryDrawer {
+.squadTelemetryDrawer {
   width: 420px;
 }
 
-[data-theme="light"] .multicaDrawer,
-[data-theme="light"] .multicaTelemetryDrawer {
+[data-theme="light"] .squadDrawer,
+[data-theme="light"] .squadTelemetryDrawer {
   background: #ffffff;
   border-left: 1px solid rgba(0, 0, 0, 0.1);
   box-shadow: -12px 0 36px rgba(0, 0, 0, 0.12);
 }
 
-.multicaDrawerHead {
+.squadDrawerHead {
   align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -707,7 +707,7 @@
   justify-content: space-between;
   padding: 12px 16px;
 }
-.multicaDrawerHeadLeft {
+.squadDrawerHeadLeft {
   align-items: center;
   display: flex;
   gap: 8px;
@@ -738,7 +738,7 @@
   text-transform: capitalize;
 }
 
-.multicaDrawerBody {
+.squadDrawerBody {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -1294,7 +1294,7 @@
 }
 
 /* Review Gate Card */
-.multicaReviewGateCard {
+.squadReviewGateCard {
   background: rgba(227, 164, 115, 0.04);
   border: 1px solid var(--accent-line);
   border-radius: 6px;
@@ -1525,8 +1525,8 @@
 }
 
 /* Clean Modal Backdrop and Dialog */
-.multicaModalBackdrop,
-.multicaDialogBackdrop {
+.squadModalBackdrop,
+.squadDialogBackdrop {
   align-items: center;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -1560,7 +1560,7 @@
   }
 }
 
-.multicaDialog {
+.squadDialog {
   backdrop-filter: var(--glass-blur);
   background: var(--glass-texture), var(--raised);
   border: 1px solid var(--line-strong);
@@ -1576,13 +1576,13 @@
   color: var(--ink);
 }
 
-[data-theme="light"] .multicaDialog {
+[data-theme="light"] .squadDialog {
   background: var(--raised);
   border: 1px solid var(--line-strong);
   box-shadow: 0 24px 64px rgba(24, 31, 35, 0.14);
 }
 
-.multicaDialogHead {
+.squadDialogHead {
   align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -1610,7 +1610,7 @@
   flex-shrink: 0;
 }
 
-.multicaDialogHead h3 {
+.squadDialogHead h3 {
   font-family: var(--font-display);
   font-size: 14.5px;
   font-weight: 600;
@@ -1657,14 +1657,14 @@
   font-weight: 600;
 }
 
-.multicaDialogBody {
+.squadDialogBody {
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
   padding: 16px;
 }
-.multicaDialogInput {
+.squadDialogInput {
   background: var(--user-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1673,19 +1673,19 @@
   font-weight: 500;
   padding: 8px 10px;
 }
-.multicaDialogInput:focus {
+.squadDialogInput:focus {
   border-color: var(--line-strong);
   outline: none;
 }
-[data-theme="light"] .multicaDialogInput {
+[data-theme="light"] .squadDialogInput {
   background: #ffffff;
   border: 1px solid rgba(23, 57, 76, 0.16);
   color: #0f172a;
 }
-[data-theme="light"] .multicaDialogInput:focus {
+[data-theme="light"] .squadDialogInput:focus {
   border-color: rgba(23, 57, 76, 0.4);
 }
-.multicaDialogTextarea {
+.squadDialogTextarea {
   background: var(--user-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1694,11 +1694,11 @@
   padding: 7px 10px;
   resize: vertical;
 }
-.multicaDialogTextarea:focus {
+.squadDialogTextarea:focus {
   border-color: var(--line-strong);
   outline: none;
 }
-.multicaFormRow {
+.squadFormRow {
   display: grid;
   gap: 10px;
   grid-template-columns: 1fr 1fr;
@@ -1864,7 +1864,7 @@
   padding: 2px 6px;
 }
 
-.multicaDialogFoot {
+.squadDialogFoot {
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
@@ -1912,10 +1912,10 @@
   cursor: not-allowed;
 }
 
-.multicaDialog.smallDialog {
+.squadDialog.smallDialog {
   max-width: 460px;
 }
-.multicaDialog.mediumDialog {
+.squadDialog.mediumDialog {
   max-width: 580px;
 }
 
@@ -3203,10 +3203,10 @@
 }
 
 /* ─────────────────────────────────────────────────────────────
- * Multica Internal Screen: Real-Time Execution Room & Tabs
+ * Squad Internal Screen: Real-Time Execution Room & Tabs
  * ───────────────────────────────────────────────────────────── */
 
-.multicaDrawer.wideWorkspace {
+.squadDrawer.wideWorkspace {
   width: 980px;
   max-width: 95vw;
   display: flex;

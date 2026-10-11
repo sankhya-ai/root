@@ -73,9 +73,9 @@ export const INITIAL_TEAM: TeamCollaborator[] = [
 
 export const DEFAULT_TEAM = INITIAL_TEAM;
 
-// ── Multica Status Icons (SVG exact geometry) ──
+// ── Squad Status Icons (SVG exact geometry) ──
 
-function MulticaStatusIcon({ status, size = 14 }: { status: IssueStatus; size?: number }) {
+function SquadStatusIcon({ status, size = 14 }: { status: IssueStatus; size?: number }) {
   if (status === "backlog") {
     const count = 12;
     return (
@@ -124,9 +124,9 @@ function MulticaStatusIcon({ status, size = 14 }: { status: IssueStatus; size?: 
   return <div style={{ width: size, height: size, borderRadius: "50%", border: "1.3px solid currentColor" }} />;
 }
 
-// ── Multica Priority Icons ──
+// ── Squad Priority Icons ──
 
-function MulticaPriorityIcon({ priority, size = 14 }: { priority: IssuePriority; size?: number }) {
+function SquadPriorityIcon({ priority, size = 14 }: { priority: IssuePriority; size?: number }) {
   if (priority === "urgent") {
     return (
       <span title="Urgent" style={{ display: "inline-flex", alignItems: "center" }}>
@@ -242,7 +242,7 @@ export function SquadsPage() {
   const [discussing, setDiscussing] = useState(false);
   const [copiedBridge, setCopiedBridge] = useState(false);
 
-  // Multica Execution Room State
+  // Squad Execution Room State
   const [drawerTab, setDrawerTab] = useState<"execution" | "intercom" | "diff">("execution");
   const [timelineFilter, setTimelineFilter] = useState<string>("all");
   const [expandedStepIds, setExpandedStepIds] = useState<Record<string, boolean>>({});
@@ -511,25 +511,25 @@ export function SquadsPage() {
   }, [activeIssue?.diff]);
 
   return (
-    <div className="multicaShell">
-      {/* Multica Header Bar */}
-      <header className="multicaHeader">
-        <div className="multicaHeaderLeft">
-          <div className="multicaTitle">
+    <div className="squadShell">
+      {/* Squad Header Bar */}
+      <header className="squadHeader">
+        <div className="squadHeaderLeft">
+          <div className="squadTitle">
             <Users size={14} style={{ color: "var(--accent)" }} />
             <span>Development Team</span>
           </div>
 
           {/* Scope Filter Switch */}
-          <div className="multicaScopeSwitch">
+          <div className="squadScopeSwitch">
             <button
-              className={`multicaScopeTab ${scopeFilter === "all" ? "active" : ""}`}
+              className={`squadScopeTab ${scopeFilter === "all" ? "active" : ""}`}
               onClick={() => setScopeFilter("all")}
             >
               All
             </button>
             <button
-              className={`multicaScopeTab ${scopeFilter === "shared" ? "active" : ""}`}
+              className={`squadScopeTab ${scopeFilter === "shared" ? "active" : ""}`}
               onClick={() => setScopeFilter("shared")}
               title="Shared repository issues"
             >
@@ -537,7 +537,7 @@ export function SquadsPage() {
               Shared
             </button>
             <button
-              className={`multicaScopeTab ${scopeFilter === "personal" ? "active" : ""}`}
+              className={`squadScopeTab ${scopeFilter === "personal" ? "active" : ""}`}
               onClick={() => setScopeFilter("personal")}
               title="Personal branch tasks"
             >
@@ -547,10 +547,10 @@ export function SquadsPage() {
           </div>
         </div>
 
-        <div className="multicaHeaderRight">
+        <div className="squadHeaderRight">
           {/* Quick Search */}
-          <div className="multicaSearch">
-            <Search size={12} className="multicaSearchIcon" />
+          <div className="squadSearch">
+            <Search size={12} className="squadSearchIcon" />
             <input
               type="text"
               placeholder="Filter issues..."
@@ -581,7 +581,7 @@ export function SquadsPage() {
           {/* Manage Team Button */}
           <button
             type="button"
-            className="multicaTeammateBtn"
+            className="squadTeammateBtn"
             onClick={() => {
               setTeamModalTab("roster");
               setShowTeamModal(true);
@@ -594,7 +594,7 @@ export function SquadsPage() {
 
           {/* Primary Action Button */}
           <button
-            className="multicaNewIssueBtn"
+            className="squadNewIssueBtn"
             onClick={() => {
               setNewIssueInitialStatus("backlog");
               setShowNewIssue(true);
@@ -612,7 +612,7 @@ export function SquadsPage() {
 
       {/* Error Strip */}
       {actionError ? (
-        <div className="multicaErrorStrip">
+        <div className="squadErrorStrip">
           <AlertCircle size={13} />
           <span>{actionError}</span>
           <button className="iconButton" onClick={() => setActionError("")}>
@@ -621,24 +621,24 @@ export function SquadsPage() {
         </div>
       ) : null}
 
-      {/* Multica Board View Container */}
-      <div className="multicaBoardContainer">
-        <div className="multicaColumnsRow">
+      {/* Squad Board View Container */}
+      <div className="squadBoardContainer">
+        <div className="squadColumnsRow">
           {COLUMNS.map((col) => {
             const colIssues = filteredIssues.filter((i) => i.status === col.id);
             const isReviewGate = col.id === "in_review";
 
             return (
-              <div key={col.id} className={`multicaColumn ${isReviewGate ? "reviewGate" : ""}`}>
+              <div key={col.id} className={`squadColumn ${isReviewGate ? "reviewGate" : ""}`}>
                 {/* Column Header */}
-                <div className="multicaColHeader">
-                  <div className="multicaColHeaderTitle">
-                    <MulticaStatusIcon status={col.id} size={13} />
-                    <span className="multicaColName">{col.title}</span>
-                    <span className="multicaColCount">{colIssues.length}</span>
+                <div className="squadColHeader">
+                  <div className="squadColHeaderTitle">
+                    <SquadStatusIcon status={col.id} size={13} />
+                    <span className="squadColName">{col.title}</span>
+                    <span className="squadColCount">{colIssues.length}</span>
                   </div>
                   <button
-                    className="multicaColAddBtn"
+                    className="squadColAddBtn"
                     title={`Add issue to ${col.title}`}
                     onClick={() => {
                       setNewIssueInitialStatus(col.id);
@@ -650,9 +650,9 @@ export function SquadsPage() {
                 </div>
 
                 {/* Column Cards List */}
-                <div className="multicaCardList scroll">
+                <div className="squadCardList scroll">
                   {colIssues.length === 0 ? (
-                    <div className="multicaEmptyCol">
+                    <div className="squadEmptyCol">
                       <span>No issues</span>
                     </div>
                   ) : (
@@ -665,21 +665,21 @@ export function SquadsPage() {
                       return (
                         <div
                           key={issue.id}
-                          className={`multicaCard ${isSelected ? "selected" : ""} ${
+                          className={`squadCard ${isSelected ? "selected" : ""} ${
                             issue.status === "in_review" ? "inReview" : ""
                           }`}
                           onClick={() => setActiveIssueId(issue.id)}
                         >
                           {/* Row 1: Priority + Identifier (left), Live Agent Working Badge (right) */}
-                          <div className="multicaCardTop">
-                            <div className="multicaCardKeyGroup">
-                              <MulticaPriorityIcon priority={issue.priority} size={13} />
-                              <span className="multicaIdentifier">{issue.id}</span>
+                          <div className="squadCardTop">
+                            <div className="squadCardKeyGroup">
+                              <SquadPriorityIcon priority={issue.priority} size={13} />
+                              <span className="squadIdentifier">{issue.id}</span>
                             </div>
 
                             {hasActiveAgent ? (
                               <span
-                                className="multicaAgentWorkingBadge"
+                                className="squadAgentWorkingBadge"
                                 title={activeAgentActivity || "Agent executing in background"}
                               >
                                 <span className="miniDot" />
@@ -689,18 +689,18 @@ export function SquadsPage() {
                           </div>
 
                           {/* Row 2: Title (crisp, 2 lines max) */}
-                          <div className="multicaCardTitle" title={issue.title}>
+                          <div className="squadCardTitle" title={issue.title}>
                             {issue.title}
                           </div>
 
                           {/* Row 3: Scope Tag & Branch Tag */}
-                          <div className="multicaCardChipRow">
-                            <span className={`multicaScopeChip ${issue.workspace_scope}`}>
+                          <div className="squadCardChipRow">
+                            <span className={`squadScopeChip ${issue.workspace_scope}`}>
                               {issue.workspace_scope === "shared" ? <Globe size={10} /> : <Folder size={10} />}
                               {issue.workspace_scope}
                             </span>
                             {issue.branch ? (
-                              <span className="multicaBranchChip" title={issue.branch}>
+                              <span className="squadBranchChip" title={issue.branch}>
                                 <GitBranch size={9} />
                                 {issue.branch.replace("feat/", "").replace("squad/", "")}
                               </span>
@@ -708,8 +708,8 @@ export function SquadsPage() {
                           </div>
 
                           {/* Row 4: Collaborator Human + Agent Pairs & Review Gate Indicator */}
-                          <div className="multicaCardBottom">
-                            <div className="multicaCollabsPillRow">
+                          <div className="squadCardBottom">
+                            <div className="squadCollabsPillRow">
                               {collabs.length > 0 ? (
                                 collabs.map((c) => (
                                   <div
@@ -732,7 +732,7 @@ export function SquadsPage() {
                             </div>
 
                             {issue.status === "in_review" ? (
-                              <span className="multicaReviewGatePill">
+                              <span className="squadReviewGatePill">
                                 <ShieldCheck size={11} /> Review Gate
                               </span>
                             ) : null}
@@ -748,10 +748,10 @@ export function SquadsPage() {
         </div>
       </div>
 
-      {/* Multica Issue Execution Workspace Room */}
+      {/* Squad Issue Execution Workspace Room */}
       {activeIssue ? (
-        <div className="multicaDrawerBackdrop" onClick={() => setActiveIssueId(null)}>
-          <aside className="multicaDrawer wideWorkspace" onClick={(e) => e.stopPropagation()}>
+        <div className="squadDrawerBackdrop" onClick={() => setActiveIssueId(null)}>
+          <aside className="squadDrawer wideWorkspace" onClick={(e) => e.stopPropagation()}>
             {/* Top Bar */}
             <div className="workspaceTopBar">
               <div className="workspaceTopLeft">
@@ -768,7 +768,7 @@ export function SquadsPage() {
                   <option value="done">Done</option>
                 </select>
                 <div className="drawerPriorityWrap">
-                  <MulticaPriorityIcon priority={activeIssue.priority} size={14} />
+                  <SquadPriorityIcon priority={activeIssue.priority} size={14} />
                   <span className="priorityText">{activeIssue.priority}</span>
                 </div>
                 <span className="scopeBadge">
@@ -1270,7 +1270,7 @@ export function SquadsPage() {
                 {/* ── TAB 3: REVIEW GATE & DIFF ── */}
                 {drawerTab === "diff" && (
                   <div className="drawerSection" style={{ borderTop: "none", paddingTop: 0 }}>
-                    <div className="multicaReviewGateCard">
+                    <div className="squadReviewGateCard">
                       <div className="gateHeader">
                         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                           <ShieldCheck size={14} style={{ color: "var(--ok)" }} />
@@ -1526,11 +1526,11 @@ export function SquadsPage() {
 
 
 
-      {/* Multica-Styled Clean Create Issue Modal */}
+      {/* Squad-Styled Clean Create Issue Modal */}
       {showNewIssue ? (
-        <div className="multicaModalBackdrop" onClick={() => setShowNewIssue(false)}>
-          <div className="multicaDialog" onClick={(e) => e.stopPropagation()}>
-            <div className="multicaDialogHead">
+        <div className="squadModalBackdrop" onClick={() => setShowNewIssue(false)}>
+          <div className="squadDialog" onClick={(e) => e.stopPropagation()}>
+            <div className="squadDialogHead">
               <h3>Create Collaborative Issue</h3>
               <button className="iconButton" onClick={() => setShowNewIssue(false)}>
                 <X size={15} />
@@ -1538,10 +1538,10 @@ export function SquadsPage() {
             </div>
 
             <form onSubmit={handleCreateIssueSubmit}>
-              <div className="multicaDialogBody">
+              <div className="squadDialogBody">
                 <input
                   type="text"
-                  className="multicaDialogInput"
+                  className="squadDialogInput"
                   placeholder="Issue title"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
@@ -1550,7 +1550,7 @@ export function SquadsPage() {
                 />
 
                 <textarea
-                  className="multicaDialogTextarea"
+                  className="squadDialogTextarea"
                   rows={3}
                   placeholder="Description or specifications for the team and agents..."
                   value={newDescription}
@@ -1667,7 +1667,7 @@ export function SquadsPage() {
                   </div>
                 </div>
 
-                <div className="multicaFormRow">
+                <div className="squadFormRow">
                   <div className="formField">
                     <label>Workspace Scope</label>
                     <select
@@ -1704,7 +1704,7 @@ export function SquadsPage() {
                 </div>
               </div>
 
-              <div className="multicaDialogFoot">
+              <div className="squadDialogFoot">
                 <button
                   type="button"
                   className="dialogCancelBtn"
@@ -1723,14 +1723,14 @@ export function SquadsPage() {
 
       {/* Unified Team & Agent Workspace Modal */}
       {showTeamModal ? (
-        <div className="multicaDialogBackdrop" onClick={() => setShowTeamModal(false)}>
+        <div className="squadDialogBackdrop" onClick={() => setShowTeamModal(false)}>
           <div
-            className="multicaDialog mediumDialog"
+            className="squadDialog mediumDialog"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-label="Team & Agent Workspace"
           >
-            <div className="multicaDialogHead">
+            <div className="squadDialogHead">
               <div className="modalHeadTitleRow">
                 <div className="modalHeadIconWrap">
                   {teamModalTab === "connect" ? <Terminal size={16} /> : <Users size={16} />}
@@ -1785,7 +1785,7 @@ export function SquadsPage() {
               </button>
             </div>
 
-            <div className="multicaDialogBody">
+            <div className="squadDialogBody">
               {teamModalTab === "connect" ? (
                 <>
                   <p style={{ margin: 0, fontSize: "12.5px", color: "var(--ink-muted)", lineHeight: 1.5 }}>
@@ -1818,7 +1818,7 @@ export function SquadsPage() {
                     </label>
                     <input
                       type="text"
-                      className="multicaDialogInput"
+                      className="squadDialogInput"
                       placeholder="Your name (e.g. Nitin, Chitranjan, Ashish)"
                       value={connectUserName}
                       onChange={(e) => setConnectUserName(e.target.value)}
@@ -1949,7 +1949,7 @@ export function SquadsPage() {
                     <div style={{ display: "flex", gap: 8 }}>
                       <input
                         type="text"
-                        className="multicaDialogInput"
+                        className="squadDialogInput"
                         placeholder="Teammate name (e.g. Rahul)..."
                         value={newTeammateName}
                         onChange={(e) => setNewTeammateName(e.target.value)}
@@ -1969,7 +1969,7 @@ export function SquadsPage() {
               )}
             </div>
 
-            <div className="multicaDialogFoot">
+            <div className="squadDialogFoot">
               <button
                 type="button"
                 className="dialogSubmitBtn"

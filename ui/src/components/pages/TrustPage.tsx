@@ -52,7 +52,7 @@ export function TrustPage() {
   const promotedCount = entries?.filter((e) => e.promoted).length ?? 0;
 
   return (
-    <div className="multicaShell" style={{ padding: "20px 24px", overflowY: "auto" }}>
+    <div className="squadShell" style={{ padding: "20px 24px", overflowY: "auto" }}>
       {/* Header */}
       <div className="flowHeader">
         <div>

@@ -22,7 +22,7 @@ A collaborative coding agent platform in your browser — run locally or hosted 
  │                              (http://localhost:8787)                                   │
  │                                                                                        │
  │   ┌───────────────────────┐   ┌──────────────────────────┐   ┌─────────────────────┐   │
- │   │  Collaborative Board  │   │   Multica Internal       │   │  Tura Web UI        │   │
+ │   │  Collaborative Board  │   │   Real-Time Workspace    │   │  Tura Web UI        │   │
  │   │  (Issues & Squads)    │   │   Execution Rooms        │   │  (React + Vite)     │   │
  │   └───────────┬───────────┘   └────────────┬─────────────┘   └──────────┬──────────┘   │
  │               │                            │                            │              │
@@ -202,7 +202,7 @@ server/tura_code/
   flows/                 Git worktree candidate branches & judge evaluation
   launcher.py            Process arguments & credential-scrubbed environments
 ui/                      React 19 + TypeScript + Vite frontend:
-  src/components/pages/    SquadsPage (Kanban & Multica Execution Room), Trust, Learning
+  src/components/pages/    SquadsPage (Kanban & Squad Execution Room), Trust, Learning
   src/lib/                 API clients, diff parser, transcript folding
 server/tests/            End-to-end Python test suites
 ```

@@ -85,7 +85,7 @@ export function FlowsPage() {
   const completedCount = flows?.filter((f) => f.status === "ready_to_apply" || f.status === "applied").length ?? 0;
 
   return (
-    <div className="multicaShell" style={{ padding: "20px 24px", overflowY: "auto" }}>
+    <div className="squadShell" style={{ padding: "20px 24px", overflowY: "auto" }}>
       {/* Header */}
       <div className="flowHeader">
         <div>
