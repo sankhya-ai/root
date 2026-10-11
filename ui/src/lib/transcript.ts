@@ -48,6 +48,8 @@ export type Block =
       error?: string;
       files: string[];
       usage: UsageTotals;
+      verified?: boolean;
+      checks?: number;
     };
 
 export type ToolBlock = Extract<Block, { kind: "tool" }>;
@@ -356,6 +358,8 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         error: p.error ? String(p.error) : undefined,
         files: Array.isArray(p.files_touched) ? p.files_touched : [],
         usage: { ...state.turnUsage },
+        verified: typeof p.verified === "boolean" ? p.verified : undefined,
+        checks: typeof p.checks === "number" ? p.checks : undefined,
       });
       break;
     }

@@ -65,6 +65,11 @@ function Footer({ end, text }: { end: EndBlock; text: string }) {
         {status ? <span className={failed ? "err" : ""}>{status}</span> : null}
         {end.duration != null ? <span>{end.duration < 60 ? `${end.duration.toFixed(1)}s` : `${Math.floor(end.duration / 60)}m ${Math.round(end.duration % 60)}s`}</span> : null}
         {end.files.length ? <span title={end.files.join("\n")}>{end.files.length} file{end.files.length === 1 ? "" : "s"} changed</span> : null}
+        {end.verified ? (
+          <span className="verified" title={`Verified with ${end.checks ?? 1} automated check(s)`}>✓ verified</span>
+        ) : end.files.length > 0 ? (
+          <span className="unverified" title="Changes completed without running automated checks">unverified</span>
+        ) : null}
         {end.usage.input || end.usage.output ? (
           <span>
             {tokens(end.usage.input)} in · {tokens(end.usage.output)} out{end.usage.cost ? ` · $${end.usage.cost.toFixed(4)}` : ""}

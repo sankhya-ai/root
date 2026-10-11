@@ -18,11 +18,22 @@ def render_agent_directive(issue: dict[str, Any], base_url: str) -> str:
     branch = issue.get("branch") or f"feat/{issue_id}"
     verification_command = issue.get("verification_command")
     if not verification_command:
-        workspace_path = str(issue.get("workspace_path") or "").lower()
-        if any(k in workspace_path for k in ("ui", "frontend", "web", "client")):
-            verification_command = "npm test"
-        else:
-            verification_command = "pytest tests/ -v"
+        workspace_raw = issue.get("workspace_path") or "."
+        try:
+            from ..sessions.coding_context import detect_project_facts
+
+            wp = Path(workspace_raw) if Path(workspace_raw).is_dir() else Path(".")
+            facts = detect_project_facts(wp)
+            cmds = facts.get("verify_commands") or []
+            verification_command = cmds[0] if cmds else ""
+        except Exception:
+            verification_command = ""
+        if not verification_command:
+            workspace_path = str(issue.get("workspace_path") or "").lower()
+            if any(k in workspace_path for k in ("ui", "frontend", "web", "client")):
+                verification_command = "npm test"
+            else:
+                verification_command = "pytest tests/ -v"
     workspace_scope = issue.get("workspace_scope", "shared")
     workspace_path = issue.get("workspace_path", "shared:repo")
 

@@ -283,6 +283,14 @@
 .messageActions .err {
   color: var(--err);
 }
+.messageActions .verified {
+  color: var(--add-ink, #8fe0ad);
+  font-weight: 500;
+}
+.messageActions .unverified {
+  color: var(--ink-faint);
+  opacity: 0.85;
+}
 .turnError {
   border-left: 2px solid var(--err);
   color: var(--err);

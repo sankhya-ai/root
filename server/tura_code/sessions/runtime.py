@@ -365,7 +365,7 @@ class SessionRuntime(Approvals):
             self._settle_pending("reject", "turn ended")
             self.log.flush()
             duration = round(time.time() - turn.started_at, 2)
-            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, **extra})
+            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, **extra})
             self.record.last_status = status
             self.record.updated_at = time.time()
             self.save_record()

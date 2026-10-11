@@ -66,3 +66,49 @@ def test_a_turn_that_ran_its_change_ends_when_it_says_so(client, workspace, scri
         events = run_turn(ws, "make calc print five")
     said = "".join(e["payload"].get("text", "") for e in of_type(events, "ContentPart"))
     assert said == "Done."
+    finished = of_type(events, "TurnFinished")[-1]["payload"]
+    assert finished["verified"] is True
+    assert finished["checks"] == 1
+
+
+def test_detect_project_facts_python(tmp_path):
+    from tura_code.sessions.coding_context import detect_project_facts, format_context_block
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test-pkg'\n")
+    (tmp_path / "uv.lock").write_text("")
+    facts = detect_project_facts(tmp_path)
+    assert facts["stack"] == "Python"
+    assert facts["package_manager"] == "uv"
+    assert "uv run pytest" in facts["verify_commands"]
+
+    block = format_context_block(facts)
+    assert "Workspace Facts:" in block
+    assert "Python (uv)" in block
+    assert "uv run pytest" in block
+
+
+def test_detect_project_facts_node(tmp_path):
+    import json
+    from tura_code.sessions.coding_context import detect_project_facts, format_context_block
+
+    pkg = {
+        "name": "web-app",
+        "scripts": {
+            "test": "vitest run",
+            "typecheck": "tsc --noEmit",
+            "build": "vite build"
+        }
+    }
+    (tmp_path / "package.json").write_text(json.dumps(pkg))
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    (tmp_path / "tsconfig.json").write_text("{}")
+
+    facts = detect_project_facts(tmp_path)
+    assert facts["stack"] == "TypeScript"
+    assert facts["package_manager"] == "pnpm"
+    assert "pnpm test" in facts["verify_commands"]
+    assert "pnpm run typecheck" in facts["verify_commands"]
+
+    block = format_context_block(facts)
+    assert "TypeScript (pnpm)" in block
+    assert "pnpm test" in block

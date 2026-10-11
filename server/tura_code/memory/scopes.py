@@ -46,10 +46,19 @@ def packet_envelope(packet_text: str, request: str, workspace: Path) -> str:
     The Jev director splits `## System` from `## User` so it judges the step
     against the actual request, not against the memory attached to it.
     """
+    from ..sessions.coding_context import detect_project_facts, format_context_block
+
+    facts = detect_project_facts(workspace)
+    facts_block = format_context_block(facts)
+    host_parts = [f"You are root working in `{workspace}`."]
+    if facts_block:
+        host_parts.append(facts_block)
+    if packet_text.strip():
+        host_parts.append(packet_text.strip())
+    body = "\n\n".join(host_parts)
     return (
         "## System\n"
-        f"You are root working in `{workspace}`.\n\n"
-        f"{packet_text}\n\n"
+        f"{body}\n\n"
         "## User\n"
         f"{request}"
     )
