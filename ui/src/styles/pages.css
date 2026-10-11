@@ -1893,12 +1893,16 @@
   background: var(--ink-button);
   border: 1px solid var(--ink-button);
   border-radius: var(--radius-sm);
-  color: var(--ink-button-text);
+  color: #ffffff;
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
   padding: 6px 16px;
   transition: opacity 0.12s ease;
+}
+[data-theme="light"] .dialogSubmitBtn {
+  background: var(--ink-button);
+  color: #ffffff;
 }
 .dialogSubmitBtn:hover {
   opacity: 0.9;
@@ -1998,10 +2002,12 @@
   color: var(--ink);
 }
 
-.connectAgentTab.active {
+.connectAgentTab.active,
+[data-theme="light"] .connectAgentTab.active {
   background: var(--ink-button);
   border-color: var(--ink-button);
-  color: var(--ink-button-text);
+  color: #ffffff;
+  font-weight: 600;
 }
 
 [data-theme="light"] .connectAgentTab {
@@ -2012,6 +2018,12 @@
 [data-theme="light"] .connectAgentTab:hover {
   border-color: rgba(23, 57, 76, 0.35);
   color: var(--ink);
+}
+
+[data-theme="light"] .connectAgentTab.active {
+  background: var(--ink-button);
+  border-color: var(--ink-button);
+  color: #ffffff;
 }
 
 .connectSnippetRow {
