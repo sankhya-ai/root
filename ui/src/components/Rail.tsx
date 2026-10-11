@@ -1,7 +1,7 @@
 // The sidebar as Tura's: the mark, a few places (each with its wayfinding
 // colour), then the workspaces with their sessions nested under them.
 
-import { ChevronDown, ChevronRight, Folder, FolderKanban, GitMerge, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, ShieldCheck, Sparkles, SquarePen, Sun, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, FolderKanban, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, SquarePen, Sun, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import type { Session } from "../lib/types.ts";
@@ -29,7 +29,7 @@ export function Rail({
   view,
   collapsed,
   theme,
-  learningBadge,
+  learningBadge: _learningBadge,
   user,
   onToggleCollapsed,
   onNavigate,
@@ -64,9 +64,6 @@ export function Rail({
     <nav className="railNav">
       <NavItem collapsed={collapsed} icon={<SquarePen size={16} className="icon-red" />} label="New session" active={view === "home"} onClick={() => onNavigate("home")} />
       <NavItem collapsed={collapsed} icon={<FolderKanban size={16} className="icon-blue" />} label="Squads & Issues" active={view === "squads"} onClick={() => onNavigate("squads")} />
-      <NavItem collapsed={collapsed} icon={<Sparkles size={16} className="icon-gold" />} label="Learning" badge={learningBadge} active={view === "learning"} onClick={() => onNavigate("learning")} />
-      <NavItem collapsed={collapsed} icon={<GitMerge size={16} className="icon-green" />} label="Coding flows" active={view === "flows"} onClick={() => onNavigate("flows")} />
-      <NavItem collapsed={collapsed} icon={<ShieldCheck size={16} className="icon-blue" />} label="Trust" active={view === "trust"} onClick={() => onNavigate("trust")} />
     </nav>
   );
 
