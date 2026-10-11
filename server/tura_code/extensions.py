@@ -24,6 +24,7 @@ def install(server: "Server") -> None:
 def routers(state) -> list:
     from .flows.routes import router as flows_router
     from .learning.routes import router as learning_router
+    from .squads.links import router as links_router
     from .squads.routes import router as squads_router
 
-    return [learning_router(state), flows_router(state), squads_router(state)]
+    return [learning_router(state), flows_router(state), squads_router(state), links_router(state)]

@@ -216,3 +216,68 @@ def test_squads_api_endpoints(client):
     assert "personal" in wspaces
     assert "shared" in wspaces
 
+
+def test_agent_public_links(client):
+    # 1. Browser visit redirects to UI
+    browser_resp = client.get(
+        "/i/iss-001",
+        headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0"},
+        follow_redirects=False,
+    )
+    assert browser_resp.status_code == 307
+    assert browser_resp.headers["location"] == "/#/squads?issue=iss-001"
+
+    # 2. Agent visit returns Markdown directive
+    agent_resp = client.get(
+        "/i/iss-001",
+        headers={"Accept": "*/*", "User-Agent": "Claude-Code/1.0"},
+    )
+    assert agent_resp.status_code == 200
+    assert "text/markdown" in agent_resp.headers["content-type"]
+    assert "AUTONOMOUS TASK DIRECTIVE: [iss-001]" in agent_resp.text
+    assert "Verification Command" in agent_resp.text
+    assert "/i/iss-001/submit" in agent_resp.text
+
+    # 3. Direct .md endpoint
+    md_resp = client.get("/i/iss-001.md")
+    assert md_resp.status_code == 200
+    assert "AUTONOMOUS TASK DIRECTIVE: [iss-001]" in md_resp.text
+
+    # 4. Direct .sh runner script
+    sh_resp = client.get("/i/iss-001.sh")
+    assert sh_resp.status_code == 200
+    assert "#!/usr/bin/env bash" in sh_resp.text
+    assert "DIRECTIVE_URL=" in sh_resp.text
+
+    # 5. Public Pulse without authentication
+    pulse_resp = client.post(
+        "/i/iss-001/pulse",
+        json={
+            "agent_name": "Claude Code",
+            "user_name": "Nitin",
+            "activity": "Editing TTL eviction loop",
+            "phase": "Edit",
+            "active_file": "bus/lease.py",
+        },
+    )
+    assert pulse_resp.status_code == 200
+    assert pulse_resp.json()["ok"] is True
+
+    # 6. Public Plain Text Diff Submission via git diff stream
+    raw_diff = "diff --git a/bus/lease.py b/bus/lease.py\n--- a/bus/lease.py\n+++ b/bus/lease.py\n@@ -1 +1 @@\n+patched\n"
+    submit_resp = client.post(
+        "/i/iss-001/submit",
+        content=raw_diff,
+        headers={"Content-Type": "text/plain"},
+    )
+    assert submit_resp.status_code == 200
+    submit_json = submit_resp.json()
+    assert submit_json["ok"] is True
+    assert submit_json["status"] == "in_review"
+
+    # Verify issue state updated
+    issue_resp = client.get("/i/iss-001?format=json").json()["issue"]
+    assert issue_resp["status"] == "in_review"
+    assert "diff --git" in issue_resp["diff"]
+
+

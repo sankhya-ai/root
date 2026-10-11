@@ -3992,6 +3992,146 @@
   font-family: var(--font-mono);
 }
 
+/* ---------- Agent Link Sharing & Zero-Setup Directives ---------- */
+
+.cardShareBtn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  margin-left: 2px;
+}
+
+.cardShareBtn:hover {
+  color: var(--ink);
+  border-color: var(--line);
+  background: var(--hover-bg, rgba(255, 255, 255, 0.05));
+}
+
+.shareLinkTopBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.shareLinkTopBtn:hover {
+  border-color: var(--line-strong);
+  background: var(--hover-bg, rgba(255, 255, 255, 0.05));
+}
+
+.agentShareCard {
+  border-color: rgba(56, 189, 248, 0.25) !important;
+  background: rgba(56, 189, 248, 0.03) !important;
+}
+
+.zeroSetupChip {
+  background: rgba(56, 189, 248, 0.12) !important;
+  color: #38bdf8 !important;
+  border: 1px solid rgba(56, 189, 248, 0.25) !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  padding: 1px 6px !important;
+  border-radius: 9999px !important;
+}
+
+.agentShareNotice {
+  margin: 4px 0 10px 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  line-height: 1.45;
+}
+
+.agentShareLinkBox {
+  background: var(--user-bg, #0d1117);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+}
+
+[data-theme="light"] .agentShareLinkBox {
+  background: #f8fafc;
+}
+
+.agentShareLinkRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agentShareLinkRow code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentOneClickList {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.agentOneClickItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line);
+}
+
+[data-theme="light"] .agentOneClickItem {
+  background: #f8fafc;
+}
+
+.agentToolName {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.oneClickCopyBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.oneClickCopyBtn:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--hover-bg, rgba(255, 255, 255, 0.05));
+}
+
+
 
 
 

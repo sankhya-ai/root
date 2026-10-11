@@ -22,7 +22,7 @@ from ..sandbox import Sandbox
 from ..settings import data_dir
 from ..tenancy import Server
 from . import routes_core, routes_sessions, routes_workspace
-from .security import COOKIE, PUBLIC_PATHS, Auth, host_ok
+from .security import COOKIE, PUBLIC_PATHS, Auth, host_ok, is_public_path
 
 logger = logging.getLogger(__name__)
 UI_DIST = launcher.REPO_ROOT / "ui" / "dist"
@@ -72,7 +72,7 @@ def create_app(
             return JSONResponse({"detail": "Host not allowed."}, status_code=403)
         path = request.url.path
         request.state.user = None
-        if path.startswith("/api/") and path not in PUBLIC_PATHS:
+        if path.startswith("/api/") and not is_public_path(path):
             user = state.auth.identify(request.cookies.get(COOKIE), request.headers.get("authorization"))
             if user is None:
                 return JSONResponse({"detail": "Not authorized. Reload the page."}, status_code=401)

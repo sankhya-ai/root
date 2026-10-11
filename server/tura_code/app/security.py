@@ -25,8 +25,20 @@ from fastapi import HTTPException, Request, WebSocket
 
 from ..tenancy import LOCAL, Server, Tenant
 
+import ipaddress
+
 COOKIE = "tura_code_token"
 PUBLIC_PATHS = ("/api/auth/bootstrap", "/api/auth/login", "/api/health")
+
+
+def is_public_path(path: str) -> bool:
+    if path in PUBLIC_PATHS:
+        return True
+    if path.startswith("/i/") or path == "/i":
+        return True
+    if path.endswith("/public") or "/public" in path:
+        return True
+    return False
 
 
 def load_local_token(root: Path) -> str:
@@ -51,6 +63,16 @@ def allowed_hosts() -> set[str]:
     return {"localhost", "127.0.0.1", "[::1]", "::1", "testserver", *extra}
 
 
+def is_private_or_local_host(name: str) -> bool:
+    if name.endswith(".local") or name.endswith(".internal"):
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
 def host_ok(host_header: str | None) -> bool:
     if not host_header:
         return False
@@ -59,7 +81,7 @@ def host_ok(host_header: str | None) -> bool:
         name = host.split("]")[0] + "]"
     else:
         name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-    return name in allowed_hosts()
+    return name in allowed_hosts() or is_private_or_local_host(name)
 
 
 class Auth:

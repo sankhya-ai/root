@@ -13,6 +13,7 @@ import {
   GitBranch,
   Globe,
   Layers,
+  Link2,
   Lock,
   MessageSquare,
   Plus,
@@ -197,7 +198,7 @@ const COLUMNS: { id: IssueStatus; title: string }[] = [
   { id: "done", title: "Done" },
 ];
 
-export function SquadsPage() {
+export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null } = {}) {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [scopeFilter, setScopeFilter] = useState<"all" | "shared" | "personal">("all");
   const [searchQuery, setSearchQuery] = useState("");
@@ -205,7 +206,34 @@ export function SquadsPage() {
   // Modals & Drawers
   const [showNewIssue, setShowNewIssue] = useState(false);
   const [newIssueInitialStatus, setNewIssueInitialStatus] = useState<IssueStatus>("backlog");
-  const [activeIssueId, setActiveIssueId] = useState<string | null>(null);
+  const [activeIssueId, setActiveIssueId] = useState<string | null>(initialIssueId || null);
+  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
+
+  const copyAgentLink = useCallback((issueId: string, format?: "link" | "claude" | "gemini" | "cursor" | "sh") => {
+    const url = `${window.location.origin}/i/${issueId}`;
+    let text = url;
+    if (format === "claude") text = `claude "${url}"`;
+    else if (format === "gemini") text = `Work on ${url}`;
+    else if (format === "cursor") text = `@${url} fix this issue`;
+    else if (format === "sh") text = `curl -sSL ${url}.sh | sh`;
+
+    void navigator.clipboard.writeText(text);
+    setCopiedLinkId(issueId + (format || ""));
+    setTimeout(() => setCopiedLinkId(null), 2500);
+  }, []);
+
+  useEffect(() => {
+    if (initialIssueId) {
+      setActiveIssueId(initialIssueId);
+    }
+  }, [initialIssueId]);
+
+  useEffect(() => {
+    const hashIssue = /^#\/(?:i\/([a-zA-Z0-9_-]+)|squads\?(?:.*&)?issue=([a-zA-Z0-9_-]+))/.exec(window.location.hash);
+    if (hashIssue) {
+      setActiveIssueId(hashIssue[1] || hashIssue[2]);
+    }
+  }, []);
 
   // Actions & Messaging state
   const [loading, setLoading] = useState(false);
@@ -675,6 +703,17 @@ export function SquadsPage() {
                             <div className="squadCardKeyGroup">
                               <SquadPriorityIcon priority={issue.priority} size={13} />
                               <span className="squadIdentifier">{issue.id}</span>
+                              <button
+                                type="button"
+                                className="cardShareBtn"
+                                title="Copy Link for Agent (send to teammate to work on)"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  copyAgentLink(issue.id);
+                                }}
+                              >
+                                {copiedLinkId === issue.id ? <Check size={11} style={{ color: "var(--ok)" }} /> : <Link2 size={11} />}
+                              </button>
                             </div>
 
                             {hasActiveAgent ? (
@@ -784,6 +823,15 @@ export function SquadsPage() {
               </div>
 
               <div className="workspaceTopRight" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  type="button"
+                  className="shareLinkTopBtn"
+                  onClick={() => copyAgentLink(activeIssue.id)}
+                  title="Copy link for teammate's agent (Claude Code, Antigravity, Cursor)"
+                >
+                  {copiedLinkId === activeIssue.id ? <Check size={12} style={{ color: "var(--ok)" }} /> : <Link2 size={12} />}
+                  <span>{copiedLinkId === activeIssue.id ? "Link Copied!" : "Copy Agent Link"}</span>
+                </button>
                 <button
                   type="button"
                   className="triggerStepTopBtn"
@@ -1341,6 +1389,89 @@ export function SquadsPage() {
 
               {/* Right Meta Sidebar */}
               <aside className="workspaceSidebar scroll">
+                {/* Section 0: Share Link for Teammate's Agent */}
+                <div className="sidebarCard agentShareCard">
+                  <div className="sidebarCardHead">
+                    <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                      <Link2 size={12} style={{ color: "var(--accent)" }} />
+                      <span>Give to Teammate's Agent</span>
+                    </div>
+                    <span className="sidebarChip zeroSetupChip">
+                      Zero Setup
+                    </span>
+                  </div>
+
+                  <p className="agentShareNotice">
+                    Send this link to your teammate. When they give it to their AI agent, it fetches instructions, runs tests, and submits the patch automatically.
+                  </p>
+
+                  <div className="agentShareLinkBox">
+                    <div className="agentShareLinkRow">
+                      <code>{window.location.origin}/i/{activeIssue.id}</code>
+                      <button
+                        type="button"
+                        className="copyBtn"
+                        onClick={() => copyAgentLink(activeIssue.id)}
+                      >
+                        {copiedLinkId === activeIssue.id ? <Check size={11} style={{ color: "var(--ok)" }} /> : <Copy size={11} />}
+                        <span>{copiedLinkId === activeIssue.id ? "Copied" : "Copy"}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* One-click presets for Claude, Antigravity, Cursor, Terminal */}
+                  <div className="agentOneClickList">
+                    <div className="agentOneClickItem">
+                      <span className="agentToolName">Claude Code</span>
+                      <button
+                        type="button"
+                        className="oneClickCopyBtn"
+                        title="Copy command for Claude Code"
+                        onClick={() => copyAgentLink(activeIssue.id, "claude")}
+                      >
+                        {copiedLinkId === activeIssue.id + "claude" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                        <span>claude &quot;...&quot;</span>
+                      </button>
+                    </div>
+                    <div className="agentOneClickItem">
+                      <span className="agentToolName">Antigravity</span>
+                      <button
+                        type="button"
+                        className="oneClickCopyBtn"
+                        title="Copy command for Antigravity"
+                        onClick={() => copyAgentLink(activeIssue.id, "gemini")}
+                      >
+                        {copiedLinkId === activeIssue.id + "gemini" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                        <span>Work on ...</span>
+                      </button>
+                    </div>
+                    <div className="agentOneClickItem">
+                      <span className="agentToolName">Cursor</span>
+                      <button
+                        type="button"
+                        className="oneClickCopyBtn"
+                        title="Copy command for Cursor"
+                        onClick={() => copyAgentLink(activeIssue.id, "cursor")}
+                      >
+                        {copiedLinkId === activeIssue.id + "cursor" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                        <span>@url</span>
+                      </button>
+                    </div>
+                    <div className="agentOneClickItem">
+                      <span className="agentToolName">One-Line Run</span>
+                      <button
+                        type="button"
+                        className="oneClickCopyBtn"
+                        title="Copy bash one-line launcher script"
+                        onClick={() => copyAgentLink(activeIssue.id, "sh")}
+                      >
+                        {copiedLinkId === activeIssue.id + "sh" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                        <span>curl | sh</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Section A: Execution Runs History */}
                 <div className="sidebarCard">
                   <div className="sidebarCardHead">

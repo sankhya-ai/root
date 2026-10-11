@@ -14,7 +14,7 @@ import { api } from "./lib/api.ts";
 import type { Health, Me, PermissionMode, Session, Settings } from "./lib/types.ts";
 
 type Theme = "dark" | "light";
-type Route = { view: View; id: string | null };
+type Route = { view: View; id: string | null; issueId?: string | null };
 
 function stored<T extends string>(key: string, fallback: T): T {
   try {
@@ -33,10 +33,14 @@ function persist(key: string, value: string) {
 }
 
 function routeFromHash(): Route {
+  const issueMatch = /^#\/(?:i\/([a-zA-Z0-9_-]+)|squads\?(?:.*&)?issue=([a-zA-Z0-9_-]+))/.exec(location.hash);
+  if (issueMatch) {
+    return { view: "squads", id: null, issueId: issueMatch[1] || issueMatch[2] };
+  }
   const session = /^#\/s\/([0-9a-f]+)$/.exec(location.hash);
-  if (session) return { view: "session", id: session[1] };
-  const page = /^#\/(learning|flows|trust|squads)$/.exec(location.hash);
-  return { view: page ? (page[1] as View) : "home", id: null };
+  if (session) return { view: "session", id: session[1], issueId: null };
+  const page = /^#\/(learning|flows|trust|squads)(?:\?.*)?$/.exec(location.hash);
+  return { view: page ? (page[1] as View) : "home", id: null, issueId: null };
 }
 
 export function App() {
@@ -178,7 +182,7 @@ export function App() {
       {route.view === "learning" ? <LearningPage /> : null}
       {route.view === "flows" ? <FlowsPage /> : null}
       {route.view === "trust" ? <TrustPage /> : null}
-      {route.view === "squads" ? <SquadsPage /> : null}
+      {route.view === "squads" ? <SquadsPage initialIssueId={route.issueId} /> : null}
       {dialog === "settings" ? (
         <SettingsDialog
           health={health}
