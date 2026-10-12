@@ -784,15 +784,19 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                               )}
                             </div>
 
-                            {issue.status === "in_review" ? (
-                              <span className="squadReviewGatePill">
-                                <ShieldCheck size={11} /> Review Gate
-                              </span>
-                            ) : null}
-                            {issue.verification_passed ? (
-                              <span className="squadVerifiedPill" title="Automated verification passed">
-                                <CheckCircle size={10} /> Tests Passed
-                              </span>
+                            {issue.status === "in_review" || issue.verification_passed ? (
+                              <div className="squadCardBadges">
+                                {issue.status === "in_review" ? (
+                                  <span className="squadReviewGatePill">
+                                    <ShieldCheck size={10} /> Review Gate
+                                  </span>
+                                ) : null}
+                                {issue.verification_passed ? (
+                                  <span className="squadVerifiedPill" title="Automated verification passed">
+                                    <CheckCircle size={10} /> Tests Passed
+                                  </span>
+                                ) : null}
+                              </div>
                             ) : null}
                           </div>
                         </div>

@@ -678,9 +678,10 @@
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
+  flex-wrap: wrap;
   gap: 5px;
   justify-content: space-between;
-  margin-top: 1px;
+  margin-top: 2px;
   padding-top: 5px;
 }
 
@@ -689,6 +690,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 3px;
+  min-width: 0;
 }
 .collabMiniChip {
   align-items: center;
@@ -698,7 +700,9 @@
   display: inline-flex;
   font-size: 10px;
   gap: 3px;
-  padding: 1px 5px;
+  line-height: 14px;
+  padding: 1px 6px;
+  white-space: nowrap;
 }
 .collabMiniChip .collabUser {
   color: var(--ink);
@@ -713,7 +717,15 @@
 }
 .unassignedTag {
   color: var(--ink-faint);
-  font-size: 10.5px;
+  font-size: 10px;
+}
+
+.squadCardBadges {
+  align-items: center;
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-left: auto;
 }
 
 .squadReviewGatePill {
@@ -723,10 +735,14 @@
   border-radius: 4px;
   color: var(--accent);
   display: inline-flex;
-  font-size: 10px;
+  flex-shrink: 0;
+  font-size: 9.5px;
   font-weight: 600;
   gap: 3px;
-  padding: 1px 5px;
+  height: 18px;
+  line-height: 1;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 .squadVerifiedPill {
   align-items: center;
@@ -735,10 +751,14 @@
   border-radius: 4px;
   color: var(--add-ink);
   display: inline-flex;
-  font-size: 10px;
+  flex-shrink: 0;
+  font-size: 9.5px;
   font-weight: 600;
   gap: 3px;
-  padding: 1px 5px;
+  height: 18px;
+  line-height: 1;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 /* Agent Runner Badges */
