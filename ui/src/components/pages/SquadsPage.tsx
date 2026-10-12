@@ -17,11 +17,13 @@ import {
   Link2,
   Lock,
   MessageSquare,
+  PanelRight,
   Plus,
   Radio,
   RefreshCw,
   Search,
   Send,
+  Share2,
   ShieldCheck,
   Terminal,
   Trash2,
@@ -286,6 +288,8 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
 
   // Squad Execution Room State
   const [drawerTab, setDrawerTab] = useState<"execution" | "intercom" | "diff">("execution");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [timelineFilter, setTimelineFilter] = useState<string>("all");
   const [expandedStepIds, setExpandedStepIds] = useState<Record<string, boolean>>({});
   const [triggeringStep, setTriggeringStep] = useState(false);
@@ -849,11 +853,11 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                 <button
                   type="button"
                   className="shareLinkTopBtn"
-                  onClick={() => copyAgentLink(activeIssue.id)}
-                  title="Copy link for teammate's agent (Claude Code, Antigravity, Cursor)"
+                  onClick={() => setShowShareModal(true)}
+                  title="Share issue link or formats for teammate's agent (Claude, Antigravity, Cursor, curl)"
                 >
-                  {copiedLinkId === activeIssue.id ? <Check size={12} style={{ color: "var(--ok)" }} /> : <Link2 size={12} />}
-                  <span>{copiedLinkId === activeIssue.id ? "Link Copied!" : "Copy Agent Link"}</span>
+                  <Share2 size={12} style={{ color: "var(--accent)" }} />
+                  <span>Give to Agent</span>
                 </button>
                 <button
                   type="button"
@@ -865,7 +869,19 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                   <Zap size={12} style={{ color: "var(--accent)" }} />
                   <span>{triggeringStep ? "Advancing..." : "Advance Step"}</span>
                 </button>
-                <button className="iconButton" onClick={() => selectIssue(null)}>
+                <button
+                  type="button"
+                  className={`iconButton ${sidebarOpen ? "active" : ""}`}
+                  onClick={() => setSidebarOpen((v) => !v)}
+                  title={sidebarOpen ? "Collapse metadata sidebar" : "Expand metadata sidebar"}
+                  style={{
+                    color: sidebarOpen ? "var(--ink)" : "var(--ink-muted)",
+                    background: sidebarOpen ? "var(--hover-bg, rgba(255,255,255,0.06))" : "transparent",
+                  }}
+                >
+                  <PanelRight size={15} />
+                </button>
+                <button className="iconButton" onClick={() => selectIssue(null)} title="Close (Esc)">
                   <X size={15} />
                 </button>
               </div>
@@ -930,40 +946,25 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                             <span className="runIdTitle">Run #{activeIssue.active_run.id}</span>
                             <AgentRunnerBadge agentName={activeIssue.active_run.agent_name} />
                             <span className="runUserName">({activeIssue.active_run.user_name})</span>
-                          </div>
-                          <div className="activeRunMeta">
                             <span className={`phaseTag phase-${(activeIssue.active_run.phase || "edit").toLowerCase()}`}>
                               {activeIssue.active_run.phase || "Edit"}
                             </span>
+                          </div>
+
+                          <div className="activeRunMeta">
                             <span className="runDurationText">
                               <Clock size={11} />
-                              <span>Live in progress</span>
+                              <span>
+                                Step {activeIssue.active_run.current_step} of {Math.max(activeIssue.active_run.step_count, 5)} (
+                                {Math.round(((activeIssue.active_run.current_step) / Math.max(activeIssue.active_run.step_count, 5)) * 100)}%)
+                              </span>
                             </span>
                           </div>
                         </div>
 
-                        {/* Progress Bar */}
-                        <div className="runProgressWrap">
-                          <div className="runProgressLabels">
-                            <span>Step Progress</span>
-                            <span>
-                              Step {activeIssue.active_run.current_step} of {Math.max(activeIssue.active_run.step_count, 5)} (
-                              {Math.round(((activeIssue.active_run.current_step) / Math.max(activeIssue.active_run.step_count, 5)) * 100)}%)
-                            </span>
-                          </div>
-                          <div className="runProgressBar">
-                            <div
-                              className="runProgressFill"
-                              style={{
-                                width: `${Math.min(100, Math.round(((activeIssue.active_run.current_step) / Math.max(activeIssue.active_run.step_count, 5)) * 100))}%`,
-                              }}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Current Action Highlight */}
-                        <div className="runCurrentAction">
-                          <div className="currentActionHeader">
+                        {/* Current Action Row & Controls */}
+                        <div className="activeRunActionRow">
+                          <div className="activeRunActionLeft">
                             <span className="actionPill">{activeIssue.active_run.last_tool || "active_tool"}</span>
                             {activeIssue.active_run.active_file && (
                               <span className="filePill">
@@ -971,37 +972,48 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                                 {activeIssue.active_run.active_file}
                               </span>
                             )}
+                            <span className="activeRunActionDesc">
+                              {activeIssue.active_run.current_activity || "Agent executing next operation..."}
+                            </span>
                           </div>
-                          <p className="currentActionText">
-                            {activeIssue.active_run.current_activity || "Agent executing next operation..."}
-                          </p>
+
+                          <div className="activeRunActionRight">
+                            <button
+                              type="button"
+                              className="advanceStepBtn"
+                              onClick={() => void handleTriggerAgentStep(activeIssue.id)}
+                              disabled={triggeringStep}
+                              title="Advance next live agent execution step"
+                            >
+                              <Zap size={11} />
+                              <span>{triggeringStep ? "Advancing..." : "Advance Step"}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="bridgePulseCopyBtn"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(
+                                  `python -m tura_code.squads.bridge pulse --issue ${activeIssue.id} --user "${connectUserName || "Developer"}" --agent "${connectAgentName || "Claude Code"}" --activity "Working on implementation"`
+                                );
+                                setCopiedBridge(true);
+                                setTimeout(() => setCopiedBridge(false), 2000);
+                              }}
+                              title="Copy CLI heartbeat"
+                            >
+                              {copiedBridge ? <Check size={11} /> : <Copy size={11} />}
+                              <span>{copiedBridge ? "Copied" : "Heartbeat"}</span>
+                            </button>
+                          </div>
                         </div>
 
-                        {/* Controls Row */}
-                        <div className="runControlsRow">
-                          <button
-                            type="button"
-                            className="advanceStepBtn"
-                            onClick={() => void handleTriggerAgentStep(activeIssue.id)}
-                            disabled={triggeringStep}
-                          >
-                            <Zap size={11} />
-                            <span>{triggeringStep ? "Advancing..." : "Advance Next Agent Step"}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="bridgePulseCopyBtn"
-                            onClick={() => {
-                              void navigator.clipboard.writeText(
-                                `python -m tura_code.squads.bridge pulse --issue ${activeIssue.id} --user "${connectUserName || "Developer"}" --agent "${connectAgentName || "Claude Code"}" --activity "Working on implementation"`
-                              );
-                              setCopiedBridge(true);
-                              setTimeout(() => setCopiedBridge(false), 2000);
+                        {/* Bottom Micro Progress Line */}
+                        <div className="activeRunBottomProgress">
+                          <div
+                            className="runProgressFill"
+                            style={{
+                              width: `${Math.min(100, Math.round(((activeIssue.active_run.current_step) / Math.max(activeIssue.active_run.step_count, 5)) * 100))}%`,
                             }}
-                          >
-                            {copiedBridge ? <Check size={11} /> : <Copy size={11} />}
-                            <span>{copiedBridge ? "Copied CLI" : "Copy CLI Heartbeat"}</span>
-                          </button>
+                          />
                         </div>
                       </div>
                     ) : (
@@ -1150,39 +1162,34 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
 
                 {/* ── TAB 2: INTERCOM & AUTONOMOUS AGENT DISCUSSION ── */}
                 {drawerTab === "intercom" && (
-                  <div className="drawerSection" style={{ borderTop: "none", paddingTop: 0 }}>
-                    {/* Autonomous Agent-to-Agent Discussion Card */}
-                    <div className="autonomousSyncCard">
-                      <div className="syncCardHead">
-                        <div className="syncCardTitle">
-                          <Zap size={13} style={{ color: "var(--accent)" }} />
-                          <span>Autonomous Agent Discussion</span>
-                        </div>
-                        <span className="syncTag">Zero Human Friction</span>
-                      </div>
-                      <p className="syncDescription">
-                        Let your local agent (Antigravity) and your teammate's agent (Claude Code) discuss interfaces, file leases, and tests across the cloud without human intervention.
-                      </p>
-                      <div className="syncActionRow">
+                  <div className="intercomSection">
+                    {/* Compact Autonomous Agent Discussion Toolbar */}
+                    <div className="compactSyncBar">
+                      <div className="compactSyncLeft">
+                        <span className="compactSyncTitle">
+                          <Zap size={11} style={{ color: "var(--accent)" }} />
+                          <span>Autonomous Sync:</span>
+                        </span>
                         <input
                           type="text"
+                          className="compactSyncInput"
                           value={autonomousTopic}
                           onChange={(e) => setAutonomousTopic(e.target.value)}
                           placeholder="Discussion topic (e.g. Contract negotiation between schema.py and client.ts)..."
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              void handleStartAutonomousDiscussion(activeIssue.id);
+                            }
+                          }}
                         />
-                        <button
-                          className="syncTriggerBtn"
-                          onClick={() => void handleStartAutonomousDiscussion(activeIssue.id)}
-                          disabled={discussing}
-                        >
-                          {discussing ? "Agents Conversing..." : "⚡ Let Agents Discuss"}
-                        </button>
                       </div>
-                      <div className="quickTopics">
+                      <div className="compactSyncRight">
                         <button
                           type="button"
                           className="quickTopicBtn"
                           onClick={() => setAutonomousTopic("Align token schema and client.ts parser")}
+                          title="Set topic: Contract sync"
                         >
                           Contract sync
                         </button>
@@ -1190,6 +1197,7 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                           type="button"
                           className="quickTopicBtn"
                           onClick={() => setAutonomousTopic("Optimistic lock handover and pytest verification")}
+                          title="Set topic: Lock handover"
                         >
                           Lock handover
                         </button>
@@ -1197,14 +1205,22 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                           type="button"
                           className="quickTopicBtn"
                           onClick={() => setAutonomousTopic("Review diff and approve PR")}
+                          title="Set topic: Pre-merge check"
                         >
-                          Pre-merge check
+                          Pre-merge
+                        </button>
+                        <button
+                          className="syncTriggerBtn"
+                          onClick={() => void handleStartAutonomousDiscussion(activeIssue.id)}
+                          disabled={discussing}
+                        >
+                          {discussing ? "Conversing..." : "⚡ Discuss"}
                         </button>
                       </div>
                     </div>
 
                     {/* Messages Feed */}
-                    <div className="intercomFeed scroll" style={{ maxHeight: "380px" }}>
+                    <div className="intercomFeed scroll">
                       {activeIssue.messages && activeIssue.messages.length > 0 ? (
                         activeIssue.messages.map((msg) => {
                           const isAutonomous =
@@ -1411,26 +1427,29 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
               </div>
 
               {/* Right Meta Sidebar */}
-              <aside className="workspaceSidebar scroll">
-                {/* Section 0: Share Link for Teammate's Agent */}
-                <div className="sidebarCard agentShareCard">
-                  <div className="sidebarCardHead">
-                    <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
-                      <Link2 size={12} style={{ color: "var(--accent)" }} />
-                      <span>Give to Teammate's Agent</span>
+              {sidebarOpen && (
+                <aside className="workspaceSidebar scroll">
+                  {/* Section 0: Share Link for Teammate's Agent */}
+                  <div className="sidebarCard compactShareCard">
+                    <div className="sidebarCardHead">
+                      <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                        <Share2 size={11} style={{ color: "var(--accent)" }} />
+                        <span>Give to Agent</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="sidebarPresetsLink"
+                        onClick={() => setShowShareModal(true)}
+                        title="View one-click copy formats for Claude Code, Antigravity, Cursor, and Terminal"
+                      >
+                        Presets ▾
+                      </button>
                     </div>
-                    <span className="sidebarChip zeroSetupChip">
-                      Zero Setup
-                    </span>
-                  </div>
 
-                  <p className="agentShareNotice">
-                    Send this link to your teammate. When they give it to their AI agent, it fetches instructions, runs tests, and submits the patch automatically.
-                  </p>
-
-                  <div className="agentShareLinkBox">
                     <div className="agentShareLinkRow">
-                      <code>{window.location.origin}/i/{activeIssue.id}</code>
+                      <code title={`${window.location.origin}/i/${activeIssue.id}`}>
+                        /i/{activeIssue.id}
+                      </code>
                       <button
                         type="button"
                         className="copyBtn"
@@ -1442,60 +1461,7 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                     </div>
                   </div>
 
-                  {/* One-click presets for Claude, Antigravity, Cursor, Terminal */}
-                  <div className="agentOneClickList">
-                    <div className="agentOneClickItem">
-                      <span className="agentToolName">Claude Code</span>
-                      <button
-                        type="button"
-                        className="oneClickCopyBtn"
-                        title="Copy command for Claude Code"
-                        onClick={() => copyAgentLink(activeIssue.id, "claude")}
-                      >
-                        {copiedLinkId === activeIssue.id + "claude" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
-                        <span>claude &quot;...&quot;</span>
-                      </button>
-                    </div>
-                    <div className="agentOneClickItem">
-                      <span className="agentToolName">Antigravity</span>
-                      <button
-                        type="button"
-                        className="oneClickCopyBtn"
-                        title="Copy command for Antigravity"
-                        onClick={() => copyAgentLink(activeIssue.id, "gemini")}
-                      >
-                        {copiedLinkId === activeIssue.id + "gemini" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
-                        <span>Work on ...</span>
-                      </button>
-                    </div>
-                    <div className="agentOneClickItem">
-                      <span className="agentToolName">Cursor</span>
-                      <button
-                        type="button"
-                        className="oneClickCopyBtn"
-                        title="Copy command for Cursor"
-                        onClick={() => copyAgentLink(activeIssue.id, "cursor")}
-                      >
-                        {copiedLinkId === activeIssue.id + "cursor" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
-                        <span>@url</span>
-                      </button>
-                    </div>
-                    <div className="agentOneClickItem">
-                      <span className="agentToolName">One-Line Run</span>
-                      <button
-                        type="button"
-                        className="oneClickCopyBtn"
-                        title="Copy bash one-line launcher script"
-                        onClick={() => copyAgentLink(activeIssue.id, "sh")}
-                      >
-                        {copiedLinkId === activeIssue.id + "sh" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
-                        <span>curl | sh</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section A: Execution Runs History */}
+                  {/* Section A: Execution Runs History */}
                 <div className="sidebarCard">
                   <div className="sidebarCardHead">
                     <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
@@ -1671,9 +1637,120 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                     </button>
                   </div>
                 </div>
-              </aside>
+                </aside>
+              )}
             </div>
           </aside>
+        </div>
+      ) : null}
+
+      {/* Share Issue with Teammate's Agent Modal */}
+      {showShareModal && activeIssue ? (
+        <div className="squadModalBackdrop" onClick={() => setShowShareModal(false)} style={{ zIndex: 120 }}>
+          <div className="squadDialog agentShareDialog" onClick={(e) => e.stopPropagation()}>
+            <div className="squadDialogHead">
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <Share2 size={14} style={{ color: "var(--accent)" }} />
+                <h3>Give Issue to Teammate&apos;s Agent</h3>
+              </div>
+              <button className="iconButton" onClick={() => setShowShareModal(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="squadDialogBody" style={{ gap: "14px" }}>
+              <p style={{ fontSize: "12px", color: "var(--ink-muted)", lineHeight: 1.5, margin: 0 }}>
+                Send this link to your teammate. When pasted into their AI agent (Claude Code, Antigravity, Cursor, etc.), the agent automatically fetches the task, claims locks, executes changes, and pushes to Review Gate.
+              </p>
+
+              <div className="agentShareLinkBox">
+                <label style={{ fontSize: "11px", fontWeight: 600, color: "var(--ink-faint)", marginBottom: "4px", display: "block" }}>
+                  Direct Issue Link:
+                </label>
+                <div className="agentShareLinkRow">
+                  <code>{window.location.origin}/i/{activeIssue.id}</code>
+                  <button
+                    type="button"
+                    className="copyBtn"
+                    onClick={() => copyAgentLink(activeIssue.id)}
+                  >
+                    {copiedLinkId === activeIssue.id ? <Check size={11} style={{ color: "var(--ok)" }} /> : <Copy size={11} />}
+                    <span>{copiedLinkId === activeIssue.id ? "Copied" : "Copy URL"}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <label style={{ fontSize: "11px", fontWeight: 600, color: "var(--ink-faint)" }}>
+                  One-Click Presets for Teammate Agents:
+                </label>
+                <div className="agentOneClickList">
+                  <div className="agentOneClickItem">
+                    <div>
+                      <div className="agentToolName">Claude Code</div>
+                      <div style={{ fontSize: "10px", color: "var(--ink-faint)" }}>Prompt format for Anthropic CLI</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="oneClickCopyBtn"
+                      title="Copy command for Claude Code"
+                      onClick={() => copyAgentLink(activeIssue.id, "claude")}
+                    >
+                      {copiedLinkId === activeIssue.id + "claude" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                      <span>claude &quot;...&quot;</span>
+                    </button>
+                  </div>
+
+                  <div className="agentOneClickItem">
+                    <div>
+                      <div className="agentToolName">Antigravity</div>
+                      <div style={{ fontSize: "10px", color: "var(--ink-faint)" }}>Google Antigravity prompt syntax</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="oneClickCopyBtn"
+                      title="Copy command for Antigravity"
+                      onClick={() => copyAgentLink(activeIssue.id, "gemini")}
+                    >
+                      {copiedLinkId === activeIssue.id + "gemini" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                      <span>Work on ...</span>
+                    </button>
+                  </div>
+
+                  <div className="agentOneClickItem">
+                    <div>
+                      <div className="agentToolName">Cursor</div>
+                      <div style={{ fontSize: "10px", color: "var(--ink-faint)" }}>@url format for Cursor Composer</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="oneClickCopyBtn"
+                      title="Copy command for Cursor"
+                      onClick={() => copyAgentLink(activeIssue.id, "cursor")}
+                    >
+                      {copiedLinkId === activeIssue.id + "cursor" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                      <span>@url</span>
+                    </button>
+                  </div>
+
+                  <div className="agentOneClickItem">
+                    <div>
+                      <div className="agentToolName">One-Line Shell Run</div>
+                      <div style={{ fontSize: "10px", color: "var(--ink-faint)" }}>Automated terminal execution pipe</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="oneClickCopyBtn"
+                      title="Copy bash one-line launcher script"
+                      onClick={() => copyAgentLink(activeIssue.id, "sh")}
+                    >
+                      {copiedLinkId === activeIssue.id + "sh" ? <Check size={10} style={{ color: "var(--ok)" }} /> : <Copy size={10} />}
+                      <span>curl | sh</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
 
