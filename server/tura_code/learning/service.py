@@ -14,6 +14,12 @@ is a claim, not a lesson — so those candidates wait for the owner.
 A skill loads into every later session, so `auto` keeps one only once the same
 lesson has come from two sessions: seen once it is an anecdote about one task
 (often the task's own fix, dressed as a procedure); seen twice it is a pattern.
+
+Promotion is a claim; ``outcomes`` keeps the evidence. Every working turn is
+tallied against the learned skills it read, and a skill version that is
+confidently worse than what it replaced is not kept: `auto` rolls it back to
+the previous version, or retires it (and never proposes it again) when there
+is none; `review` marks it for the owner.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import llm
-from . import review
+from . import outcomes, review
 from .skills import SkillLibrary
 from .store import CandidateStore
 
@@ -39,12 +45,16 @@ class LearningService:
         self.tenant = tenant
         self.skills = SkillLibrary(tenant.skills_dir)
         self.store = CandidateStore(tenant.root / "learning.json")
+        self.outcomes = outcomes.OutcomeLedger(tenant.root / "skill_outcomes.json")
 
     def mode(self) -> str:
         return self.tenant.settings.get().learning_mode
 
     async def after_turn(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
-        if self.mode() == "off" or runtime.record.kind != "session" or launcher_scripted_without_llm():
+        if self.mode() == "off" or runtime.record.kind != "session":
+            return
+        self.observe(runtime, turn, status)
+        if launcher_scripted_without_llm():
             return
         if not review.should_review(
             prompt=turn.prompt,
@@ -106,6 +116,41 @@ class LearningService:
                 "verified": turn.verified,
             },
         )
+
+    def observe(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
+        """Tally a working turn against the learned skills it read; act on the ones that hurt."""
+        if not outcomes.did_work(turn):
+            return
+        used = {}
+        for name in outcomes.skills_read(turn, self.skills.root):
+            try:
+                used[name] = outcomes.version_of(self.skills.read(name))
+            except (OSError, ValueError):
+                continue
+        self.outcomes.record(used, outcomes.is_clean(turn, status))
+        for name, version in used.items():
+            verdict = self.outcomes.assess(name, version)
+            if not verdict["underperforming"]:
+                continue
+            action = "flagged"
+            if self.mode() == "auto":
+                if self.skills.rollback(name):
+                    action = "rolled_back"
+                else:
+                    self.skills.remove(name)
+                    self.store.retire(name)
+                    action = "retired"
+            logger.info("learned skill %s %s: %s", name, action, verdict)
+            runtime.emit("SkillOutcome", {"skill": name, "action": action, **verdict})
+
+    def skills_with_outcomes(self) -> list[dict[str, Any]]:
+        items = self.skills.list()
+        for item in items:
+            try:
+                item["outcome"] = self.outcomes.assess(item["name"], outcomes.version_of(self.skills.read(item["name"])))
+            except (OSError, ValueError):
+                item["outcome"] = None
+        return items
 
     def _candidate(self, kind: str, body: dict[str, Any], runtime: "SessionRuntime", verdict: dict[str, Any]) -> dict[str, Any]:
         title = body["name"] if kind == "skill" else body["content"][:120]

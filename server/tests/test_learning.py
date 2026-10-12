@@ -8,7 +8,7 @@ import pytest
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
 from tura_code import llm
-from tura_code.learning import review
+from tura_code.learning import outcomes, review
 from tura_code.learning.skills import SkillLibrary
 
 SKILL = {
@@ -236,3 +236,71 @@ def test_auto_mode_keeps_a_skill_only_when_a_second_session_proposes_it(client, 
             assert not (home / "skills" / "verify-python-changes").exists()  # one sighting: an anecdote
     assert promoted_kinds == [["memory"], ["skill"]]
     assert (home / "skills" / "verify-python-changes" / "SKILL.md").exists()
+
+
+def test_skill_outcomes_compare_a_version_with_what_it_replaced(tmp_path):
+    ledger = outcomes.OutcomeLedger(tmp_path / "outcomes.json")
+    for _ in range(outcomes.MIN_BASELINE):
+        ledger.record({}, True)
+    for _ in range(outcomes.MIN_USES - 1):
+        ledger.record({"s": "v1"}, False)
+    assert not ledger.assess("s", "v1")["underperforming"]  # too few uses to judge
+    ledger.record({"s": "v1"}, False)
+    verdict = ledger.assess("s", "v1")
+    assert verdict["underperforming"] and verdict["against"] == "baseline" and verdict["rate"] == 0
+
+    # A new version is held to the one it replaced once that has evidence, not the baseline.
+    for _ in range(outcomes.MIN_USES):
+        ledger.record({"s": "v2"}, True)
+    assert ledger.assess("s", "v2")["against"] == "version v1" and not ledger.assess("s", "v2")["underperforming"]
+    # One unlucky turn in five is not "confidently worse" than a perfect baseline.
+    ledger.record({}, True)
+    for clean in (True, True, True, True, False):
+        ledger.record({"t": "w1"}, clean)
+    assert not ledger.assess("t", "w1")["underperforming"]
+    assert outcomes.wilson(0, 5)[1] < outcomes.wilson(10, 10)[0] < outcomes.wilson(2, 5)[1]
+
+
+def test_retired_skills_are_not_proposed_again(tmp_path):
+    from tura_code.learning.store import CandidateStore
+
+    store = CandidateStore(tmp_path / "learning.json")
+    store.retire("verify-python-changes")
+    item = {"kind": "skill", "title": "verify-python-changes", "body": {}, "fingerprint": "f", "session_id": "s"}
+    assert store.add([item]) == ([], [])
+    assert store.add([{**item, "title": "other", "fingerprint": "g"}])[0]
+
+
+def _skill_turn(skill_md) -> list[str]:
+    return [
+        tool_call("r", "ReadFile", {"path": str(skill_md)}),
+        tool_call("w", "WriteFile", {"path": "calc.py", "content": "def add(a, b):\n    return a - b\n"}),
+        text("Done."),  # the edit is never checked: not a clean turn
+    ]
+
+
+@requires_runtime
+def test_a_skill_version_that_makes_turns_worse_is_rolled_back(client, workspace, script, home):
+    library = SkillLibrary(home / "skills")
+    good = {**SKILL, "name": "verify-python-changes"}
+    library.write(good, source="s1")
+    ledger = outcomes.OutcomeLedger(home / "skill_outcomes.json")
+    v1 = outcomes.version_of(library.read("verify-python-changes"))
+    for _ in range(outcomes.MIN_USES):
+        ledger.record({"verify-python-changes": v1}, True)
+    library.write({**good, "lesson": "Skip the tests; the change is obviously right."}, source="s2")
+    skill_md = library.path("verify-python-changes")
+
+    script(sum((_skill_turn(skill_md) for _ in range(outcomes.MIN_USES)), []))
+    client.put("/api/settings", json={"learning_mode": "auto"})
+    session = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    client.patch(f"/api/sessions/{session}", json={"permission_mode": "yolo"})
+    with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
+        ws.receive_json()
+        for i in range(outcomes.MIN_USES):
+            run_turn(ws, f"change add, take {i}")
+        outcome = _until(ws, "SkillOutcome")["payload"]
+    assert outcome["action"] == "rolled_back" and outcome["against"] == f"version {v1}" and outcome["uses"] == outcomes.MIN_USES
+    assert "unittest before reporting" in library.read("verify-python-changes")  # the version it replaced is kept
+    skills = client.get("/api/learning").json()["skills"]
+    assert skills[0]["outcome"]["version"] == v1 and not skills[0]["outcome"]["underperforming"]

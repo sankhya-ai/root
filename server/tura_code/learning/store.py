@@ -29,6 +29,7 @@ class CandidateStore:
             data = {}
         data.setdefault("candidates", [])
         data.setdefault("rejected", [])
+        data.setdefault("retired", [])
         return data
 
     def _save(self, data: dict[str, Any]) -> None:
@@ -51,10 +52,13 @@ class CandidateStore:
         with self._lock:
             data = self._load()
             known = {c["fingerprint"] for c in data["candidates"]} | set(data["rejected"])
+            retired = set(data["retired"])
             pending_skills = {c["title"]: c for c in data["candidates"] if c["status"] == "candidate" and c["kind"] == "skill"}
             added: list[dict[str, Any]] = []
             again: list[dict[str, Any]] = []
             for item in items:
+                if item["kind"] == "skill" and item["title"] in retired:
+                    continue
                 pending = pending_skills.get(item["title"]) if item["kind"] == "skill" else None
                 if pending is not None:
                     sessions = pending.setdefault("sessions", [pending.get("session_id")])
@@ -88,6 +92,14 @@ class CandidateStore:
                 data["rejected"].append(record["fingerprint"])
             self._save(data)
             return record
+
+    def retire(self, title: str) -> None:
+        """A skill the evidence turned against: never proposed again under this name."""
+        with self._lock:
+            data = self._load()
+            if title not in data["retired"]:
+                data["retired"].append(title)
+                self._save(data)
 
     def list(self) -> list[dict[str, Any]]:
         return sorted(self._load()["candidates"], key=lambda c: (c["status"] != "candidate", -c["created_at"]))

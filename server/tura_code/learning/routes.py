@@ -14,7 +14,7 @@ def router(app_state) -> APIRouter:
     @api.get("/learning")
     async def overview(tenant: Tenant = Depends(tenant_of)) -> dict:
         service = tenant.learning
-        return {"mode": service.mode(), "candidates": service.store.list(), "skills": service.skills.list()}
+        return {"mode": service.mode(), "candidates": service.store.list(), "skills": service.skills_with_outcomes()}
 
     @api.post("/learning/{candidate_id}/promote")
     async def promote(candidate_id: str, tenant: Tenant = Depends(tenant_of)) -> dict:

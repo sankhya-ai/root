@@ -175,6 +175,15 @@ export function LearningPage() {
                       <h4 className="skillName mono">{s.name}</h4>
                     </div>
                     {s.versions ? <span className="versionBadge">v{s.versions}</span> : null}
+                    {s.outcome?.uses ? (
+                      <span
+                        className="versionBadge"
+                        title={`Clean turns with this version, compared with ${s.outcome.against}`}
+                        style={s.outcome.underperforming ? { color: "var(--accent)" } : undefined}
+                      >
+                        {s.outcome.clean}/{s.outcome.uses} clean{s.outcome.underperforming ? " · worse" : ""}
+                      </span>
+                    ) : null}
                   </div>
                   <p className="skillDesc">{s.description || "Procedural skill automatically applied by agents."}</p>
 
