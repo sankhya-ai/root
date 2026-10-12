@@ -1,4 +1,4 @@
-import { Brain, Compass, Cpu, PanelRight, Shield, WifiOff, X } from "lucide-react";
+import { Brain, Compass, Cpu, FileDiff, FileText, FlaskConical, ListTodo, PanelRight, Shield, ShieldCheck, WifiOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api.ts";
@@ -10,16 +10,70 @@ import { MODE_ORDER, ModeMenu } from "./ModeMenu.tsx";
 import { Transcript } from "./Transcript.tsx";
 
 const DEFAULT_COMMANDS: SlashCommand[] = [
-  { name: "init", description: "Analyze the codebase and write an AGENTS.md", aliases: [] },
-  { name: "compact", description: "Compact the context", aliases: [] },
-  { name: "clear", description: "Clear the context", aliases: ["reset"] },
+  { name: "verify", description: "Run automated tests & verification suite", aliases: ["test"] },
+  { name: "plan", description: "Toggle plan mode (think & propose steps without writing files)", aliases: [] },
+  { name: "diff", description: "Inspect uncommitted code changes in the inspector", aliases: ["changes"] },
+  { name: "yolo", description: "Toggle auto-approve for every action", aliases: [] },
+  { name: "init", description: "Analyze codebase architecture and generate AGENTS.md", aliases: [] },
+  { name: "compact", description: "Compact session context to save token budget", aliases: [] },
+  { name: "clear", description: "Clear context and start a fresh session turn", aliases: ["reset"] },
 ];
 
-const SUGGESTIONS = [
-  "Give me a tour of this codebase: structure, entry points, and how to run it.",
-  "Find and fix the failing tests.",
-  "Review the uncommitted changes for bugs.",
-  "Run /init to write an AGENTS.md for this project.",
+interface QuickAction {
+  id: string;
+  icon: typeof Compass;
+  iconClass: "icon-green" | "icon-blue" | "icon-gold" | "icon-red";
+  title: string;
+  desc: string;
+  prompt: string;
+  badge?: string;
+}
+
+const ACTION_SUGGESTIONS: QuickAction[] = [
+  {
+    id: "verify",
+    icon: FlaskConical,
+    iconClass: "icon-green",
+    title: "Run tests & verification",
+    desc: "Run tests, detect regressions, and verify fixes",
+    prompt: "Run the verification suite for this codebase and report passing or failing status.",
+    badge: "Checks",
+  },
+  {
+    id: "tour",
+    icon: Compass,
+    iconClass: "icon-blue",
+    title: "Codebase architecture tour",
+    desc: "Map directory structure, entry points, and workflows",
+    prompt: "Give me a tour of this codebase: structure, entry points, how to run it, and key conventions.",
+  },
+  {
+    id: "diff",
+    icon: FileDiff,
+    iconClass: "icon-gold",
+    title: "Review uncommitted diffs",
+    desc: "Audit changes for edge cases, syntax, and potential bugs",
+    prompt: "Review all uncommitted changes and git diffs in this workspace for potential bugs or regressions.",
+    badge: "Diff",
+  },
+  {
+    id: "plan",
+    icon: ListTodo,
+    iconClass: "icon-blue",
+    title: "Propose implementation plan",
+    desc: "Propose step-by-step changes before touching code",
+    prompt: "Propose a structured implementation plan for our next task before editing files.",
+    badge: "Plan",
+  },
+  {
+    id: "init",
+    icon: FileText,
+    iconClass: "icon-red",
+    title: "Audit & init AGENTS.md",
+    desc: "Scan repository build & test commands into AGENTS.md",
+    prompt: "/init",
+    badge: "Setup",
+  },
 ];
 
 export function SessionView({
@@ -113,18 +167,34 @@ export function SessionView({
   const runtime = session?.runtime;
 
   const empty = (
-    <div className="home" style={{ minHeight: 360 }}>
+    <div className="home" style={{ minHeight: 400 }}>
       <div className="eyebrow">{workspace.split("/").filter(Boolean).pop() ?? "workspace"}</div>
       <h2 className="greeting">What should we build?</h2>
-      <div className="homeActions">
-        {SUGGESTIONS.map((s) => (
-          <button key={s} className="pill" onClick={() => setInjected({ text: s, n: Date.now() })}>
-            {s}
-          </button>
-        ))}
+      <div className="actionCardsGrid">
+        {ACTION_SUGGESTIONS.map((action) => {
+          const Icon = action.icon;
+          return (
+            <button
+              key={action.id}
+              className="actionCard"
+              onClick={() => setInjected({ text: action.prompt, n: Date.now() })}
+            >
+              <div className="actionCardHead">
+                <span className={`actionCardIcon ${action.iconClass}`}>
+                  <Icon size={16} />
+                </span>
+                <span className="actionCardTitle">{action.title}</span>
+                {action.badge ? <span className="actionCardBadge">{action.badge}</span> : null}
+              </div>
+              <span className="actionCardDesc">{action.desc}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
+
+  const doneTodos = transcript.todos.filter((t) => t.status === "completed").length;
 
   return (
     <>
@@ -136,6 +206,30 @@ export function SessionView({
               {workspace}
             </div>
           </div>
+          {turnEnds > 0 ? (
+            <button
+              className={`chip quiet${tab === "changes" && inspectorOpen ? " on" : ""}`}
+              onClick={() => {
+                setTab("changes");
+                if (!inspectorOpen) onToggleInspector();
+              }}
+              title="Inspect uncommitted changes"
+            >
+              <FileDiff size={13} className="icon-gold" /> Changes
+            </button>
+          ) : null}
+          {transcript.todos.length > 0 ? (
+            <button
+              className={`chip quiet${tab === "plan" && inspectorOpen ? " on" : ""}`}
+              onClick={() => {
+                setTab("plan");
+                if (!inspectorOpen) onToggleInspector();
+              }}
+              title="Inspect active plan"
+            >
+              <ListTodo size={13} className="icon-blue" /> Plan ({doneTodos}/{transcript.todos.length})
+            </button>
+          ) : null}
           {runtime?.director && runtime.director !== "off" ? (
             <span className="chip quiet" title="Jev decides each step: reply, or which tool to call">
               <Compass size={13} /> Jev{runtime.director === "shadow" ? " (shadow)" : ""}
@@ -197,6 +291,45 @@ export function SessionView({
         />
         <div className="composerWrap">
           <div className="column">
+            {turnEnds > 0 && !transcript.running ? (
+              <div className="composerQuickActions">
+                <button
+                  type="button"
+                  className="quickActionChip"
+                  onClick={() => setInjected({ text: "Run verification tests and check results.", n: Date.now() })}
+                  title="Run tests and automated checks"
+                >
+                  <FlaskConical size={12} className="icon-green" /> Run tests
+                </button>
+                <button
+                  type="button"
+                  className="quickActionChip"
+                  onClick={() => {
+                    setTab("changes");
+                    if (!inspectorOpen) onToggleInspector();
+                  }}
+                  title="Inspect changes diff"
+                >
+                  <FileDiff size={12} className="icon-gold" /> Diff
+                </button>
+                <button
+                  type="button"
+                  className="quickActionChip"
+                  onClick={() => setInjected({ text: "/plan ", n: Date.now() })}
+                  title="Propose next plan"
+                >
+                  <ListTodo size={12} className="icon-blue" /> Plan next
+                </button>
+                <button
+                  type="button"
+                  className="quickActionChip"
+                  onClick={() => setInjected({ text: "Review recent changes for edge cases or bugs.", n: Date.now() })}
+                  title="Review for bugs"
+                >
+                  <ShieldCheck size={12} className="icon-red" /> Review
+                </button>
+              </div>
+            ) : null}
             <ComposerWithInjection
               key={sessionId}
               injected={injected}

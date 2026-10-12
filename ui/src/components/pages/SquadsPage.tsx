@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Bot,
   Check,
+  CheckCircle,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -786,6 +787,11 @@ export function SquadsPage({ initialIssueId }: { initialIssueId?: string | null 
                             {issue.status === "in_review" ? (
                               <span className="squadReviewGatePill">
                                 <ShieldCheck size={11} /> Review Gate
+                              </span>
+                            ) : null}
+                            {issue.verification_passed ? (
+                              <span className="squadVerifiedPill" title="Automated verification passed">
+                                <CheckCircle size={10} /> Tests Passed
                               </span>
                             ) : null}
                           </div>

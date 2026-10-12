@@ -4,7 +4,13 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import type { Attachment, SlashCommand } from "../lib/types.ts";
 
 const HOST_COMMANDS: SlashCommand[] = [
+  { name: "verify", description: "Run automated tests & verification suite", aliases: ["test", "check"] },
+  { name: "plan", description: "Toggle plan mode (think & propose steps without writing files)", aliases: [] },
+  { name: "diff", description: "Inspect uncommitted code changes in the inspector", aliases: ["changes"] },
   { name: "yolo", description: "Toggle auto-approve for every action", aliases: [] },
+  { name: "init", description: "Analyze codebase architecture and generate AGENTS.md", aliases: [] },
+  { name: "compact", description: "Compact session context to save token budget", aliases: [] },
+  { name: "clear", description: "Clear context and start a fresh session turn", aliases: ["reset"] },
 ];
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 

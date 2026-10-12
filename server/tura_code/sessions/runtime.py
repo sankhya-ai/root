@@ -295,6 +295,13 @@ class SessionRuntime(Approvals):
         if text == "/yolo":
             await self.set_mode("default" if self.record.permission_mode == "yolo" else "yolo")
             return
+        if text == "/plan":
+            await self.set_mode("default" if self.record.permission_mode == "plan" else "plan")
+            return
+        if text in ("/verify", "/test", "/check"):
+            text = "Run the automated verification suite and tests for this repository, inspect all outputs, and report passing or failing status."
+        elif text in ("/diff", "/changes"):
+            text = "Review all uncommitted changes and git diffs in this workspace, summarize modifications, and check for bugs or missing test coverage."
         workspace = Path(self.record.workspace)
         turn = TurnState(id=uuid.uuid4().hex[:12], prompt=text)
         self.turn = turn
