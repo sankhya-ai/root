@@ -3544,6 +3544,8 @@
   gap: 8px;
   position: relative;
   overflow: hidden;
+  flex-shrink: 0;
+  min-height: fit-content;
 }
 
 .activeRunTop {
@@ -3918,6 +3920,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 .noRunInfo {
   display: flex;
@@ -3931,6 +3934,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .timelineHeader {
