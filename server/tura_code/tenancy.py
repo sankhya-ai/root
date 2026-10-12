@@ -134,6 +134,7 @@ class Tenant:
             extra_writable=self._git_dirs(runtime),
             planning_mode=settings.planning_mode,
             context_strategy=settings.context_strategy,
+            answering_line=runtime.record.kind == "line",
         )
 
     @staticmethod
@@ -225,6 +226,8 @@ class Server:
         self.extensions: list[Any] = []
         #: Awaited after every turn: (tenant, runtime, turn, status).
         self.after_turn_hooks: list[Any] = []
+        #: Server-wide services with ``start()`` and ``async close()`` (the line).
+        self.background: list[Any] = []
         self.tenants: dict[str, Tenant] = {}
 
     def tenant(self, tenant_id: str = LOCAL) -> Tenant:
@@ -253,6 +256,8 @@ class Server:
 
     def start(self) -> None:
         self.pool.start()
+        for service in self.background:
+            service.start()
 
     async def refresh_capabilities(self) -> None:
         if launcher.scripted() or os.environ.get("TURA_CODE_OFFLINE"):
@@ -261,6 +266,8 @@ class Server:
         self.model_capabilities = {m["id"]: m["capabilities"] for m in items}
 
     async def close(self) -> None:
+        for service in self.background:
+            await service.close()
         for tenant in list(self.tenants.values()):
             await tenant.close()
         await self.pool.close()

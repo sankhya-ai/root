@@ -12,6 +12,9 @@ dependencies = [
   "uvicorn[standard]>=0.30.0",
   "pydantic>=2.7.0",
   "httpx>=0.27.0",
+  # The team line: the relay connection and end-to-end sealing.
+  "websockets>=13.0",
+  "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

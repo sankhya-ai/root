@@ -447,3 +447,15 @@ button.chip:hover {
     padding: 0 14px;
   }
 }
+
+/* root's only page now: a pointer to the board (chamber). */
+.redirectPage {
+  align-items: center;
+  color: var(--ink-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  justify-content: center;
+  text-align: center;
+}

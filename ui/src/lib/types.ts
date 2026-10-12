@@ -86,7 +86,7 @@ export interface Session {
   turns: number;
   last_status: string;
   grants: string[];
-  kind: "session" | "candidate";
+  kind: "session" | "candidate" | "line";
   parent: string;
   role: string;
   running: boolean;
@@ -218,6 +218,16 @@ export interface LearnedSkill {
   description: string;
   updated_at: number;
   versions: number;
+  /** Clean-turn record of the current version, against what it replaced. */
+  outcome: {
+    version: string;
+    uses: number;
+    clean: number;
+    rate: number | null;
+    against: string;
+    reference_rate: number | null;
+    underperforming: boolean;
+  } | null;
 }
 
 export interface FlowCandidate {

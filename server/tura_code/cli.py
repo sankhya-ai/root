@@ -32,12 +32,17 @@ def main(argv: list[str] | None = None) -> int:
     users_sub.add_parser("list")
     for name in ("remove", "rotate"):
         users_sub.add_parser(name).add_argument("id")
+    from .line import cli as line_cli
+
+    line_cli.add_parser(sub)
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
         return doctor()
     if args.command == "user":
         return user_command(args)
+    if args.command == "chamber":
+        return line_cli.run(args)
     return serve_command(args)
 
 
