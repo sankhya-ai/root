@@ -194,9 +194,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.workspaceRow .rowAction,
 .sessionRow .rowAction {
   opacity: 0;
+  transition: opacity 0.15s ease;
 }
+.workspaceRow:hover .rowAction,
 .sessionRow:hover .rowAction {
   opacity: 1;
 }

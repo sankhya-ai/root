@@ -2,7 +2,7 @@
 // colour), then the workspaces with their sessions nested under them.
 
 import { ChevronDown, ChevronRight, Folder, FolderKanban, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, SquarePen, Sun, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { Session } from "../lib/types.ts";
 import { Brand, TuraMark } from "./TuraBrand.tsx";
@@ -36,6 +36,7 @@ export function Rail({
   onSelect,
   onNew,
   onDelete,
+  onDeleteWorkspace,
   onSettings,
   onTheme,
   onSignOut,
@@ -52,11 +53,25 @@ export function Rail({
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (session: Session) => void;
+  onDeleteWorkspace: (workspace: string, sessions: Session[]) => void;
   onSettings: () => void;
   onTheme: () => void;
   onSignOut?: () => void;
 }) {
-  const [closed, setClosed] = useState<Set<string>>(new Set());
+  const activeWorkspace = sessions.find((s) => s.id === activeId)?.workspace;
+  const [openWorkspaces, setOpenWorkspaces] = useState<Set<string>>(() => new Set(activeWorkspace ? [activeWorkspace] : []));
+
+  useEffect(() => {
+    if (activeWorkspace) {
+      setOpenWorkspaces((prev) => {
+        if (prev.has(activeWorkspace)) return prev;
+        const next = new Set(prev);
+        next.add(activeWorkspace);
+        return next;
+      });
+    }
+  }, [activeWorkspace]);
+
   const groups = new Map<string, Session[]>();
   for (const session of sessions) groups.set(session.workspace, [...(groups.get(session.workspace) ?? []), session]);
 
@@ -112,26 +127,50 @@ export function Rail({
       <div className="sessionTree scroll">
         {sessions.length === 0 ? <p className="faint small" style={{ padding: "0 8px" }}>No sessions yet.</p> : null}
         {[...groups.entries()].map(([workspace, list]) => {
-          const open = !closed.has(workspace);
+          const open = openWorkspaces.has(workspace);
           return (
             <div key={workspace}>
-              <button
+              <div
                 className="workspaceRow"
+                role="button"
+                tabIndex={0}
                 title={workspace}
                 onClick={() =>
-                  setClosed((current) => {
+                  setOpenWorkspaces((current) => {
                     const next = new Set(current);
                     if (next.has(workspace)) next.delete(workspace);
                     else next.add(workspace);
                     return next;
                   })
                 }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setOpenWorkspaces((current) => {
+                      const next = new Set(current);
+                      if (next.has(workspace)) next.delete(workspace);
+                      else next.add(workspace);
+                      return next;
+                    });
+                  }
+                }}
               >
                 {open ? <ChevronDown size={13} className="faint" /> : <ChevronRight size={13} className="faint" />}
                 <Folder size={14} />
                 <span className="name">{basename(workspace)}</span>
                 <span className="count">{list.length}</span>
-              </button>
+                <button
+                  type="button"
+                  className="iconButton rowAction"
+                  title={`Delete workspace “${basename(workspace)}”`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteWorkspace(workspace, list);
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
               {open ? (
                 <div className="workspaceSessions">
                   {list.map((session) => (

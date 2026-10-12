@@ -96,6 +96,17 @@ def router(app_state) -> APIRouter:
             raise HTTPException(400, f"Clone failed: {output.decode(errors='replace')[-500:]}")
         return {"path": str(target)}
 
+    @api.delete("/workspaces")
+    async def delete_workspace(path: str, tenant: Tenant = Depends(tenant_of)) -> dict:
+        tenant.settings.forget_workspace(path)
+        for s in tenant.sessions.list():
+            if s.get("workspace") == path:
+                try:
+                    await tenant.sessions.delete(s["id"])
+                except Exception:
+                    pass
+        return {"ok": True}
+
     @api.get("/memory")
     async def memories(path: str, q: str | None = None, tenant: Tenant = Depends(tenant_of)) -> dict:
         root = root_of(tenant, path)

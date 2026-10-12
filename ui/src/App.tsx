@@ -127,6 +127,27 @@ export function App() {
     if (route.id === session.id) go("#/");
   };
 
+  const deleteWorkspace = async (workspace: string, list: Session[]) => {
+    const name = workspace.split("/").filter(Boolean).pop() ?? workspace;
+    const count = list.length;
+    const msg = count > 0
+      ? `Delete workspace “${name}” and all ${count} conversation(s) inside it? Files in the folder are not touched.`
+      : `Remove workspace “${name}”?`;
+    if (!confirm(msg)) return;
+    try {
+      await api.deleteWorkspace(workspace);
+    } catch {
+      for (const session of list) {
+        await api.deleteSession(session.id).catch(() => undefined);
+      }
+    }
+    setSessions((current) => current.filter((s) => s.workspace !== workspace));
+    if (route.view === "session" && route.id && list.some((s) => s.id === route.id)) {
+      go("#/");
+    }
+    api.settings().then(setSettings, () => undefined);
+  };
+
   if (health?.mode === "hosted" && !health.signed_in) return <SignIn />;
 
   const inspector = inspectorOpen && route.view === "session";
@@ -150,6 +171,7 @@ export function App() {
         onSelect={(id) => go(`#/s/${id}`)}
         onNew={() => pickFolder((path) => void startSession(path, "", settings?.default_permission_mode ?? "default"))}
         onDelete={deleteSession}
+        onDeleteWorkspace={deleteWorkspace}
         onSettings={() => setDialog("settings")}
         onTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
         onSignOut={me?.mode === "hosted" ? () => api.logout().then(() => location.reload()) : undefined}

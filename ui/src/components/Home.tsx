@@ -1,7 +1,7 @@
 // Tura's home: a greeting and one composer. Sending starts a session in the
 // chosen folder with that message.
 
-import { ArrowRight, ChevronDown, Compass, FileDiff, FlaskConical, Folder, FolderGit2, ListTodo } from "lucide-react";
+import { ChevronDown, Compass, FileDiff, FlaskConical, Folder, ListTodo } from "lucide-react";
 import { useState } from "react";
 
 import type { Attachment, PermissionMode } from "../lib/types.ts";
@@ -124,19 +124,6 @@ export function Home({
               </div>
             ) : null}
           </div>
-          {recent.length ? (
-            <div className="column homeList">
-              <div className="sectionLabel">Recent folders</div>
-              {recent.slice(0, 6).map((path) => (
-                <button key={path} className={`homeRow${path === workspace ? " active" : ""}`} onClick={() => setWorkspace(path)}>
-                  <FolderGit2 size={15} className="icon-blue" />
-                  <span className="grow">{basename(path)}</span>
-                  <span className="faint small mono">{path}</span>
-                  <ArrowRight size={14} className="faint" />
-                </button>
-              ))}
-            </div>
-          ) : null}
         </div>
       </div>
     </main>

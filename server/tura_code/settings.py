@@ -157,6 +157,11 @@ class SettingsStore:
             self._settings.recent_workspaces = [workspace, *recent][:12]
             self._write()
 
+    def forget_workspace(self, workspace: str) -> None:
+        with self._lock:
+            self._settings.recent_workspaces = [w for w in self._settings.recent_workspaces if w != workspace]
+            self._write()
+
     def _write(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")

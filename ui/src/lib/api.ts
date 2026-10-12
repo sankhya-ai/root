@@ -86,6 +86,7 @@ export const api = {
     request<{ path: string; parent: string | null; git: boolean; entries: { name: string; path: string; git: boolean }[] }>(`/api/fs/dirs${path ? `?${q({ path })}` : ""}`),
   workspaces: () => request<{ workspaces: { name: string; path: string; scope: "personal" | "shared" }[]; personal: { name: string; path: string; scope: "personal" }[]; shared: { name: string; path: string; scope: "shared" }[] }>("/api/workspaces"),
   createWorkspace: (name: string, gitUrl = "", scope = "personal") => post<{ path: string; scope: string; name: string }>("/api/workspaces", { name, git_url: gitUrl, scope }),
+  deleteWorkspace: (path: string) => request<{ ok: boolean }>(`/api/workspaces?${q({ path })}`, { method: "DELETE" }),
   memory: (workspace: string, query?: string) =>
     request<{ items: MemoryItem[]; status: Health["memory"]; error?: string }>(`/api/memory?${q(query ? { path: workspace, q: query } : { path: workspace })}`),
   forget: (id: string, workspace: string) => request<{ ok: boolean }>(`/api/memory/${encodeURIComponent(id)}?${q({ path: workspace })}`, { method: "DELETE" }),
