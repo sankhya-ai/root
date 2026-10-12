@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../../lib/api.ts";
 import type { LearningCandidate, Settings } from "../../lib/types.ts";
+import { ConfirmDialog } from "../ConfirmDialog.tsx";
 import { Markdown } from "../Markdown.tsx";
 
 const MODES: { mode: Settings["learning_mode"]; label: string; desc: string }[] = [
@@ -28,6 +29,7 @@ export function LearningPage() {
   const [skill, setSkill] = useState<{ name: string; text: string } | null>(null);
   const [activeTab, setActiveTab] = useState<"skills" | "pending" | "history">("skills");
   const [searchQuery, setSearchQuery] = useState("");
+  const [confirmSkill, setConfirmSkill] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
@@ -187,7 +189,7 @@ export function LearningPage() {
                     ) : null}
                     <button
                       className="skillActionBtn danger"
-                      onClick={() => confirm(`Forget skill "${s.name}"?`) && api.forgetSkill(s.name).then(load)}
+                      onClick={() => setConfirmSkill(s.name)}
                     >
                       <Trash2 size={11} /> Forget
                     </button>
@@ -331,6 +333,20 @@ export function LearningPage() {
           </div>
         </div>
       )}
+
+      {confirmSkill ? (
+        <ConfirmDialog
+          title="Forget Skill"
+          message={`Forget skill “${confirmSkill}”? This will remove the skill definition and prevent agents from automatically using it.`}
+          confirmText="Forget"
+          onClose={() => setConfirmSkill(null)}
+          onConfirm={async () => {
+            await api.forgetSkill(confirmSkill);
+            setConfirmSkill(null);
+            await load();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { ConfirmDialog } from "./components/ConfirmDialog.tsx";
 import { Home } from "./components/Home.tsx";
 import { NewSessionDialog } from "./components/NewSessionDialog.tsx";
 import { FlowsPage } from "./components/pages/FlowsPage.tsx";
@@ -54,6 +55,12 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [learningBadge, setLearningBadge] = useState(0);
   const [dialog, setDialog] = useState<"settings" | "pick" | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmText?: string;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
   const [picked, setPicked] = useState<((path: string) => void) | null>(null);
   const [firstPrompt, setFirstPrompt] = useState<{ id: string; text: string } | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -120,32 +127,44 @@ export function App() {
     api.settings().then(setSettings, () => undefined);
   };
 
-  const deleteSession = async (session: Session) => {
-    if (!confirm(`Delete “${session.title}”? The conversation is removed; files it changed are not touched.`)) return;
-    await api.deleteSession(session.id);
-    setSessions((current) => current.filter((s) => s.id !== session.id));
-    if (route.id === session.id) go("#/");
+  const deleteSession = (session: Session) => {
+    setConfirmModal({
+      title: "Delete session",
+      message: `Delete “${session.title}”? The conversation will be removed, but files it changed are not touched.`,
+      confirmText: "Delete",
+      onConfirm: async () => {
+        await api.deleteSession(session.id);
+        setSessions((current) => current.filter((s) => s.id !== session.id));
+        if (route.id === session.id) go("#/");
+      },
+    });
   };
 
-  const deleteWorkspace = async (workspace: string, list: Session[]) => {
+  const deleteWorkspace = (workspace: string, list: Session[]) => {
     const name = workspace.split("/").filter(Boolean).pop() ?? workspace;
     const count = list.length;
-    const msg = count > 0
+    const message = count > 0
       ? `Delete workspace “${name}” and all ${count} conversation(s) inside it? Files in the folder are not touched.`
       : `Remove workspace “${name}”?`;
-    if (!confirm(msg)) return;
-    try {
-      await api.deleteWorkspace(workspace);
-    } catch {
-      for (const session of list) {
-        await api.deleteSession(session.id).catch(() => undefined);
-      }
-    }
-    setSessions((current) => current.filter((s) => s.workspace !== workspace));
-    if (route.view === "session" && route.id && list.some((s) => s.id === route.id)) {
-      go("#/");
-    }
-    api.settings().then(setSettings, () => undefined);
+    setConfirmModal({
+      title: "Delete workspace",
+      message,
+      confirmText: "Delete",
+      onConfirm: async () => {
+        try {
+          await api.deleteWorkspace(workspace);
+        } catch {
+          for (const session of list) {
+            await api.deleteSession(session.id).catch(() => undefined);
+          }
+        }
+        setSessions((current) => current.filter((s) => s.workspace !== workspace));
+        if (route.view === "session" && route.id && list.some((s) => s.id === route.id)) {
+          go("#/");
+        }
+        api.settings().then(setSettings, () => undefined);
+      },
+    });
   };
 
   if (health?.mode === "hosted" && !health.signed_in) return <SignIn />;
@@ -225,6 +244,18 @@ export function App() {
           onCreate={async (path) => {
             setDialog(null);
             picked?.(path);
+          }}
+        />
+      ) : null}
+      {confirmModal ? (
+        <ConfirmDialog
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+          onClose={() => setConfirmModal(null)}
+          onConfirm={async () => {
+            await confirmModal.onConfirm();
+            setConfirmModal(null);
           }}
         />
       ) : null}

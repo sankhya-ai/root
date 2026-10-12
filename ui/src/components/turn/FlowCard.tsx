@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { api } from "../../lib/api.ts";
 import { parseUnifiedDiff } from "../../lib/diff.ts";
 import type { Flow, FlowReview } from "../../lib/types.ts";
+import { ConfirmDialog } from "../ConfirmDialog.tsx";
 import { DiffHeader, DiffRows } from "../DiffView.tsx";
 
 const STATUS: Record<Flow["status"], string> = {
@@ -35,6 +36,12 @@ export function FlowCard({ flow, onChange }: { flow: Flow; onChange?: (flow: Flo
   const [review, setReview] = useState<FlowReview | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    message: string;
+    confirmText?: string;
+    action: () => Promise<Flow | FlowReview | void>;
+  } | null>(null);
   const files = useMemo(() => (review ? parseUnifiedDiff(review.diff.patch) : []), [review]);
 
   const act = async (label: string, run: () => Promise<Flow | FlowReview | void>) => {
@@ -102,12 +109,51 @@ export function FlowCard({ flow, onChange }: { flow: Flow; onChange?: (flow: Flo
         {c.can_start ? <button className="pill" disabled={!!busy} onClick={() => act("start", () => api.flowAction(flow.id, "start"))}>{flow.status === "preparing" ? "Start" : "Resume"}</button> : null}
         {c.can_stop ? <button className="pill" disabled={!!busy} onClick={() => act("stop", () => api.flowAction(flow.id, "stop"))}>Stop</button> : null}
         {c.can_rollback && flow.apply ? (
-          <button className="pill danger" disabled={!!busy} onClick={() => confirm("Revert the merge this flow applied?") && act("rollback", () => api.flowRollback(flow.id, flow.apply!.applied_commit))}>
+          <button
+            className="pill danger"
+            disabled={!!busy}
+            onClick={() =>
+              setConfirmAction({
+                title: "Roll back flow",
+                message: "Revert the merge this flow applied? The checkout will be returned to the pre-merge state.",
+                confirmText: "Roll back",
+                action: () => api.flowRollback(flow.id, flow.apply!.applied_commit),
+              })
+            }
+          >
             Roll back
           </button>
         ) : null}
-        {c.can_cancel ? <button className="pill danger" disabled={!!busy} onClick={() => confirm("Discard this flow's candidates?") && act("cancel", () => api.flowAction(flow.id, "cancel"))}>Discard</button> : null}
+        {c.can_cancel ? (
+          <button
+            className="pill danger"
+            disabled={!!busy}
+            onClick={() =>
+              setConfirmAction({
+                title: "Discard candidates",
+                message: "Discard this flow's candidates and stop generation?",
+                confirmText: "Discard",
+                action: () => api.flowAction(flow.id, "cancel"),
+              })
+            }
+          >
+            Discard
+          </button>
+        ) : null}
       </div>
+      {confirmAction ? (
+        <ConfirmDialog
+          title={confirmAction.title}
+          message={confirmAction.message}
+          confirmText={confirmAction.confirmText ?? "Confirm"}
+          onClose={() => setConfirmAction(null)}
+          onConfirm={async () => {
+            const { action } = confirmAction;
+            setConfirmAction(null);
+            await act("confirm", action);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
