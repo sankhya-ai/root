@@ -50,3 +50,22 @@ jobs:
         working-directory: ui
       - run: npm test && npm run build
         working-directory: ui
+
+  macos:
+    name: Host on macOS, and the app builds
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: cargo build --release --manifest-path runtime/Cargo.toml --bin kimi-agent
+      - run: python -m pip install -e "./server[memory,dev]"
+      - run: python -m pytest -q
+        working-directory: server
+      - run: swift build -c release --package-path macos
+

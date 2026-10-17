@@ -94,13 +94,24 @@ Keep local changes small and listed here so upstream updates stay mergeable.
 22. **OpenRouter provider preference** (`kosong/src/chat_provider/kimi.rs`).
     `ROOT_OPENROUTER_SORT` = `throughput`|`price`|`latency` sends
     `provider: {sort}`.
+23. **Cancelled turns leave nothing running** (`soul/kimisoul.rs` `ApprovalTask`,
+    `soul/mod.rs` `run_soul`). The step's approval piping task is aborted when
+    the step is dropped, not only when it finishes: a cancelled turn used to
+    leave it running on the shared approval queue, where it took the next
+    turn's first approval into the dead turn's wire and that tool call hung
+    for good. A UI loop that misses its shutdown window is aborted too.
+24. **Requests don't stall the wire** (`wire/server.rs` `request_approval`,
+    `request_tool_call`). The UI loop sends a request and moves on; the caller
+    waits on its own request. It used to wait for the answer, so a long host
+    tool call (a ten-minute `process` wait) held back every later event and a
+    parallel call's approval until it returned.
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were
 updated for 3 and 9; `tests/extra_skills_dirs.rs` for 5; unit tests in
 `args_repair.rs`, `tolerant.rs`, `repeat_guard.rs` and `walk.rs`, and
 `tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9; unit tests in
-`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22.
+`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24.
 
 ## Updating from Tura
 

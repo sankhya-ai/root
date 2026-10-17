@@ -70,6 +70,14 @@ def serve_command(args) -> int:
     import uvicorn
 
     from .app import create_app
+    from .instance import AlreadyRunning, claim
+    from .settings import data_dir
+
+    try:
+        lock = claim(data_dir(), f"http://{'localhost' if args.host in LOCAL_HOSTS else args.host}:{args.port}")  # noqa: F841 - held until exit
+    except AlreadyRunning as error:
+        print(str(error), file=sys.stderr)
+        return 3
 
     # Runtimes reach the LLM proxy on the loopback interface, whatever the public address.
     loopback = "[::1]" if args.host == "::1" else "127.0.0.1"

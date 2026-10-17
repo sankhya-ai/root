@@ -76,6 +76,8 @@ def _wait(client, flow_id, statuses, timeout=90):
 
 
 def _start_flow(client, repo, candidates=2):
+    # More than one candidate is the owner's choice (Settings), never the agent's.
+    client.put("/api/settings", json={"flow_max_candidates": candidates})
     session = client.post("/api/sessions", json={"workspace": str(repo)}).json()["id"]
     with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
         ws.receive_json()
@@ -193,3 +195,13 @@ def test_flows_refuse_unsafe_checks_and_plain_folders(client, repo, workspace, t
 
     with pytest.raises(Exception, match="Git repository"):
         asyncio.run(service.create(plain, "x", owner_session=session))
+
+
+def test_the_agent_gets_one_candidate_unless_the_owner_raised_the_limit(client, repo, tmp_path, monkeypatch):
+    _scripts(tmp_path, monkeypatch, {"main": [tool_call("create", "coding_flow", {"operation": "create", "task": "Make add() add.", "verification_commands": [CHECK], "candidate_count": 3}), text("ok")]})
+    session = client.post("/api/sessions", json={"workspace": str(repo)}).json()["id"]
+    with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "fix add()")
+    created = json.loads(next(e for e in of_type(events, "ToolResult") if e["payload"]["tool_call_id"] == "create")["payload"]["return_value"]["output"])
+    assert created["candidates"] == 1

@@ -4,7 +4,7 @@
 // So the fold mutates in place and the view re-renders on a version counter,
 // rather than copying the whole transcript per delta.
 
-import type { ApprovalRequest, DisplayBlock, Flow, MemoryItem, ProcessInfo, TokenUsage, ToolReturnValue, WireEvent } from "./types.ts";
+import type { ApprovalRequest, DisplayBlock, Flow, MemoryItem, ProcessInfo, ProducedFile, TokenUsage, ToolReturnValue, WireEvent } from "./types.ts";
 
 export type ApprovalStatus = "pending" | "approve" | "approve_for_session" | "reject";
 
@@ -50,7 +50,10 @@ export type Block =
       usage: UsageTotals;
       verified?: boolean;
       checks?: number;
-    };
+      /** The workspace checkpoint taken before this turn: restoring it undoes the turn. */
+      checkpoint?: string;
+    }
+  | { kind: "rollback"; key: string; turn: string | null; label: string; undo: string; restored: string[]; removed: string[] };
 
 export type ToolBlock = Extract<Block, { kind: "tool" }>;
 
@@ -360,6 +363,20 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         usage: { ...state.turnUsage },
         verified: typeof p.verified === "boolean" ? p.verified : undefined,
         checks: typeof p.checks === "number" ? p.checks : undefined,
+        checkpoint: p.checkpoint ? String(p.checkpoint) : undefined,
+      });
+      break;
+    }
+    case "Rollback": {
+      const target = (p.checkpoint ?? {}) as { label?: string };
+      state.blocks.push({
+        kind: "rollback",
+        key: nextKey("rollback"),
+        turn,
+        label: String(target.label ?? "").replace(/^Before:\s*/, ""),
+        undo: String((p.undo as { id?: string } | undefined)?.id ?? ""),
+        restored: Array.isArray(p.restored) ? p.restored.map(String) : [],
+        removed: Array.isArray(p.removed) ? p.removed.map(String) : [],
       });
       break;
     }
@@ -415,4 +432,18 @@ export function outputText(value: ToolReturnValue | undefined): string {
   if (typeof value.output === "string") return value.output;
   if (Array.isArray(value.output)) return value.output.map((part) => part.text ?? "").join("");
   return "";
+}
+
+/** Files the tools in these blocks made (run_python reports them), newest result last, each once. */
+export function producedFiles(blocks: Block[]): ProducedFile[] {
+  const found = new Map<string, ProducedFile>();
+  for (const block of blocks) {
+    if (block.kind !== "tool" || !block.result) continue;
+    for (const display of block.result.display ?? []) {
+      if (display.type !== "files") continue;
+      const files = ((display.data as { files?: ProducedFile[] } | undefined)?.files ?? (display.files as ProducedFile[] | undefined)) ?? [];
+      for (const file of files) found.set(`${file.scope}:${file.path}`, file);
+    }
+  }
+  return [...found.values()];
 }

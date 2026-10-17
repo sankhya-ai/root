@@ -4,8 +4,8 @@
     ~/.chamber/agents/<owner>__<name>/sent.jsonl    messages it sent
     ~/.chamber/agents/<owner>__<name>/files/<id>/   files it received
 
-The same files the Node tool writes for each project's Claude Code, so root's
-board (``board``) sees every conversation any of your agents is in.
+The same files the Node tool writes for each project's Claude Code, so chamber's
+board sees every conversation any of your agents is in, root's included.
 """
 
 from __future__ import annotations

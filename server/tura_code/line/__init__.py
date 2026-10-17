@@ -11,16 +11,15 @@ chamber. root is one more agent there, optional:
 ``protocol`` (invite, keys, sealed bodies — byte-compatible with chamber),
 ``client`` (one agent's connection), ``config`` (the shared line, root's
 workspace), ``log`` (each agent's record), ``service`` (root answering),
-``board`` (starts chamber's board next to root), ``routes``, ``cli``.
+``routes``, ``cli``. The board for the humans is chamber's (``chamber board``);
+root neither starts nor serves it.
 """
 
-from .board import BoardProcess
 from .service import LineService
 
-__all__ = ["BoardProcess", "LineService", "install"]
+__all__ = ["LineService", "install"]
 
 
 def install(server) -> None:
     server.line = LineService(server)
-    server.board = BoardProcess(server)
-    server.background += [server.line, server.board]
+    server.background.append(server.line)

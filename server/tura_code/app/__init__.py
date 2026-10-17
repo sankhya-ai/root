@@ -25,7 +25,6 @@ from . import routes_core, routes_sessions, routes_workspace
 from .security import COOKIE, PUBLIC_PATHS, Auth, host_ok, is_public_path
 
 logger = logging.getLogger(__name__)
-UI_DIST = launcher.REPO_ROOT / "ui" / "dist"
 
 
 class AppState:
@@ -93,14 +92,14 @@ def create_app(
     async def ui(rest: str):
         if rest.startswith("api/"):
             raise HTTPException(404)
-        if not UI_DIST.is_dir():
+        if not launcher.ui_dist().is_dir():
             return JSONResponse(
                 {"detail": "The UI is not built. Run `npm install && npm run build` in ui/, or use `npm run dev` there."},
                 status_code=404,
             )
-        candidate = (UI_DIST / rest).resolve()
-        if rest and candidate.is_file() and candidate.is_relative_to(UI_DIST.resolve()):
+        candidate = (launcher.ui_dist() / rest).resolve()
+        if rest and candidate.is_file() and candidate.is_relative_to(launcher.ui_dist().resolve()):
             return FileResponse(candidate)
-        return FileResponse(UI_DIST / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(launcher.ui_dist() / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app

@@ -169,3 +169,13 @@ def test_the_pool_evicts_an_idle_runtime_to_make_room(client, workspace, script,
         ws.receive_json()
         events = run_turn(ws, "again")
     assert of_type(events, "TurnFinished")[0]["payload"]["status"] == "finished"
+
+
+def test_hosted_never_opens_a_folder_dialog_on_the_server(home, monkeypatch):
+    from tura_code import workspace
+
+    monkeypatch.setattr(workspace, "folder_picker", lambda: True)
+    app, tokens = _hosted(home, sandbox=Sandbox())
+    with TestClient(app) as client:
+        assert client.get("/api/health", headers=_auth(tokens["alice"])).json()["folder_picker"] is False
+        assert client.post("/api/fs/pick", json={}, headers=_auth(tokens["alice"])).status_code == 404

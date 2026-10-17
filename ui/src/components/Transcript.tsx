@@ -2,12 +2,12 @@
 // then root's turn — its words, quiet trace lines for the tools it used, any
 // approval it is waiting on — and a footer with the time and a Copy button.
 
-import { Brain, ClipboardList, Paperclip, Sparkles } from "lucide-react";
+import { Brain, ClipboardList, Paperclip, RotateCcw, Sparkles } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { groupBlocks, liveStatus, type RenderItem } from "../lib/activity.ts";
-import type { Block, ToolBlock, TranscriptState } from "../lib/transcript.ts";
-import type { Flow } from "../lib/types.ts";
+import { producedFiles, type Block, type ToolBlock, type TranscriptState } from "../lib/transcript.ts";
+import type { Flow, ProducedFile } from "../lib/types.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Activity } from "./turn/Activity.tsx";
 import { ApprovalCard, type ApproveFn } from "./turn/ApprovalCard.tsx";
@@ -52,7 +52,35 @@ function tokens(n: number): string {
   return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : String(n);
 }
 
-function Footer({ end, text }: { end: EndBlock; text: string }) {
+/** Where a produced file opens (or downloads). */
+export type FileUrlFn = (file: ProducedFile, download: boolean) => string;
+
+function size(bytes: number): string {
+  return bytes >= 1_048_576 ? `${(bytes / 1_048_576).toFixed(1)} MB` : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} B`;
+}
+
+function ProducedFiles({ files, url }: { files: ProducedFile[]; url: FileUrlFn }) {
+  if (!files.length) return null;
+  return (
+    <div className="producedFiles">
+      {files.map((file) => (
+        <span key={`${file.scope}:${file.path}`} className="producedFile" title={file.scope === "scratch" ? "In the session's scratch folder" : "In the workspace"}>
+          <span className="name">{file.path.split("/").pop()}</span>
+          <span className="faint">{size(file.size)}</span>
+          <a href={url(file, false)} target="_blank" rel="noreferrer">
+            Open
+          </a>
+          <a href={url(file, true)}>Download</a>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Restore the workspace to a checkpoint (``undefined`` when restoring is not offered). */
+export type RestoreFn = (checkpoint: string) => void;
+
+function Footer({ end, text, onRestore }: { end: EndBlock; text: string; onRestore?: RestoreFn }) {
   const [copied, setCopied] = useState(false);
   const failed = end.status === "error" || end.status === "budget_exhausted";
   const status =
@@ -75,6 +103,11 @@ function Footer({ end, text }: { end: EndBlock; text: string }) {
             {tokens(end.usage.input)} in · {tokens(end.usage.output)} out{end.usage.cost ? ` · $${end.usage.cost.toFixed(4)}` : ""}
           </span>
         ) : null}
+        {end.checkpoint && onRestore ? (
+          <button onClick={() => onRestore(end.checkpoint!)} title="Put every file back the way it was before this turn (and after it, nothing later). You can undo this.">
+            Restore files
+          </button>
+        ) : null}
         {text ? (
           <button
             onClick={() => {
@@ -92,7 +125,21 @@ function Footer({ end, text }: { end: EndBlock; text: string }) {
   );
 }
 
-export function Items({ items, workspace, running, onApprove, onFlow }: { items: RenderItem[]; workspace: string; running: boolean; onApprove: ApproveFn; onFlow?: (flow: Flow) => void }) {
+export function Items({
+  items,
+  workspace,
+  running,
+  onApprove,
+  onFlow,
+  onRestore,
+}: {
+  items: RenderItem[];
+  workspace: string;
+  running: boolean;
+  onApprove: ApproveFn;
+  onFlow?: (flow: Flow) => void;
+  onRestore?: RestoreFn;
+}) {
   const children = (step: ToolBlock): ReactNode =>
     step.children ? <Items items={groupBlocks(step.children.blocks, { running: running && !step.result, workspace })} workspace={workspace} running={running && !step.result} onApprove={onApprove} /> : null;
   return (
@@ -120,6 +167,24 @@ export function Items({ items, workspace, running, onApprove, onFlow }: { items:
             );
           case "flow":
             return <FlowCard key={item.key} flow={item.flow} onChange={onFlow} />;
+          case "rollback": {
+            const changed = item.restored.length + item.removed.length;
+            return (
+              <div key={item.key} className="learnedLine">
+                <RotateCcw size={13} />
+                <span>
+                  {changed
+                    ? `Restored the files to before “${item.label}”: ${item.restored.length} put back, ${item.removed.length} removed.`
+                    : `Nothing had changed since “${item.label}”.`}{" "}
+                  {changed && item.undo && onRestore ? (
+                    <button onClick={() => onRestore(item.undo)}>
+                      Undo restore
+                    </button>
+                  ) : null}
+                </span>
+              </div>
+            );
+          }
           case "learned":
             return (
               <div key={item.key} className="learnedLine">
@@ -130,7 +195,7 @@ export function Items({ items, workspace, running, onApprove, onFlow }: { items:
                     {item.skills.length ? ` — skill ${item.skills.map((s) => `“${s}”`).join(", ")}` : ""}
                     {item.memories ? `${item.skills.length ? " and" : " —"} ${item.memories} memor${item.memories === 1 ? "y" : "ies"}` : ""}.{" "}
                     {!item.verified && item.mode === "auto" ? "Not kept on its own: the change was never run. " : null}
-                    {item.mode === "review" || item.promoted < item.skills.length + item.memories ? <a href="#/learning">Review</a> : null}
+                    {item.mode === "review" || item.promoted < item.skills.length + item.memories ? <a href="#/settings/agent">Review</a> : null}
                   </span>
                 ) : (
                   <span>The learning review did not run: {item.error}</span>
@@ -154,6 +219,8 @@ export function Transcript({
   onLoadEarlier,
   planMode,
   onApprovePlan,
+  onRestore,
+  fileUrl,
 }: {
   state: TranscriptState;
   workspace: string;
@@ -163,6 +230,8 @@ export function Transcript({
   onLoadEarlier: () => void;
   planMode: boolean;
   onApprovePlan: () => void;
+  onRestore?: RestoreFn;
+  fileUrl?: FileUrlFn;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -231,9 +300,10 @@ export function Transcript({
               {items.length || running || turn.end ? (
                 <div className="message assistant">
                   {turn.user ? <div className="messageLabel">root</div> : null}
-                  <Items items={items} workspace={workspace} running={running} onApprove={onApprove} />
+                  <Items items={items} workspace={workspace} running={running} onApprove={onApprove} onRestore={running ? undefined : onRestore} />
                   {running && !waiting && turn.user ? <Working since={turn.user.ts * 1000} label={state.compacting ? "Compacting context…" : `${liveStatus(turn.blocks, workspace)}…`} /> : null}
-                  {turn.end ? <Footer end={turn.end} text={answer} /> : null}
+                  {fileUrl ? <ProducedFiles files={producedFiles(turn.blocks)} url={fileUrl} /> : null}
+                  {turn.end ? <Footer end={turn.end} text={answer} onRestore={running ? undefined : onRestore} /> : null}
                 </div>
               ) : null}
               {last && planMode && !state.running && turn.end?.status === "finished" ? (

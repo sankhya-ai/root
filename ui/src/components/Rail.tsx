@@ -1,13 +1,13 @@
 // The sidebar as Tura's: the mark, a few places (each with its wayfinding
 // colour), then the workspaces with their sessions nested under them.
 
-import { ChevronDown, ChevronRight, Folder, FolderKanban, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings2, SquarePen, Sun, Trash2 } from "lucide-react";
+import { AlarmClock, ChevronDown, ChevronRight, Folder, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings2, SquarePen, Sun, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import type { Session } from "../lib/types.ts";
 import { Brand, TuraMark } from "./TuraBrand.tsx";
 
-export type View = "home" | "session" | "learning" | "flows" | "trust" | "squads";
+export type View = "home" | "session" | "schedules";
 
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
@@ -29,10 +29,10 @@ export function Rail({
   view,
   collapsed,
   theme,
-  learningBadge: _learningBadge,
   user,
   onToggleCollapsed,
   onNavigate,
+  onSearch,
   onSelect,
   onNew,
   onDelete,
@@ -46,10 +46,10 @@ export function Rail({
   view: View;
   collapsed: boolean;
   theme: "dark" | "light";
-  learningBadge: number;
   user: string | null;
   onToggleCollapsed: () => void;
-  onNavigate: (view: "home" | "learning" | "flows" | "trust" | "squads") => void;
+  onNavigate: (view: "home" | "schedules") => void;
+  onSearch: () => void;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (session: Session) => void;
@@ -77,8 +77,10 @@ export function Rail({
 
   const nav = (
     <nav className="railNav">
-      <NavItem collapsed={collapsed} icon={<SquarePen size={16} className="icon-red" />} label="New session" active={view === "home"} onClick={() => onNavigate("home")} />
-      <NavItem collapsed={collapsed} icon={<FolderKanban size={16} className="icon-blue" />} label="Squads & Issues" active={view === "squads"} onClick={() => onNavigate("squads")} />
+      <NavItem collapsed={collapsed} icon={<SquarePen size={16} />} label="New session" active={view === "home"} onClick={() => onNavigate("home")} />
+      {/* Expanded, search is the magnifier beside the brand (as in Tura); collapsed, the header has no room. */}
+      {collapsed ? <NavItem collapsed icon={<Search size={16} />} label="Search" onClick={onSearch} /> : null}
+      <NavItem collapsed={collapsed} icon={<AlarmClock size={16} />} label="Schedules" active={view === "schedules"} onClick={() => onNavigate("schedules")} />
     </nav>
   );
 
@@ -110,9 +112,14 @@ export function Rail({
     <aside className="card rail">
       <div className="railHead">
         <Brand />
-        <button className="iconButton" onClick={onToggleCollapsed} title="Collapse sidebar">
-          <PanelLeftClose size={17} />
-        </button>
+        <span className="railHeadActions">
+          <button className="iconButton" onClick={onSearch} title="Search (⌘K)" aria-label="Search">
+            <Search size={17} />
+          </button>
+          <button className="iconButton" onClick={onToggleCollapsed} title="Collapse sidebar">
+            <PanelLeftClose size={17} />
+          </button>
+        </span>
       </div>
       {nav}
       <div className="sectionLabel">

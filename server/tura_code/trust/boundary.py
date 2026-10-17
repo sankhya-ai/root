@@ -2,10 +2,11 @@
 
 A session works in one folder. Reading, listing, or changing anything outside
 it — a sibling project, the home directory, another run's files — is the
-owner's call in every mode, "Auto-approve all" included: that mode means
-"don't ask about work in this project", not "roam the machine". Hosted mode
-also confines runtimes with bubblewrap; this is the policy half, and the only
-half on a local install.
+owner's call. On a local install "Auto-approve all" makes that call too: the
+machine is the owner's, and a mode that still stops to ask is not auto. Hosted
+mode asks in every mode — host tools read files outside any sandbox, so this
+fence is what keeps one person's agent out of another's folders — and also
+confines runtimes with bubblewrap. Unattended runs are refused either way.
 
 Commands are read for paths the way a reviewer would: absolute and home paths,
 `..` that climbs out, and `cd` changing where later relative paths land. It

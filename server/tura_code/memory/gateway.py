@@ -104,7 +104,9 @@ class MemoryGateway:
         dhee = Dhee(provider="mock", data_dir=data_dir, user_id=OWNER_SCOPE, auto_context=False, auto_checkpoint=False)
         self._error = ""
         self._active_mode = "local"
-        if mode == "openrouter":
+        # Real memory (extraction, embeddings, decisions) needs the OpenRouter key; until
+        # there is one, local memory is the honest default rather than an error.
+        if mode == "openrouter" and self._settings().api_key():
             try:
                 self._use_openrouter(dhee, self._settings())
                 self._active_mode = "openrouter"
@@ -119,19 +121,24 @@ class MemoryGateway:
     def _use_openrouter(dhee: Any, settings: Settings) -> None:
         """Point Dhee's embedder and enrichment LLM at OpenRouter.
 
-        Dhee's facade picks providers from its own environment detection, so —
-        as Tura's hub does — the memory is rebuilt here with explicit OpenRouter
-        lanes. A separate vector collection per embedding width keeps vectors
-        from two models from ever being compared with each other.
+        Dhee's facade picks providers from its own environment detection and
+        takes no config, so — as Tura's hub does — the memory is rebuilt here
+        with explicit OpenRouter lanes: the one place root reaches past Dhee's
+        public API (``_engram``, ``_memory``). A separate vector collection per
+        embedding width keeps vectors from two models from ever being compared.
+
+        Decisions (Dhee 7.4, Jev through OpenRouter) gate the write path: a fact
+        that restates a stored one reaffirms it instead of adding a duplicate.
+        No ``fact_subjects``: project memory is about the code, not a person.
         """
         key = settings.api_key()
         if not key:
             raise RuntimeError("no OpenRouter API key is configured")
-        from dhee.configs.base import EmbedderConfig, LLMConfig, VectorStoreConfig
+        from dhee.configs.base import DecisionConfig, EmbedderConfig, LLMConfig, VectorStoreConfig
         from dhee.memory.main import FullMemory
 
         engram = dhee._engram
-        base = engram._memory.config
+        base = engram.memory.config
         dims = int(settings.memory_embedding_dims)
         config = base.model_copy(deep=True)
         config.llm = LLMConfig(
@@ -162,6 +169,8 @@ class MemoryGateway:
             },
         )
         config.embedding_model_dims = dims
+        if "openrouter.ai" in settings.base_url:
+            config.decisions = DecisionConfig(enabled=True, provider="openrouter", api_key=key)
         engram._memory = FullMemory(config)
         engram._provider = "openai"
 

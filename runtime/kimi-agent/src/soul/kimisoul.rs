@@ -557,7 +557,7 @@ impl KimiSoul {
                 }
             };
 
-            stop_approval_task(approval_task).await;
+            approval_task.stop().await;
 
             if let Some(err) = step_error {
                 return Err(err);
@@ -1525,11 +1525,16 @@ fn with_flow_args(mut parts: Vec<ContentPart>, flow_args: Option<&str>) -> Vec<C
     parts
 }
 
-async fn stop_approval_task(task: tokio::task::JoinHandle<()>) {
-    task.abort();
-    match task.await {
-        Ok(_) => {}
-        Err(err) => {
+/// The step's approval piping task, aborted when the step ends by any path.
+/// A cancelled turn drops the step mid-flight; a task left running would keep
+/// taking requests from the shared approval queue into that turn's dead wire,
+/// so a later turn's tool call waits forever on an approval nobody sees.
+struct ApprovalTask(tokio::task::JoinHandle<()>);
+
+impl ApprovalTask {
+    async fn stop(mut self) {
+        self.0.abort();
+        if let Err(err) = (&mut self.0).await {
             if !err.is_cancelled() {
                 error!("Approval piping task failed: {:?}", err);
             }
@@ -1537,8 +1542,14 @@ async fn stop_approval_task(task: tokio::task::JoinHandle<()>) {
     }
 }
 
-fn spawn_approval_task(approval: Arc<Approval>) -> tokio::task::JoinHandle<()> {
-    crate::soul::spawn_with_current_wire(async move {
+impl Drop for ApprovalTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_approval_task(approval: Arc<Approval>) -> ApprovalTask {
+    ApprovalTask(crate::soul::spawn_with_current_wire(async move {
         loop {
             let request = match approval.fetch_request().await {
                 Ok(req) => req,
@@ -1560,7 +1571,7 @@ fn spawn_approval_task(approval: Arc<Approval>) -> tokio::task::JoinHandle<()> {
                 response: resp,
             }));
         }
-    })
+    }))
 }
 
 fn forward_streamed_message_part(part: StreamedMessagePart) {
@@ -1623,6 +1634,46 @@ fn is_retryable_error(err: &ChatProviderError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::Wire;
+
+    #[tokio::test]
+    async fn a_cancelled_step_leaves_no_task_taking_the_next_turns_approvals() {
+        let approval = Arc::new(Approval::new(false));
+
+        // A turn cancelled mid-step drops the step, approval task handle and all.
+        let dead = Arc::new(Wire::new(None));
+        let task = crate::soul::with_current_wire(Arc::clone(&dead), async {
+            spawn_approval_task(Arc::clone(&approval))
+        })
+        .await;
+        tokio::task::yield_now().await;
+        drop(task);
+        dead.shutdown();
+
+        // The next turn's approval request reaches that turn's own wire.
+        let live = Arc::new(Wire::new(None));
+        let ui = live.ui_side(false);
+        let _task = crate::soul::with_current_wire(Arc::clone(&live), async {
+            spawn_approval_task(Arc::clone(&approval))
+        })
+        .await;
+        let requester = Arc::clone(&approval);
+        tokio::spawn(crate::soul::toolset::with_current_tool_call(
+            kosong::message::ToolCall::new("call_1", "Shell"),
+            async move { requester.request("Shell", "run command", "git push", None).await },
+        ));
+
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let WireMessage::ApprovalRequest(request) = ui.receive().await.unwrap() {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the approval request reached the live turn");
+        assert_eq!(seen.tool_call_id, "call_1");
+    }
 
 
     #[test]
