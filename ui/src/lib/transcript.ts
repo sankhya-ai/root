@@ -257,6 +257,15 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       break;
     }
     case "StatusUpdate": {
+      if (p.retry && typeof p.retry === "object") {
+        // One notice per run of retries, rewritten as they go, so a provider
+        // outage reads as one line rather than a column of them.
+        const r = p.retry;
+        const text = `The model provider failed — retrying (${Number(r.attempt) + 1} of ${r.max_attempts}) in ${Math.round(Number(r.delay_seconds))}s`;
+        const last = state.blocks[state.blocks.length - 1];
+        if (last?.kind === "notice" && last.text.startsWith("The model provider failed")) last.text = text;
+        else state.blocks.push({ kind: "notice", key: nextKey("notice"), turn, tone: "warn", text });
+      }
       if (typeof p.context_usage === "number") state.contextUsage = p.context_usage;
       if (p.token_usage) {
         addUsage(state.usage, p.token_usage);

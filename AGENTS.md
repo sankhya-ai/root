@@ -23,10 +23,11 @@ Four parts, one product: the runtime, the host, the UI, and the macOS app around
   - `documents/` reads PDF/Office/CSV and edits spreadsheets and PDFs; `toolbox/` is root's own Python (packages installed on demand, `run_python`, the session's scratch folder and the files it hands back); `connections/` is GitHub and Gmail; `history/` is session search (FTS5); `schedules/` runs prompts unattended on a timetable.
   - `learning/outcomes.py` keeps a learned skill only while turns that read it go at least as cleanly as before it.
   - `line/` is root on the team line (the relay and the `line` tool live in the separate chamber repo, checked out next to this one; its protocol is byte-compatible with `line/protocol.py`). root answers other agents in `kind="line"` plan-mode sessions.
+  - `terminal.py` — the owner's own shell in the session folder (the terminal drawer under the conversation, ⌘J; xterm.js over a WebSocket). Not the agent's: no approvals. Local installs only.
   - `launcher.py` (argv, config, environment; `TURA_CODE_RESOURCES` for an installed app), `sandbox.py`, `llm_proxy.py` (also OpenRouter model fallbacks), `vault.py` (credentials: 0600 files, or the macOS Keychain), `pool.py`, `processes.py`, `events.py`, `wire.py`.
   - `app/` — routes split by area; `security.py` identifies callers.
 - `macos/` is the app: a Swift package (`Sources/Root`: the window, `Server.swift`, `Bridge.swift` for the page's native side, `Install.swift`) with Sparkle for updates. The page talks to it only through `ui/src/lib/native.ts`; in a browser there is no bridge and the web UI does the same jobs.
-- `ui/src/lib/transcript.ts` folds the event stream into blocks and `activity.ts` groups tool calls into trace lines; keep both pure and tested. Components: `turn/` (activity, approval card, flow card), `inspector/` (one file per panel), `pages/`, `settings/` (Settings as a page; `PluginsSection.tsx` is the Plugins page).
+- `ui/src/lib/transcript.ts` folds the event stream into blocks and `activity.ts` groups tool calls into trace lines; keep both pure and tested. Components: `turn/` (activity, approval card, flow card), `inspector/` (one file per panel: Changes, Files, Plan); `TerminalDrawer.tsx`, `pages/`, `settings/` (Settings as a page; `PluginsSection.tsx` is the Plugins page).
 
 ## Rules
 

@@ -1,4 +1,4 @@
-import { Brain, Compass, Cpu, FileDiff, FileText, FlaskConical, ListTodo, PanelRight, Shield, ShieldCheck, WifiOff, X } from "lucide-react";
+import { Brain, Compass, Cpu, FileDiff, FileText, FlaskConical, ListTodo, PanelRight, Shield, SquareTerminal, WifiOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api.ts";
@@ -6,6 +6,7 @@ import { useSession } from "../lib/useSession.ts";
 import type { Attachment, Health, PermissionMode, Session, SlashCommand } from "../lib/types.ts";
 import { Composer } from "./Composer.tsx";
 import { Inspector, type InspectorTab } from "./inspector/Inspector.tsx";
+import { TerminalDrawer } from "./TerminalDrawer.tsx";
 import { MODE_ORDER, ModeMenu } from "./ModeMenu.tsx";
 import { Transcript } from "./Transcript.tsx";
 
@@ -98,6 +99,7 @@ export function SessionView({
   const handle = useSession(sessionId, onSessionChange);
   const { transcript, session, connection, error } = handle;
   const [tab, setTab] = useState<InspectorTab>("changes");
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [files, setFiles] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [injected, setInjected] = useState<{ text: string; n: number } | null>(null);
@@ -138,6 +140,13 @@ export function SessionView({
   // Esc: reject a waiting approval, else stop the turn. Shift+Tab: cycle modes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setTerminalOpen((open) => !open);
+        return;
+      }
+      // Keys typed in the terminal are the shell's (Esc in vim must not reject an approval).
+      if (e.target instanceof Element && e.target.closest(".terminalPanel")) return;
       if (e.key === "Escape" && !document.querySelector(".backdrop")) {
         const waiting = [...transcript.pending.values()][0];
         if (waiting) {
@@ -256,7 +265,10 @@ export function SessionView({
               {Math.round(context * 100)}%
             </span>
           ) : null}
-          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files, plan, memory, processes">
+          <button className={`iconButton${terminalOpen ? " on" : ""}`} onClick={() => setTerminalOpen((open) => !open)} title="Terminal (⌘J)" aria-label="Terminal">
+            <SquareTerminal size={17} />
+          </button>
+          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files and plan">
             <PanelRight size={17} />
           </button>
         </header>
@@ -306,45 +318,6 @@ export function SessionView({
         />
         <div className="composerWrap">
           <div className="column">
-            {turnEnds > 0 && !transcript.running ? (
-              <div className="composerQuickActions">
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "Run verification tests and check results.", n: Date.now() })}
-                  title="Run tests and automated checks"
-                >
-                  <FlaskConical size={12} className="icon-green" /> Run tests
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => {
-                    setTab("changes");
-                    if (!inspectorOpen) onToggleInspector();
-                  }}
-                  title="Inspect changes diff"
-                >
-                  <FileDiff size={12} className="icon-gold" /> Diff
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "/plan ", n: Date.now() })}
-                  title="Propose next plan"
-                >
-                  <ListTodo size={12} className="icon-blue" /> Plan next
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "Review recent changes for edge cases or bugs.", n: Date.now() })}
-                  title="Review for bugs"
-                >
-                  <ShieldCheck size={12} className="icon-red" /> Review
-                </button>
-              </div>
-            ) : null}
             {queued.length ? (
               <div className="queued">
                 {queued.map((item, i) => (
@@ -399,6 +372,7 @@ export function SessionView({
             />
           </div>
         </div>
+        <TerminalDrawer sessionId={sessionId} open={terminalOpen} onClose={() => setTerminalOpen(false)} />
       </main>
       {inspectorOpen && session ? (
         <Inspector
@@ -408,7 +382,6 @@ export function SessionView({
           workspace={workspace}
           session={session}
           todos={transcript.todos}
-          processes={[...transcript.processes.values()]}
           refreshKey={refreshKey}
           files={files}
           onMention={(path) => setInjected({ text: `@${path} `, n: Date.now() })}

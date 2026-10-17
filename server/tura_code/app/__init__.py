@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .. import __version__, extensions, launcher
+from .. import __version__, extensions, launcher, terminal
 from ..pool import RuntimePool
 from ..sandbox import Sandbox
 from ..settings import data_dir
@@ -81,6 +81,7 @@ def create_app(
     app.include_router(routes_core.router(state))
     app.include_router(routes_sessions.router(state))
     app.include_router(routes_workspace.router(state))
+    app.include_router(terminal.router(state))
     for router in extensions.routers(state):
         app.include_router(router)
 
