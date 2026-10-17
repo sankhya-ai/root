@@ -28,17 +28,13 @@ from ..tenancy import LOCAL, Server, Tenant
 import ipaddress
 
 COOKIE = "tura_code_token"
-PUBLIC_PATHS = ("/api/auth/bootstrap", "/api/auth/login", "/api/health")
+#: The Google callback is where Google's consent page sends the browser back; it is
+#: authorized by its single-use ``state``, not by a cookie (``connections.google``).
+PUBLIC_PATHS = ("/api/auth/bootstrap", "/api/auth/login", "/api/health", "/api/connections/google/callback")
 
 
 def is_public_path(path: str) -> bool:
-    if path in PUBLIC_PATHS:
-        return True
-    if path.startswith("/i/") or path == "/i":
-        return True
-    if path.endswith("/public") or "/public" in path:
-        return True
-    return False
+    return path in PUBLIC_PATHS
 
 
 def load_local_token(root: Path) -> str:

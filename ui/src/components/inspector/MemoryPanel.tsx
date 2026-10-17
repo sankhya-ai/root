@@ -34,7 +34,7 @@ export function MemoryPanel({ workspace, refreshKey }: { workspace: string; refr
           </>
         ) : null}
       </p>
-      {status?.error ? <p className="small" style={{ color: "var(--accent)" }}>{status.error}</p> : null}
+      {status?.error ? <p className="small" style={{ color: "var(--del-ink)" }}>{status.error}</p> : null}
       <form
         className="panelTools"
         onSubmit={(e) => {
@@ -52,7 +52,7 @@ export function MemoryPanel({ workspace, refreshKey }: { workspace: string; refr
       {items?.map((item) => (
         <div key={item.id} className="listCard">
           <div className="row">
-            <span className="tag">{item.scope}</span>
+            <span className="tag">{item.scope === "owner" ? "yours" : "project"}{item.metadata?.kind ? ` · ${item.metadata.kind}` : ""}</span>
             <span className="grow small">{item.memory}</span>
             <button
               className="iconButton"

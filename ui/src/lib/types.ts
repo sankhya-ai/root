@@ -68,12 +68,21 @@ export interface MemoryItem {
   scope: "project" | "owner";
   score?: number;
   created_at?: string | null;
+  /** What Dhee filed it as: decision, convention, command, preference, fact, gotcha. */
+  metadata?: { kind?: string };
 }
 
 export interface SlashCommand {
   name: string;
   description: string;
   aliases: string[];
+}
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  /** How many files ride along. */
+  attachments: number;
 }
 
 export interface Session {
@@ -89,7 +98,15 @@ export interface Session {
   kind: "session" | "candidate" | "line";
   parent: string;
   role: string;
+  /** A scheduled run nobody watches: what would ask the owner is declined. */
+  unattended?: boolean;
+  /** The schedule that started this session. */
+  schedule?: string;
   running: boolean;
+  /** Approvals waiting for the owner right now. */
+  pending_approvals?: number;
+  /** Messages sent during a turn, run in order when it finishes (paused after a cancel or error). */
+  queued?: QueuedMessage[];
   runtime_state: string;
   runtime: {
     model?: string;
@@ -108,6 +125,8 @@ export interface Settings {
   api_key_source: "environment" | "settings" | "missing";
   base_url: string;
   model: string;
+  /** Tried in order when the model fails (OpenRouter's `models`). */
+  fallback_models: string[];
   max_context_size: number;
   reasoning_effort: string;
   provider_sort: string;
@@ -128,6 +147,10 @@ export interface Settings {
   learning_model: string;
   default_permission_mode: PermissionMode;
   recent_workspaces: string[];
+  /** The most parallel candidates the agent may give a coding flow. */
+  flow_max_candidates: number;
+  /** Plugins switched off: the agent gets none of their tools. */
+  disabled_plugins: string[];
 }
 
 export interface ModelInfo {
@@ -149,6 +172,10 @@ export interface Health {
   memory: { requested_mode: string; active_mode: string; installed: boolean; version: string; ready: boolean; error: string };
   api_key_set: boolean;
   scripted: boolean;
+  /** Where root keeps its data (local installs). */
+  data_dir?: string;
+  /** The host can show the native folder dialog (local mode on macOS). */
+  folder_picker?: boolean;
 }
 
 export type ServerMessage =
@@ -269,141 +296,96 @@ export interface FlowReview {
   judgment: Flow["judgment"];
 }
 
-// ── Multi-human & Multi-agent Squads ──
+// ── Checkpoints, connections, history, schedules ──
 
-export type IssueStatus = "backlog" | "in_progress" | "blocked" | "in_review" | "done";
-export type IssuePriority = "low" | "medium" | "high" | "urgent";
-export type AssigneeType = "human" | "agent" | "unassigned";
-export type WorkspaceScope = "personal" | "shared";
-
-export interface TeamCollaborator {
-  user_id: string; // e.g. "chitranjan", "nitin", "ashish"
-  user_name: string; // e.g. "Chitranjan", "Nitin", "Ashish"
-  agent_id: string; // e.g. "antigravity", "claude_code", "codex", "root"
-  agent_name: string; // e.g. "Antigravity", "Claude Code", "Codex", "Root"
-  status: "active" | "working" | "idle" | "holding_lease" | "waiting_on_human";
-  current_activity: string;
-  last_active?: number;
-}
-
-export interface IntercomMessage {
+export interface Checkpoint {
   id: string;
-  sender_id: string;
-  sender_name: string;
-  sender_type: "human" | "agent";
-  agent_name: string;
-  recipient: string; // "@all-agents", "@Antigravity", "@Claude-Code", "@Codex", etc.
-  content: string;
-  action_type:
-    | "message"
-    | "instruction"
-    | "lease_notice"
-    | "broadcast"
-    | "handoff"
-    | "agent_query"
-    | "agent_response"
-    | "lease_claimed"
-    | "agreement_synced"
-    | string;
-  files_mentioned?: string[];
   created_at: number;
+  label: string;
 }
 
-export interface SquadMember {
-  id: string;
-  type: "human" | "agent";
-  name: string;
-  role: string;
-  user_id?: string;
-  user_name?: string;
-  agent_id?: string;
-  agent_name?: string;
+export interface RollbackResult {
+  checkpoint: Checkpoint;
+  undo: Checkpoint;
+  restored: string[];
+  removed: string[];
 }
 
-export interface Squad {
-  id: string;
-  name: string;
-  description: string;
-  members: TeamCollaborator[];
-  created_at: number;
-  updated_at: number;
+export interface Connections {
+  github: { connected: boolean; source: string; login?: string; how?: string; device_flow: boolean; connected_at?: number };
+  gmail: { connected: boolean; configured: boolean; email?: string; connected_at?: number };
+  /** Where credentials live: "keychain" (the macOS app) or "file". */
+  secrets: "keychain" | "file";
 }
 
-export interface IssueComment {
-  id: string;
-  author_type: "human" | "agent";
-  author_id: string;
-  content: string;
-  created_at: number;
+export interface DeviceFlow {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  interval: number;
+  expires_in: number;
 }
 
-export interface ExecutionStep {
-  id: string;
-  run_id?: string;
-  timestamp: number;
-  agent_name: string;
-  user_name: string;
-  phase: "Search" | "Inspect" | "Edit" | "Test" | "Verify" | "Gate" | string;
-  tool?: string;
-  target_file?: string;
-  activity: string;
-  output_snippet?: string;
-  status: "completed" | "running" | "failed";
-}
-
-export interface ExecutionRun {
-  id: string;
-  issue_id: string;
-  agent_name: string;
-  user_name: string;
-  status: "running" | "completed" | "failed" | "paused";
-  phase: string;
-  step_count: number;
-  current_step: number;
-  current_activity: string;
-  active_file?: string;
-  last_tool?: string;
-  started_at: number;
-  updated_at: number;
-  completed_at?: number | null;
-}
-
-export interface Issue {
-  id: string;
+export interface SearchHit {
+  session_id: string;
+  turn_id: string;
+  finished_at: number;
+  workspace: string;
   title: string;
-  description: string;
-  status: IssueStatus;
-  priority: IssuePriority;
-  squad_id: string;
-  assignee_type?: AssigneeType;
-  assignee_id?: string;
-  workspace_scope: WorkspaceScope;
-  workspace_path: string;
-  branch?: string;
-  flow_id?: string | null;
-  diff?: string | null;
-  verification_command?: string;
-  verification_output?: string | null;
-  verification_passed?: boolean | null;
-  blocker_reason?: string | null;
-  collaborators?: TeamCollaborator[];
-  messages?: IntercomMessage[];
-  active_leases?: Record<string, string>;
-  active_run?: ExecutionRun | null;
-  runs?: ExecutionRun[];
-  execution_timeline?: ExecutionStep[];
-  comments?: IssueComment[];
-  lane_id?: string | null;
-  created_by: string;
-  created_at: number;
-  updated_at: number;
+  /** Snippets with [matched] words. */
+  prompt: string;
+  reply: string;
 }
 
+export type ScheduleMode = "plan" | "default" | "accept_edits";
 
-export interface BusState {
-  ready: boolean;
-  lanes: { id: string; session_id: string; from_agent: string; to_agent: string; status: string; context: any }[];
-  signals: { id: number; topic: string; data: any; agent_id: string | null; timestamp: string }[];
-  agents: { agent_id: string; metadata: any; first_seen: string; last_seen: string }[];
-  leases: Record<string, { agent_id: string; acquired_at: number }>;
+export interface Schedule {
+  id: string;
+  name: string;
+  workspace: string;
+  prompt: string;
+  when: string;
+  cron: string;
+  mode: ScheduleMode;
+  enabled: boolean;
+  created_at: number;
+  created_by: "owner" | "agent";
+  next_run: number | null;
+  last_run: number | null;
+  last_status: string;
+  last_session: string;
+  runs: number;
+  running: boolean;
+}
+
+export interface Plugin {
+  id: string;
+  name: string;
+  kind: "built-in" | "connection";
+  icon: string;
+  summary: string;
+  capabilities: string[];
+  enabled: boolean;
+}
+
+export interface McpServerInfo {
+  name: string;
+  enabled: boolean;
+  command: string;
+  args: string[];
+  url: string;
+  /** Names of its environment variables (values never leave the server). */
+  env: string[];
+}
+
+export interface PluginCatalog {
+  plugins: Plugin[];
+  mcp: McpServerInfo[];
+  toolbox: { path: string; ready: boolean };
+}
+
+export interface ProducedFile {
+  path: string;
+  scope: "scratch" | "workspace";
+  size: number;
 }

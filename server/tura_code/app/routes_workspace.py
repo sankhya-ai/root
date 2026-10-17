@@ -49,6 +49,13 @@ def router(app_state) -> APIRouter:
         except (workspace.WorkspaceError, OSError) as error:
             raise HTTPException(400, str(error)) from error
 
+    @api.post("/fs/pick")
+    async def pick(body: dict[str, Any], tenant: Tenant = Depends(tenant_of)) -> dict:
+        """The native folder dialog on the owner's own machine (local mode, macOS)."""
+        if tenant.server.mode != "local" or not workspace.folder_picker():
+            raise HTTPException(404, "No folder dialog here.")
+        return {"path": await workspace.pick_folder(str(body.get("start") or "") or None)}
+
     @api.get("/workspaces")
     async def list_workspaces(tenant: Tenant = Depends(tenant_of)) -> dict:
         personal = []

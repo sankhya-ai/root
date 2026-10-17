@@ -47,7 +47,7 @@ export function ApprovalCard({ approval, workspace, onApprove }: { approval: App
       {trust ? (
         <div className="approvalMeta">
           {trust.outside ? (
-            <span className="approvalChip outside" title="Outside the session's folder, root asks in every mode — Auto-approve all included.">
+            <span className="approvalChip outside" title="Outside the session's folder, root asks unless Auto-approve all is on.">
               outside the workspace: <code>{trust.outside}</code>
             </span>
           ) : null}

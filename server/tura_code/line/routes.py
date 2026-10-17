@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..tenancy import Tenant
-from . import board
 from . import config as line_config
 
 
@@ -26,7 +25,7 @@ def router(app_state) -> APIRouter:
     @api.get("/line")
     async def status(tenant: Tenant = Depends(tenant_of)) -> dict:
         local_only()
-        return {**server.line.status(), "board": board.URL}
+        return server.line.status()
 
     @api.put("/line")
     async def answer_from(body: Answer, tenant: Tenant = Depends(tenant_of)) -> dict:

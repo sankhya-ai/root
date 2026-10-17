@@ -25,12 +25,12 @@ def definition() -> dict[str, Any]:
     return {
         "name": TOOL_NAME,
         "description": (
-            "Run a substantial change as a coding flow: root copies this Git repository into isolated worktrees, "
-            "implements the task in each (1-3 candidates) with its own agent, runs your verification commands on "
-            "every candidate, repairs failures from the exact test output, and picks the best verified patch. "
-            "Nothing touches the checkout until the owner applies the reviewed patch, and an apply can be rolled back "
-            "exactly. `create` then `start`; progress arrives in this session; `review` shows the chosen diff; "
-            "`apply`/`rollback` ask the owner. For a small change you can finish now, edit the files directly instead."
+            "Only when the owner asks for a flow: root implements the task in an isolated Git worktree with its own "
+            "agent, runs your verification commands, repairs failures from the exact test output, and keeps the verified "
+            "patch. Nothing touches the checkout until the owner applies the reviewed patch, and an apply can be rolled "
+            "back exactly. `candidate_count` above 1 repeats the whole job per candidate (and its cost): only when the "
+            "owner asked for alternatives, and never above their Settings limit. `create` then `start`; progress arrives "
+            "in this session; `review` shows the diff; `apply`/`rollback` ask the owner. Otherwise edit files directly."
         ),
         "parameters": {
             "type": "object",
@@ -55,6 +55,8 @@ def _ok(data: Any, brief: str) -> dict[str, Any]:
 
 
 class FlowToolset:
+    plugin = "flows"
+
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
         # A candidate works inside a flow; it never starts or drives one.
         return [definition()] if runtime.record.kind == "session" else []
@@ -74,7 +76,8 @@ class FlowToolset:
                     owner_session=runtime.record.id,
                     acceptance=arguments.get("acceptance"),
                     verification_commands=arguments.get("verification_commands"),
-                    candidate_count=int(arguments.get("candidate_count") or 2),
+                    # One attempt unless asked; never more than the owner's limit (each candidate repeats the job).
+                    candidate_count=max(1, min(int(arguments.get("candidate_count") or 1), runtime.tenant.settings.get().flow_max_candidates)),
                 )
                 return _ok({"flow_id": flow["id"], "status": flow["status"], "candidates": len(flow["candidates"]), "next": "start"}, f"Prepared {flow['id']}")
             if operation == "list":

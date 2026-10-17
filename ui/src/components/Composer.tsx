@@ -130,7 +130,7 @@ export function Composer({
 
   const submit = () => {
     const value = text.trim();
-    if ((!value && !attachments.length) || disabled || running) return;
+    if ((!value && !attachments.length) || disabled) return;
     onSend(value, attachments);
     setText("");
     setAttachments([]);
@@ -242,12 +242,18 @@ export function Composer({
         }}
         aria-label="Message root"
       />
-      {running ? (
+      {running && !text.trim() && !attachments.length ? (
         <button className="sendButton" onClick={onStop} title="Stop (Esc)" aria-label="Stop">
           <Square size={13} fill="currentColor" />
         </button>
       ) : (
-        <button className="sendButton" onClick={submit} disabled={disabled || (!text.trim() && !attachments.length)} title="Send (Enter)" aria-label="Send">
+        <button
+          className="sendButton"
+          onClick={submit}
+          disabled={disabled || (!text.trim() && !attachments.length)}
+          title={running ? "Queue for after this turn (Enter)" : "Send (Enter)"}
+          aria-label={running ? "Queue" : "Send"}
+        >
           <ArrowUp size={18} />
         </button>
       )}

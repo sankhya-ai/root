@@ -29,7 +29,7 @@ def router(app_state) -> APIRouter:
         task = str(body.get("task") or "").strip()
         repo = str(body.get("repo") or tenant.workspace_root or ".")
         verification_commands = body.get("verification_commands") or ["git diff --check"]
-        candidate_count = int(body.get("candidate_count") or 2)
+        candidate_count = int(body.get("candidate_count") or 1)
         owner_session = body.get("owner_session")
         if not owner_session:
             active_sessions = tenant.sessions.list()

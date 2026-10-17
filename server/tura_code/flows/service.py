@@ -92,12 +92,12 @@ class FlowService:
 
     # ----- lifecycle -----------------------------------------------------------
 
-    async def create(self, repo: str | Path, task: str, *, owner_session: str, acceptance=None, verification_commands=None, candidate_count: int = 2) -> dict[str, Any]:
+    async def create(self, repo: str | Path, task: str, *, owner_session: str, acceptance=None, verification_commands=None, candidate_count: int = 1) -> dict[str, Any]:
         repo_path = self.tenant.check_workspace(repo)
         task = str(task or "").strip()
         if not task:
             raise FlowError("a task is required")
-        count = int(candidate_count or 2)
+        count = int(candidate_count or 1)
         if not 1 <= count <= MAX_CANDIDATES:
             raise FlowError(f"candidate_count must be between 1 and {MAX_CANDIDATES}")
         commands = [str(c).strip() for c in (verification_commands or ["git diff --check"]) if str(c).strip()]

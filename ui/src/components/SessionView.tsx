@@ -101,6 +101,7 @@ export function SessionView({
   const [files, setFiles] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [injected, setInjected] = useState<{ text: string; n: number } | null>(null);
+  const [restoreError, setRestoreError] = useState("");
   const turnsSeen = useRef(0);
   const sentInitial = useRef(false);
 
@@ -156,7 +157,9 @@ export function SessionView({
     return () => window.removeEventListener("keydown", onKey);
   }, [transcript, handle, session, setMode]);
 
-  const send = (text: string, attachments: Attachment[]) => handle.send(text, attachments);
+  // During a turn a message waits its turn, as in Codex; Esc still stops the run.
+  const send = (text: string, attachments: Attachment[]) => (transcript.running ? handle.queue(text, attachments) : handle.send(text, attachments));
+  const queued = session?.queued ?? [];
   const approvePlan = () => {
     setMode("accept_edits");
     handle.send("The plan is approved. Implement it now, then verify the result.", []);
@@ -279,6 +282,14 @@ export function SessionView({
             </button>
           </div>
         ) : null}
+        {restoreError ? (
+          <div className="banner error">
+            <span className="grow">{restoreError}</span>
+            <button className="iconButton" onClick={() => setRestoreError("")} aria-label="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        ) : null}
         <Transcript
           state={transcript}
           workspace={workspace}
@@ -288,6 +299,10 @@ export function SessionView({
           onLoadEarlier={() => void handle.loadEarlier()}
           planMode={session?.permission_mode === "plan"}
           onApprovePlan={approvePlan}
+          fileUrl={(file, download) => api.fileUrl(sessionId, file.path, file.scope, download)}
+          onRestore={(checkpoint) => {
+            api.rollback(sessionId, checkpoint).catch((e: Error) => setRestoreError(e.message));
+          }}
         />
         <div className="composerWrap">
           <div className="column">
@@ -330,12 +345,42 @@ export function SessionView({
                 </button>
               </div>
             ) : null}
+            {queued.length ? (
+              <div className="queued">
+                {queued.map((item, i) => (
+                  <div key={item.id} className="queuedItem">
+                    <span className="faint small">{i === 0 && !transcript.running ? "Paused" : "Queued"}</span>
+                    <span className="queuedText" title={item.text}>
+                      {item.text || `${item.attachments} file${item.attachments === 1 ? "" : "s"}`}
+                    </span>
+                    {!transcript.running ? (
+                      <button className="pill small" onClick={() => handle.sendQueued(item.id)} title="Send this now">
+                        Send
+                      </button>
+                    ) : null}
+                    <button
+                      className="pill small"
+                      onClick={() => {
+                        handle.unqueue(item.id);
+                        setInjected({ text: item.text, n: Date.now() });
+                      }}
+                      title="Take it back into the composer"
+                    >
+                      Edit
+                    </button>
+                    <button className="iconButton" onClick={() => handle.unqueue(item.id)} title="Remove" aria-label="Remove queued message">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <ComposerWithInjection
               key={sessionId}
               injected={injected}
               running={transcript.running}
               disabled={!session || connection !== "open"}
-              placeholder={transcript.running ? "Working… (Esc to stop)" : "Ask root to change, fix, or explain something"}
+              placeholder={transcript.running ? "Working… Enter queues a message for after this turn · Esc stops" : "Ask root to change, fix, or explain something"}
               slashCommands={slashCommands}
               files={files}
               onSend={send}

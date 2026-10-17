@@ -28,6 +28,10 @@ class SessionRecord:
     #: For a candidate: the session that owns its flow, and which candidate it is.
     parent: str = ""
     role: str = ""
+    #: Nobody is watching (a scheduled run): what would ask the owner is declined instead.
+    unattended: bool = False
+    #: The schedule that started this session, if any.
+    schedule: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "SessionRecord":
@@ -59,6 +63,8 @@ class TurnState:
     #: than only read, and whether an edit has come after the last of them.
     checks: int = 0
     unchecked_edits: bool = False
+    #: The workspace checkpoint taken before this turn (``checkpoints``), if any.
+    checkpoint: str = ""
 
     def note_edit(self) -> None:
         self.unchecked_edits = True

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, bootstrap } from "./api.ts";
 import { applyEvent, createTranscript, loadHistory, type TranscriptState } from "./transcript.ts";
-import type { ApprovalRequest, Attachment, PermissionMode, ServerMessage, Session, WireEvent } from "./types.ts";
+import type { ApprovalRequest, Attachment, PermissionMode, QueuedMessage, ServerMessage, Session, WireEvent } from "./types.ts";
 
 export type Connection = "connecting" | "open" | "closed";
 
@@ -13,6 +13,10 @@ export interface SessionHandle {
   error: string | null;
   clearError: () => void;
   send: (text: string, attachments?: Attachment[]) => void;
+  /** Send after the running turn (or now, when nothing runs). */
+  queue: (text: string, attachments?: Attachment[]) => void;
+  unqueue: (id: string) => void;
+  sendQueued: (id: string) => void;
   cancel: () => void;
   approve: (requestId: string, response: "approve" | "approve_for_session" | "reject") => void;
   setMode: (mode: PermissionMode) => void;
@@ -83,6 +87,10 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
         } else if (data.type === "event") {
           const t = transcriptRef.current;
           eventsRef.current.events.push(data.event);
+          if (data.event.type === "QueueUpdated") {
+            const queued = data.event.payload.queued as QueuedMessage[];
+            setSession((current) => (current ? { ...current, queued } : current));
+          }
           if (data.event.type === "SessionUpdated") {
             setSession(data.event.payload as Session);
             changeRef.current?.(data.event.payload as Session);
@@ -161,6 +169,10 @@ export function useSession(sessionId: string | null, onSessionChange?: (session:
     clearError: () => setError(null),
     send: (text, attachments) =>
       post({ type: "prompt", text, attachments: attachments?.map(({ name, mime, data }) => ({ name, mime, data })) }),
+    queue: (text, attachments) =>
+      post({ type: "queue", text, attachments: attachments?.map(({ name, mime, data }) => ({ name, mime, data })) }),
+    unqueue: (id) => post({ type: "unqueue", id }),
+    sendQueued: (id) => post({ type: "send_queued", id }),
     cancel: () => post({ type: "cancel" }),
     approve: (requestId, response) => post({ type: "approval", request_id: requestId, response }),
     setMode: (mode) => post({ type: "set_mode", mode }),

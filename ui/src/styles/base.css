@@ -6,7 +6,8 @@
  * - Two glass cards (rail, body) on that ground; hairline borders.
  * - No gradient fills anywhere. Buttons are outlined pills or ink; the send
  *   button is a neutral circle.
- * - Orange #e3a473 is a micro-signal only (running, waiting on you).
+ * - Ink only: no orange, no blue. Primary actions are the black ink pill;
+ *   the one colour is the blue dot in the root mark.
  * - System sans throughout; small letter-spaced caps for section labels.
  */
 
@@ -22,15 +23,17 @@
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
   --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
-  --accent: #e3a473;
-  --accent-soft: rgba(227, 164, 115, 0.14);
-  --accent-line: rgba(227, 164, 115, 0.42);
-  --dot: #4e83b0;
-  /* Tura's wayfinding colours, used only on small line icons. */
-  --icon-red: #b96f57;
-  --icon-green: #70852f;
-  --icon-blue: #4d7fa5;
-  --icon-gold: #927521;
+  /* root is ink only: the accent and the focus colour follow the ink of the
+   * theme (set per theme below). The logo's blue dot is the brand's, not a token. */
+  --accent: var(--ink);
+  --accent-soft: var(--hover);
+  --accent-line: var(--line-strong);
+  --dot: var(--ink-muted);
+  /* Line icons are ink like everything else (the old wayfinding tints are retired). */
+  --icon-red: var(--ink-muted);
+  --icon-green: var(--ink-muted);
+  --icon-blue: var(--ink-muted);
+  --icon-gold: var(--ink-muted);
   --radius-card: 18px;
   --radius: 12px;
   --radius-sm: 8px;

@@ -27,8 +27,9 @@ from ..events import EventLog
 from ..memory import packet_envelope
 from ..wire import WireError, WireProcess
 from .approvals import Approvals
+from .queue import Queue
+from .checkpoints import CheckpointError, Rollback
 from .host_tools import tool_error
-from .context_mgmt import ContextManager
 from .prompting import attachment_meta, build_parts, expand_mentions, title_of
 from .record import MODES, SessionRecord, TurnState
 
@@ -38,9 +39,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 EDIT_TOOLS = {"WriteFile", "StrReplaceFile"}
+#: Host tools that change a document (``documents``).
+DOCUMENT_EDIT_TOOLS = {"edit_spreadsheet", "edit_pdf"}
 
 
-class SessionRuntime(Approvals):
+class SessionRuntime(Approvals, Rollback, Queue):
     def __init__(self, tenant: "Tenant", record: SessionRecord) -> None:
         self.tenant = tenant
         self.record = record
@@ -59,11 +62,11 @@ class SessionRuntime(Approvals):
         self._seq = self.log.last_seq
         self.last_activity = time.time()
         self.memory_seen: set[str] = set()
+        #: Messages the owner sent during a turn (``queue``), oldest first.
+        self.queued: list[dict] = []
         self.runtime_state = "stopped"
         self.runtime_info: dict[str, Any] = {}
         self._processes: processes.ProcessManager | None = None
-        # T4 context manager
-        self.context_mgr = ContextManager(self, budget=tenant.settings.get().max_context_size)
         # Token accounting
         self._token_usage: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         # ContentPart delta coalescing buffer
@@ -127,9 +130,16 @@ class SessionRuntime(Approvals):
     def public(self) -> dict:
         data = asdict(self.record)
         data["running"] = self.turn is not None
+        data["pending_approvals"] = len(self.pending)
+        data["queued"] = self.queued_public()
         data["runtime_state"] = self.runtime_state
         data["runtime"] = self.runtime_info
         return data
+
+    @property
+    def scratch_dir(self) -> Path:
+        """The session's own folder for throwaway work and deliverables (``$ROOT_SCRATCH``)."""
+        return self.dir / "scratch"
 
     @property
     def processes(self) -> processes.ProcessManager:
@@ -148,7 +158,9 @@ class SessionRuntime(Approvals):
     async def ensure_process(self) -> WireProcess:
         async with self._start_lock:
             spec = self.tenant.launch_spec(self)
-            fingerprint = spec.fingerprint()
+            definitions = self.tenant.tool_definitions(self)
+            # The host tools are part of the process: connecting Gmail, say, restarts it.
+            fingerprint = (spec.fingerprint(), tuple(sorted(d["name"] for d in definitions)))
             if self.process is not None and self.process.alive and fingerprint == self._fingerprint:
                 return self.process
             if self.process is not None:
@@ -169,7 +181,7 @@ class SessionRuntime(Approvals):
             process = WireProcess(argv, cwd=spec.workspace, env=env, on_event=self._on_wire_event, on_request=self._on_wire_request, on_exit=self._on_exit)
             await process.start()
             try:
-                result = await process.initialize(self.tenant.tool_definitions(self))
+                result = await process.initialize(definitions)
             except (WireError, asyncio.TimeoutError) as error:
                 detail = process.stderr_tail()
                 await process.close(grace=1)
@@ -273,7 +285,7 @@ class SessionRuntime(Approvals):
                 raise ValueError("arguments must be a JSON object")
         except (json.JSONDecodeError, ValueError) as error:
             return {"tool_call_id": call_id, "return_value": tool_error(f"Invalid arguments: {error}", "Invalid arguments")}
-        toolset = next((t for t in self.tenant.toolsets if t.handles(name)), None)
+        toolset = next((t for t in self.tenant.active_toolsets() if t.handles(name)), None)
         if toolset is None:
             result = tool_error(f"Unknown host tool `{name}`.", "Unknown tool")
         else:
@@ -297,6 +309,12 @@ class SessionRuntime(Approvals):
             return
         if text == "/plan":
             await self.set_mode("default" if self.record.permission_mode == "plan" else "plan")
+            return
+        if text == "/rollback":
+            try:
+                await self.rollback()
+            except CheckpointError as error:
+                raise ValueError(str(error)) from error
             return
         if text in ("/verify", "/test", "/check"):
             text = "Run the automated verification suite and tests for this repository, inspect all outputs, and report passing or failing status."
@@ -326,8 +344,8 @@ class SessionRuntime(Approvals):
                 self.memory_seen.update(item["id"] for item in packet.items if item.get("id"))
         self.emit("UserPrompt", {"text": text, "attachments": attachment_meta(attachments), "memory": memory_items})
         user_input: str | list = build_parts(request_text, attachments) if attachments else request_text
-        if self.record.turns == 0 and not is_slash:
-            self.record.title = title_of(text)
+        if self.record.turns == 0 and not is_slash and self.record.title == "New session":
+            self.record.title = title_of(text)  # a title given at creation (a schedule's) is kept
         self.record.turns += 1
         self.record.updated_at = time.time()
         self.save_record()
@@ -336,30 +354,9 @@ class SessionRuntime(Approvals):
         self._turn_task = asyncio.create_task(self._run_turn(process, turn, user_input))
 
     async def _run_turn(self, process: WireProcess, turn: TurnState, user_input: str | list) -> None:
-        # T4 context management: if configured, compact prior conversation history
-        # into a concise summary and prepend it to the user input, so the runtime's
-        # context window never overflows with full history. The recall_event tool
-        # stays available for the model to recover elided details.
-        strategy = self.tenant.settings.get().context_strategy
-        if strategy not in ("off", "T0"):
-            try:
-                page = self.log.page()
-                history = page.get("events") or []
-                # Only summarize meaningful conversation history (need at least
-                # one completed turn with a UserPrompt)
-                if len(history) > 2 and any(e.get("type") == "UserPrompt" for e in history):
-                    context_hint = self.context_mgr.manage_and_summarize(history)
-                    if context_hint:
-                        # Don't prepend context to slash commands
-                        if isinstance(user_input, str) and not user_input.lstrip().startswith("/"):
-                            user_input = context_hint + user_input
-                        elif isinstance(user_input, list):
-                            user_input = [{"type": "text", "text": context_hint}] + user_input
-            except Exception:  # noqa: BLE001 - never fail a turn over context management
-                logger.exception("context management summary failed, continuing without it")
-
         status, extra = "error", {}
         try:
+            await self.checkpoint_turn(turn)
             result = await process.prompt(user_input)
             status = str(result.get("status") or "finished")
             extra = {k: v for k, v in result.items() if k != "status"}
@@ -372,7 +369,7 @@ class SessionRuntime(Approvals):
             self._settle_pending("reject", "turn ended")
             self.log.flush()
             duration = round(time.time() - turn.started_at, 2)
-            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, **extra})
+            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, "checkpoint": turn.checkpoint, **extra})
             self.record.last_status = status
             self.record.updated_at = time.time()
             self.save_record()
@@ -380,6 +377,7 @@ class SessionRuntime(Approvals):
             self._turn_task = None
             self._turn_done.set()
         await self.tenant.after_turn(self, turn, status)
+        await self._drain_queue(status)
 
     async def wait_turn(self, timeout: float | None = None) -> None:
         await asyncio.wait_for(self._turn_done.wait(), timeout)
@@ -450,13 +448,15 @@ def _observe(turn: TurnState, kind: str, payload: dict) -> None:
                 turn.note_command(str(json.loads(call["arguments"] or "{}").get("command") or ""))
             except (json.JSONDecodeError, AttributeError):
                 pass
-        elif call["name"] == "coding_flow":
-            turn.note_check()  # a flow runs its verification commands on every candidate
-        if call["name"] in EDIT_TOOLS and not failed:
-            turn.note_edit()
+        elif call["name"] in ("coding_flow", "run_python"):
+            turn.note_check()  # a flow runs its checks on every candidate; run_python runs code
+        if call["name"] in (*EDIT_TOOLS, *DOCUMENT_EDIT_TOOLS) and not failed:
+            if call["name"] in EDIT_TOOLS:
+                turn.note_edit()  # a document edit re-opens what it saved: it is its own check
             try:
-                path = str(json.loads(call["arguments"] or "{}").get("path") or "")
-            except json.JSONDecodeError:
+                arguments = json.loads(call["arguments"] or "{}")
+                path = str(arguments.get("output") or arguments.get("path") or "")
+            except (json.JSONDecodeError, AttributeError):
                 path = ""
             if path and path not in turn.files_touched:
                 turn.files_touched.append(path)

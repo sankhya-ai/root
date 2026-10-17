@@ -50,3 +50,20 @@ test("thinking broken one word per line reads as prose; real paragraphs survive"
   assert.equal(tidyThought("First, read the file.\n\n\n\nThen run the tests."), "First, read the file.\n\nThen run the tests.");
   assert.equal(tidyThought("One line of thought."), "One line of thought.");
 });
+
+import { sessionNews } from "./native.ts";
+
+test("the app hears about finished turns and new approvals between polls", () => {
+  const before = new Map([
+    ["a", { running: true, pending: 0 }],
+    ["b", { running: true, pending: 0 }],
+  ]);
+  const news = sessionNews(before, [
+    { id: "a", title: "Fix CI", running: false, pending_approvals: 0 },
+    { id: "b", title: "Refactor", running: true, pending_approvals: 1 },
+    { id: "c", title: "New", running: false },
+  ]);
+  assert.deepEqual(news.finished, [{ id: "a", title: "Fix CI" }]);
+  assert.deepEqual(news.asking, [{ id: "b", title: "Refactor" }]);
+  assert.equal(news.pending, 1);
+});

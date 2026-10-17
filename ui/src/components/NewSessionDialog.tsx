@@ -142,7 +142,7 @@ export function NewSessionDialog({
                 ) : null}
                 {listing.entries.map((entry) => (
                   <button key={entry.path} className="dirRow" onClick={() => browse(entry.path)} onDoubleClick={() => create(entry.path)}>
-                    {entry.git ? <FolderGit2 size={14} color="var(--dot)" /> : <Folder size={14} className="faint" />} {entry.name}
+                    {entry.git ? <FolderGit2 size={14} /> : <Folder size={14} className="faint" />} {entry.name}
                   </button>
                 ))}
                 {listing.entries.length === 0 ? <div className="dirRow faint">No subfolders</div> : null}

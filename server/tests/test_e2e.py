@@ -239,3 +239,56 @@ def test_a_restart_for_a_new_mode_is_not_reported_as_an_exit(client, workspace, 
         events = run_turn(ws, "two")
     statuses = [e["payload"].get("state") for e in events if e["type"] == "RuntimeStatus"]
     assert "starting" in statuses and "ready" in statuses and "exited" not in statuses
+
+
+def _until(ws, kind: str, timeout_events: int = 500) -> list[dict]:
+    seen: list[dict] = []
+    for _ in range(timeout_events):
+        message = ws.receive_json()
+        if message["type"] == "error":
+            raise AssertionError(message["message"])
+        if message["type"] == "event":
+            seen.append(message["event"])
+            if message["event"]["type"] == kind:
+                return seen
+    raise AssertionError(f"no {kind}")
+
+
+def test_a_message_sent_during_a_turn_runs_when_it_finishes(client, workspace, script):
+    script([tool_call("c1", "Shell", {"command": "touch hi.txt"}), text("one"), text("two")])
+    session_id = _session(client, workspace)
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "prompt", "text": "first"})
+        request = _until(ws, "ApprovalRequest")[-1]
+        ws.send_json({"type": "queue", "text": "second"})
+        queued = _until(ws, "QueueUpdated")[-1]["payload"]["queued"]
+        assert [q["text"] for q in queued] == ["second"]
+        ws.send_json({"type": "approval", "request_id": request["payload"]["id"], "response": "approve"})
+        events = _until(ws, "TurnFinished")
+        events += _until(ws, "TurnFinished")
+    prompts = [e["payload"]["text"] for e in of_type(events, "UserPrompt")]
+    assert prompts == ["second"]
+    assert of_type(events, "QueueUpdated")[-1]["payload"]["queued"] == []
+    assert [e["payload"]["status"] for e in of_type(events, "TurnFinished")] == ["finished", "finished"]
+    assert client.get(f"/api/sessions/{session_id}").json()["queued"] == []
+
+
+def test_a_cancelled_turn_pauses_the_queue_until_the_owner_sends_it(client, workspace, script):
+    script([tool_call("c1", "Shell", {"command": "touch hi.txt"}), text("later")])
+    session_id = _session(client, workspace)
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "prompt", "text": "first"})
+        _until(ws, "ApprovalRequest")
+        ws.send_json({"type": "queue", "text": "next"})
+        _until(ws, "QueueUpdated")
+        ws.send_json({"type": "cancel"})
+        finished = _until(ws, "TurnFinished")[-1]["payload"]
+        assert finished["status"] in ("cancelled", "finished")
+        waiting = client.get(f"/api/sessions/{session_id}").json()
+        assert waiting["running"] is False and [q["text"] for q in waiting["queued"]] == ["next"]
+        ws.send_json({"type": "send_queued", "id": waiting["queued"][0]["id"]})
+        events = _until(ws, "TurnFinished")
+    assert [e["payload"]["text"] for e in of_type(events, "UserPrompt")] == ["next"]
+    assert client.get(f"/api/sessions/{session_id}").json()["queued"] == []

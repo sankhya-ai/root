@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .. import launcher
 from ..processes import ProcessError
 from ..sessions import MODES, SessionRuntime
+from ..sessions.checkpoints import CheckpointError
 from ..tenancy import Tenant, WorkspaceError
 from ..wire import WireError
 
@@ -26,6 +27,11 @@ class CreateSession(BaseModel):
 class UpdateSession(BaseModel):
     title: str | None = None
     permission_mode: str | None = None
+
+
+class Restore(BaseModel):
+    #: A checkpoint id; empty restores the one before the latest turn.
+    checkpoint: str = ""
 
 
 def router(app_state) -> APIRouter:
@@ -87,6 +93,29 @@ def router(app_state) -> APIRouter:
             raise HTTPException(404, "No such grant in this session.")
         return runtime.public()
 
+    @api.get("/sessions/{session_id}/checkpoints")
+    async def checkpoints(session_id: str, tenant: Tenant = Depends(tenant_of)) -> dict:
+        runtime = session(tenant, session_id)
+        try:
+            found = await runtime.checkpoints.list()
+        except CheckpointError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"checkpoints": [c.public() for c in found], "disabled": runtime.checkpoints.disabled}
+
+    @api.get("/sessions/{session_id}/checkpoints/{checkpoint}/changes")
+    async def checkpoint_changes(session_id: str, checkpoint: str, tenant: Tenant = Depends(tenant_of)) -> dict:
+        try:
+            return {"changes": await session(tenant, session_id).checkpoints.changes_since(checkpoint)}
+        except CheckpointError as error:
+            raise HTTPException(404, str(error)) from error
+
+    @api.post("/sessions/{session_id}/rollback")
+    async def rollback(session_id: str, body: Restore, tenant: Tenant = Depends(tenant_of)) -> dict:
+        try:
+            return await session(tenant, session_id).rollback(body.checkpoint.strip() or None)
+        except CheckpointError as error:
+            raise HTTPException(409, str(error)) from error
+
     @api.get("/sessions/{session_id}/processes")
     async def session_processes(session_id: str, tenant: Tenant = Depends(tenant_of)) -> dict:
         return {"processes": session(tenant, session_id).processes.list()}
@@ -146,6 +175,12 @@ async def handle_client(runtime: SessionRuntime, message: dict, websocket: WebSo
     try:
         if kind == "prompt":
             await runtime.prompt(str(message.get("text") or ""), message.get("attachments") or None)
+        elif kind == "queue":
+            await runtime.enqueue(str(message.get("text") or ""), message.get("attachments") or None)
+        elif kind == "unqueue":
+            runtime.unqueue(str(message.get("id") or ""))
+        elif kind == "send_queued":
+            await runtime.send_queued(str(message.get("id") or ""))
         elif kind == "cancel":
             await runtime.cancel()
         elif kind == "approval":

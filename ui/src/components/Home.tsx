@@ -1,12 +1,13 @@
 // Tura's home: a greeting and one composer. Sending starts a session in the
 // chosen folder with that message.
 
-import { ChevronDown, Compass, FileDiff, FlaskConical, Folder, ListTodo } from "lucide-react";
+import { Compass, FileDiff, FlaskConical, ListTodo } from "lucide-react";
 import { useState } from "react";
 
 import type { Attachment, PermissionMode } from "../lib/types.ts";
 import { Composer } from "./Composer.tsx";
 import { ModeMenu } from "./ModeMenu.tsx";
+import { WorkspaceMenu } from "./WorkspaceMenu.tsx";
 
 function greeting(): string {
   const hour = new Date().getHours();
@@ -73,9 +74,7 @@ export function Home({
               draftKey="home"
               chips={
                 <>
-                  <button className="chip" onClick={() => onPickFolder(setWorkspace)} title={workspace || "Choose a folder"}>
-                    <Folder size={14} /> {workspace ? basename(workspace) : "Choose a folder"} <ChevronDown size={13} />
-                  </button>
+                  <WorkspaceMenu workspace={workspace} recent={recent} onChange={setWorkspace} onPickFolder={onPickFolder} down />
                   <ModeMenu mode={mode} onChange={setMode} down />
                 </>
               }

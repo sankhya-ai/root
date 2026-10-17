@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { lineDiff, parseUnifiedDiff } from "./diff.ts";
-import { applyEvent, createTranscript, loadHistory, parseArgs } from "./transcript.ts";
+import { applyEvent, createTranscript, loadHistory, parseArgs, producedFiles } from "./transcript.ts";
 import type { WireEvent } from "./types.ts";
 
 let seq = 0;
@@ -107,4 +107,33 @@ test("unified diff parsing", () => {
   assert.equal(files[0].added, 1);
   assert.equal(files[0].removed, 1);
   assert.deepEqual(files[0].rows.map((r) => r.kind), ["gap", "context", "del", "add"]);
+});
+
+test("a turn keeps its checkpoint and a rollback says what it restored", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "edit", attachments: [], memory: [] }));
+  applyEvent(state, ev("Checkpoint", { id: "c0ffee", label: "Before: edit", created_at: 1 }));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: ["a.py"], checkpoint: "c0ffee" }));
+  const end = state.blocks.find((b) => b.kind === "turn_end");
+  assert.ok(end && end.kind === "turn_end");
+  assert.equal(end.checkpoint, "c0ffee");
+  applyEvent(
+    state,
+    ev("Rollback", { checkpoint: { id: "c0ffee", label: "Before: edit" }, undo: { id: "beef", label: "Before restoring" }, restored: ["a.py"], removed: ["b.py"] }, ""),
+  );
+  const rollback = state.blocks[state.blocks.length - 1];
+  assert.ok(rollback.kind === "rollback");
+  assert.deepEqual([rollback.label, rollback.undo, rollback.restored, rollback.removed], ["edit", "beef", ["a.py"], ["b.py"]]);
+});
+
+test("files a run produced are collected per turn, once each", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));
+  applyEvent(state, ev("ToolCall", { id: "p1", function: { name: "run_python", arguments: "{}" } }));
+  const files = [{ path: "report.pdf", scope: "scratch", size: 2048 }];
+  const display = [{ type: "brief", text: "exit 0" }, { type: "files", data: { files } }];
+  applyEvent(state, ev("ToolResult", { tool_call_id: "p1", return_value: { is_error: false, output: "", message: "", display } }));
+  applyEvent(state, ev("ToolCall", { id: "p2", function: { name: "run_python", arguments: "{}" } }));
+  applyEvent(state, ev("ToolResult", { tool_call_id: "p2", return_value: { is_error: false, output: "", message: "", display } }));
+  assert.deepEqual(producedFiles(state.blocks), files);
 });

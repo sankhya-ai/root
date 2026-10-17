@@ -41,8 +41,10 @@ class Approvals:
             mode=mode,
             ledger=ledger,
             grants=set(self.record.grants),
-            ask_owner=self.record.kind != "candidate",
+            ask_owner=self.record.kind != "candidate" and not self.record.unattended,
             workspace=self.record.workspace,
+            own_roots=self.own_roots(),
+            roam=self.tenant.server.mode == "local",
         )
         summary = {**approval_summary(payload), "key": decision.key}
         if decision.response is not None:
@@ -68,7 +70,17 @@ class Approvals:
         self.emit("ApprovalResolved", {"request_id": request_id, "response": response, "auto": False, **summary})
         return self._owner_decision(decision, response)
 
-    async def approve_host_command(self: "SessionRuntime", call_id: str, command: str, verb: str, sender: str = "process") -> bool:
+    def own_roots(self: "SessionRuntime") -> tuple[str, ...]:
+        """Folders that belong to this session: its scratch folder and the owner's Python toolbox."""
+        roots = [str(self.scratch_dir)]
+        toolbox = getattr(self.tenant, "toolbox", None)
+        if toolbox is not None:
+            roots.append(str(toolbox.root))
+        return tuple(roots)
+
+    async def approve_host_command(
+        self: "SessionRuntime", call_id: str, command: str, verb: str, sender: str = "process", display: list[dict[str, Any]] | None = None
+    ) -> bool:
         """Put a command a host tool will run through the same policy as `Shell`."""
         payload = {
             "id": f"host-{uuid.uuid4().hex[:12]}",
@@ -76,7 +88,7 @@ class Approvals:
             "sender": sender,
             "action": trust.ACTION_RUN_COMMAND,
             "description": f"{verb}: {command}",
-            "display": [{"type": "shell", "language": "sh", "command": command}],
+            "display": display or [{"type": "shell", "language": "sh", "command": command}],
         }
         return await self._approve(payload) == "approve"
 
@@ -135,6 +147,6 @@ class Approvals:
     def _settle_for_mode(self: "SessionRuntime", mode: str) -> None:
         """A more permissive mode also settles what is already waiting."""
         for future, payload in list(self.pending.values()):
-            decision = trust.decide(payload, mode=mode, ledger=self.tenant.trust, grants=set(self.record.grants), workspace=self.record.workspace)
+            decision = trust.decide(payload, mode=mode, ledger=self.tenant.trust, grants=set(self.record.grants), workspace=self.record.workspace, own_roots=self.own_roots(), roam=self.tenant.server.mode == "local")
             if decision.response is not None and not future.done():
                 future.set_result((decision.response, "mode"))

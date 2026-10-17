@@ -105,6 +105,40 @@ export function describeTool(name: string, rawArgs: string, workspace?: string):
       };
       return { icon: "agent", verb: verbs[String(args.operation)] ?? "Coding flow", subject: args.operation === "create" ? short(args.task) : id };
     }
+    case "read_document":
+      return { icon: "file", verb: "Read", subject: path + (args.pages ? ` · pages ${args.pages}` : args.sheet ? ` · ${args.sheet}` : "") };
+    case "edit_spreadsheet":
+    case "edit_pdf": {
+      const ops = Array.isArray(args.operations) ? args.operations.map((op: any) => String(op?.op ?? "")).filter(Boolean) : [];
+      return { icon: "edit", verb: "Edit", subject: `${path}${ops.length ? ` · ${[...new Set(ops)].join(", ")}` : ""}` };
+    }
+    case "session_search":
+      return { icon: "search", verb: "Search past sessions", subject: short(args.query) };
+    case "github": {
+      const action = String(args.action ?? "");
+      const verbs: Record<string, string> = {
+        repo: "Look up repository",
+        list_issues: "List issues",
+        get_issue: "Read issue",
+        list_prs: "List pull requests",
+        get_pr: "Read pull request",
+        pr_diff: "Read the diff of",
+        checks: "Check CI",
+        create_issue: "Open an issue",
+        update_issue: "Update issue",
+        comment: "Comment on",
+        create_pr: "Open a pull request",
+        review_pr: "Review pull request",
+      };
+      const subject = args.number ? `#${args.number}` : short(args.title ?? args.query ?? args.ref ?? args.repo ?? "");
+      return { icon: "globe", verb: `GitHub · ${verbs[action] ?? action}`, subject };
+    }
+    case "gmail": {
+      const verbs: Record<string, string> = { search: "Search mail", read: "Read email", thread: "Read thread", draft: "Draft a reply" };
+      return { icon: "globe", verb: `Gmail · ${verbs[String(args.action)] ?? args.action}`, subject: short(args.query ?? args.subject ?? args.to ?? args.id ?? "") };
+    }
+    case "schedule":
+      return { icon: "todo", verb: args.action === "create" ? "Schedule" : args.action === "delete" ? "Delete schedule" : "List schedules", subject: short(args.name ?? args.when ?? args.id ?? "") };
     default:
       return { icon: "plug", verb: name, subject: short(Object.values(args)[0] ?? "") };
   }

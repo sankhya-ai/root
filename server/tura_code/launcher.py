@@ -31,11 +31,15 @@ from pathlib import Path
 from .memory import CHECKPOINT_TOOL as MEMORY_CHECKPOINT_TOOL
 from .memory import MEMORY_ROLE
 from .sandbox import Mounts, Sandbox
-from .settings import PermissionMode, Settings, PlanningMode, ContextStrategy
+from .settings import PermissionMode, Settings, PlanningMode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ENV = "TURA_CODE_RUNTIME"
 AGENT_ENV = "TURA_CODE_AGENT"
+#: An installed root (the macOS app) keeps everything it ships in one folder:
+#: ``bin/kimi-agent``, ``agent/``, ``skills/`` (the runtime's built-in skills,
+#: whose compiled-in source path does not exist there) and ``ui/``.
+RESOURCES_ENV = "TURA_CODE_RESOURCES"
 #: Point this at a scripted-echo script to run the whole stack without a model.
 #: A JSON list scripts every process; a JSON object maps a process role
 #: ("main", "candidate_1", …) to its own list. Used by tests and offline demos.
@@ -68,9 +72,26 @@ class RuntimeNotFound(RuntimeError):
     pass
 
 
+def resources() -> Path | None:
+    raw = os.environ.get(RESOURCES_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def builtin_skills_dir() -> Path:
+    bundled = resources()
+    return bundled / "skills" if bundled else REPO_ROOT / "runtime" / "kimi-agent" / "src" / "skills"
+
+
+def ui_dist() -> Path:
+    bundled = resources()
+    return bundled / "ui" if bundled else REPO_ROOT / "ui" / "dist"
+
+
 def find_runtime_binary() -> Path:
     explicit = os.environ.get(RUNTIME_ENV, "").strip()
     candidates = [Path(explicit).expanduser()] if explicit else []
+    if resources() is not None:
+        candidates.append(resources() / "bin" / "kimi-agent")
     candidates += [
         REPO_ROOT / "runtime" / "target" / "release" / "kimi-agent",
         REPO_ROOT / "runtime" / "target" / "debug" / "kimi-agent",
@@ -90,7 +111,8 @@ def find_runtime_binary() -> Path:
 
 def base_agent_file() -> Path:
     explicit = os.environ.get(AGENT_ENV, "").strip()
-    path = Path(explicit).expanduser() if explicit else REPO_ROOT / "agent" / "agent.yaml"
+    default = resources() / "agent" / "agent.yaml" if resources() is not None else REPO_ROOT / "agent" / "agent.yaml"
+    path = Path(explicit).expanduser() if explicit else default
     if not path.is_file():
         raise RuntimeNotFound(f"Agent spec not found at {path}; set {AGENT_ENV}.")
     return path.resolve()
@@ -134,10 +156,11 @@ class LaunchSpec:
     #: More writable places, e.g. the main repository's `.git` for a worktree.
     extra_writable: tuple[Path, ...] = ()
     planning_mode: PlanningMode = "default"
-    context_strategy: ContextStrategy = "T4"
     action_space_mode: ActionSpaceMode = "predefined"
     #: A read-only session that answers another agent on the line.
     answering_line: bool = False
+    #: Root's Python toolbox (``toolbox``): its ``bin`` goes last on the agent's PATH.
+    toolbox: Path | None = None
 
     def key(self) -> str:
         return self.api_key or self.settings.api_key()
@@ -155,7 +178,6 @@ class LaunchSpec:
             s.director_mode,
             (s.web_search, s.web_search_paid_fallback, _digest(s.parallel_api_key), _digest(s.firecrawl_api_key), s.search_model),
             s.planning_mode,
-            s.context_strategy,
             self.permission_mode == "plan",
             self.answering_line,
             self.memory_enabled,
@@ -167,7 +189,7 @@ class LaunchSpec:
         )
 
     def mounts(self, binary: Path) -> Mounts:
-        readable = [binary.parent, base_agent_file().parent, REPO_ROOT / "runtime" / "kimi-agent" / "src" / "skills", *self.skills_dirs]
+        readable = [binary.parent, base_agent_file().parent, builtin_skills_dir(), *self.skills_dirs, *((self.toolbox,) if self.toolbox else ())]
         if self.mcp_config is not None:
             readable.append(self.mcp_config.parent)
         writable = ((self.session_dir,) if self.session_dir is not None else ()) + self.extra_writable
@@ -369,11 +391,22 @@ def child_environment(spec: LaunchSpec, share_dir: Path, binary: Path | None = N
         env["KIMI_MODEL_REASONING_EFFORT"] = settings.reasoning_effort
     if settings.provider_sort:
         env["ROOT_OPENROUTER_SORT"] = settings.provider_sort
-    if spec.skills_dirs:
-        env["KIMI_EXTRA_SKILLS_DIRS"] = os.pathsep.join(str(p) for p in spec.skills_dirs)
+    # Bundled built-in skills come first, so the owner's learned skills win a name clash.
+    skills_dirs = ((builtin_skills_dir(),) if resources() is not None and builtin_skills_dir().is_dir() else ()) + spec.skills_dirs
+    if skills_dirs:
+        env["KIMI_EXTRA_SKILLS_DIRS"] = os.pathsep.join(str(p) for p in skills_dirs)
     if os.environ.get(SCRIPTED_ECHO_ENV, "").strip():
         env["KIMI_SCRIPTED_ECHO_SCRIPTS"] = _scripted_file(spec, share_dir.parent / "runtime")
     env.setdefault("PYTHONUNBUFFERED", "1")
+    if spec.session_dir is not None:
+        # The session's own folder for throwaway work and deliverables (`toolbox`).
+        scratch = spec.session_dir / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        env["ROOT_SCRATCH"] = str(scratch)
+    if spec.toolbox is not None:
+        # Last on PATH: the project's and the owner's own tools always win.
+        env["ROOT_PYTHON"] = str(spec.toolbox / "venv" / "bin" / "python")
+        env["PATH"] = os.pathsep.join(filter(None, [env.get("PATH", ""), str(spec.toolbox / "venv" / "bin")]))
     if binary is not None:
         env = spec.sandbox.environment(env, spec.mounts(binary))
     return env

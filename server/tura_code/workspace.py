@@ -5,8 +5,11 @@ Nothing here writes. Edits belong to the agent, behind its approvals.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 IGNORED_DIRS = {
@@ -16,6 +19,16 @@ IGNORED_DIRS = {
 MAX_FILES = 5_000
 MAX_READ_BYTES = 1_000_000
 MAX_DIFF_BYTES = 400_000
+#: The macOS folder dialog, run by the local host for a browser page, which
+#: cannot learn a folder's path itself. The start folder comes in as an argument.
+PICK_FOLDER = [
+    "osascript",
+    "-e", "on run argv",
+    "-e", "activate",
+    "-e", 'POSIX path of (choose folder with prompt "Choose a workspace folder" default location (POSIX file (item 1 of argv)))',
+    "-e", "end run",
+]
+PICK_TIMEOUT = 600
 
 
 class WorkspaceError(ValueError):
@@ -140,3 +153,27 @@ def list_dirs(path: str | None, root: Path | None = None) -> dict:
         "git": (base / ".git").exists(),
         "entries": entries[:500],
     }
+
+
+def folder_picker() -> bool:
+    """Whether this machine can show the native folder dialog."""
+    return sys.platform == "darwin" and shutil.which(PICK_FOLDER[0]) is not None
+
+
+async def pick_folder(start: str | None = None) -> str | None:
+    """The folder the owner chooses in the native dialog, or None when they cancel."""
+    begin = Path(start).expanduser() if start else Path.home()
+    if not begin.is_dir():
+        begin = Path.home()
+    process = await asyncio.create_subprocess_exec(*PICK_FOLDER, str(begin), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), PICK_TIMEOUT)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return None
+    # A cancelled dialog exits non-zero ("User canceled", -128).
+    path = output.decode(errors="replace").strip()
+    if process.returncode != 0 or not path:
+        return None
+    return path.rstrip("/") or "/"

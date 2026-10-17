@@ -25,7 +25,7 @@ from .models import ModelCatalog
 from .pool import RuntimePool
 from .sandbox import Sandbox
 from .sessions import SessionManager
-from .sessions.host_tools import MemoryToolset, ProcessToolset, ContextToolset, Toolset
+from .sessions.host_tools import MemoryToolset, ProcessToolset, Toolset
 from .settings import SettingsStore
 from .trust import TrustLedger
 from .users import UserStore
@@ -53,7 +53,7 @@ class Tenant:
         self.home = home
         self.trust = TrustLedger(root / "trust.json")
         self.memory = MemoryView(server.gateway, owner_scope)
-        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset(), ContextToolset()]
+        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset()]
         #: Awaited when the tenant closes (a service's background work).
         self.closers: list[Any] = []
         self.sessions = SessionManager(self)
@@ -115,7 +115,7 @@ class Tenant:
         endpoint = None
         if self.proxy.enabled and not launcher.scripted():
             base = settings.base_url
-            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()))
+            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()), fallbacks=lambda: self.settings.get().fallback_models)
         return launcher.LaunchSpec(
             session_id=runtime.record.id,
             workspace=Path(runtime.record.workspace),
@@ -133,8 +133,8 @@ class Tenant:
             home=self.home,
             extra_writable=self._git_dirs(runtime),
             planning_mode=settings.planning_mode,
-            context_strategy=settings.context_strategy,
             answering_line=runtime.record.kind == "line",
+            toolbox=getattr(getattr(self, "toolbox", None), "root", None),
         )
 
     @staticmethod
@@ -155,8 +155,13 @@ class Tenant:
             return "off"
         return settings.director_mode
 
+    def active_toolsets(self) -> list[Toolset]:
+        """The host toolsets of every plugin that is on."""
+        off = set(self.settings.get().disabled_plugins)
+        return [t for t in self.toolsets if getattr(t, "plugin", None) not in off]
+
     def tool_definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        return [definition for toolset in self.toolsets for definition in toolset.definitions(runtime)]
+        return [definition for toolset in self.active_toolsets() for definition in toolset.definitions(runtime)]
 
     def command_environment(self, runtime: "SessionRuntime") -> dict[str, str]:
         from .sandbox import Mounts
