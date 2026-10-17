@@ -1,23 +1,17 @@
 import { X } from "lucide-react";
 
 import type { TodoItem } from "../../lib/transcript.ts";
-import type { ProcessInfo, Session } from "../../lib/types.ts";
+import type { Session } from "../../lib/types.ts";
 import { TodoItems } from "../turn/Steps.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
 import { FilesPanel } from "./FilesPanel.tsx";
-import { JevPanel } from "./JevPanel.tsx";
-import { MemoryPanel } from "./MemoryPanel.tsx";
-import { ProcessesPanel } from "./ProcessesPanel.tsx";
 
-export type InspectorTab = "changes" | "files" | "plan" | "memory" | "processes" | "jev";
+export type InspectorTab = "changes" | "files" | "plan";
 
 const TABS: { id: InspectorTab; label: string }[] = [
   { id: "changes", label: "Changes" },
   { id: "files", label: "Files" },
   { id: "plan", label: "Plan" },
-  { id: "memory", label: "Memory" },
-  { id: "processes", label: "Processes" },
-  { id: "jev", label: "Jev" },
 ];
 
 export function Inspector({
@@ -27,7 +21,6 @@ export function Inspector({
   workspace,
   session,
   todos,
-  processes,
   refreshKey,
   files,
   onMention,
@@ -38,12 +31,10 @@ export function Inspector({
   workspace: string;
   session: Session;
   todos: TodoItem[];
-  processes: ProcessInfo[];
   refreshKey: number;
   files: string[];
   onMention: (path: string) => void;
 }) {
-  const running = processes.filter((p) => p.status === "running").length;
   return (
     <aside className="card inspector">
       <div className="inspectorHead">
@@ -51,7 +42,6 @@ export function Inspector({
           {TABS.map((t) => (
             <button key={t.id} role="tab" aria-selected={tab === t.id} className={`tab${tab === t.id ? " active" : ""}`} onClick={() => onTab(t.id)}>
               {t.label}
-              {t.id === "processes" && running ? <span className="tabCount">{running}</span> : null}
             </button>
           ))}
         </div>
@@ -69,9 +59,6 @@ export function Inspector({
             <p className="help">The agent writes its plan here with SetTodoList when a task has several steps.</p>
           )
         ) : null}
-        {tab === "memory" ? <MemoryPanel workspace={workspace} refreshKey={refreshKey} /> : null}
-        {tab === "processes" ? <ProcessesPanel sessionId={session.id} live={processes} /> : null}
-        {tab === "jev" ? <JevPanel sessionId={session.id} refreshKey={refreshKey} /> : null}
       </div>
     </aside>
   );

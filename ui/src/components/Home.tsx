@@ -1,7 +1,6 @@
 // Tura's home: a greeting and one composer. Sending starts a session in the
 // chosen folder with that message.
 
-import { Compass, FileDiff, FlaskConical, ListTodo } from "lucide-react";
 import { useState } from "react";
 
 import type { Attachment, PermissionMode } from "../lib/types.ts";
@@ -80,48 +79,6 @@ export function Home({
               }
             />
             {failure || error ? <p className="small" style={{ color: "var(--err)" }}>{failure || error}</p> : null}
-            {workspace ? (
-              <div className="homeQuickPrompts">
-                <div className="homePromptChips">
-                  <button
-                    type="button"
-                    className="pill small"
-                    onClick={() => void go(workspace, "Run the verification suite for this codebase and check test results.")}
-                    disabled={busy}
-                    title="Run tests in this workspace"
-                  >
-                    <FlaskConical size={12} className="icon-green" /> Run tests
-                  </button>
-                  <button
-                    type="button"
-                    className="pill small"
-                    onClick={() => void go(workspace, "Give me a tour of this codebase: structure, entry points, and how to run it.")}
-                    disabled={busy}
-                    title="Explore architecture"
-                  >
-                    <Compass size={12} className="icon-blue" /> Codebase tour
-                  </button>
-                  <button
-                    type="button"
-                    className="pill small"
-                    onClick={() => void go(workspace, "Review uncommitted changes in this repository for bugs or regressions.")}
-                    disabled={busy}
-                    title="Review diffs"
-                  >
-                    <FileDiff size={12} className="icon-gold" /> Review diffs
-                  </button>
-                  <button
-                    type="button"
-                    className="pill small"
-                    onClick={() => void go(workspace, "Propose a structured implementation plan before making edits.")}
-                    disabled={busy}
-                    title="Propose plan"
-                  >
-                    <ListTodo size={12} className="icon-blue" /> Propose plan
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </div>
         </div>
       </div>

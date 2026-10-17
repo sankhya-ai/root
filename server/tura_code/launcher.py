@@ -284,7 +284,10 @@ def runtime_config(spec: LaunchSpec) -> dict:
         "default_thinking": settings.reasoning_effort not in ("", "none"),
         "loop_control": {
             "max_steps_per_turn": settings.max_steps_per_turn,
-            "max_retries_per_step": 3,
+            # Attempts per model call. A provider failure (5xx, 429, a dropped
+            # connection) backs off 2s→30s, so ten ride out a few minutes of
+            # outage; a malformed or empty reply still gets three at most.
+            "max_retries_per_step": 10,
             "max_ralph_iterations": 0,
             "reserved_context_size": max(4_096, min(50_000, context // 4)),
         },

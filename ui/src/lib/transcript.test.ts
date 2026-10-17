@@ -137,3 +137,14 @@ test("files a run produced are collected per turn, once each", () => {
   applyEvent(state, ev("ToolResult", { tool_call_id: "p2", return_value: { is_error: false, output: "", message: "", display } }));
   assert.deepEqual(producedFiles(state.blocks), files);
 });
+
+test("provider retries fold into one notice that counts up", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "go", attachments: [], memory: [] }));
+  for (const attempt of [1, 2, 3]) {
+    applyEvent(state, ev("StatusUpdate", { retry: { attempt, max_attempts: 10, delay_seconds: 2 ** attempt, error: "500" } }));
+  }
+  const notices = state.blocks.filter((b) => b.kind === "notice");
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0].kind === "notice" && notices[0].tone === "warn" && notices[0].text.includes("(4 of 10) in 8s"));
+});

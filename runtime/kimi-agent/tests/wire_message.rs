@@ -85,6 +85,7 @@ fn test_wire_message_serde() {
         context_usage: Some(0.5),
         token_usage: None,
         message_id: None,
+        retry: None,
     });
     assert_eq!(
         serialize_wire_message(&msg).unwrap(),

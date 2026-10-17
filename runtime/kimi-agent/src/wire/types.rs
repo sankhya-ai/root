@@ -66,6 +66,19 @@ pub struct StatusUpdate {
     pub token_usage: Option<TokenUsage>,
     #[serde(default)]
     pub message_id: Option<String>,
+    /// (root) A model call failed and is about to be tried again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<StepRetry>,
+}
+
+/// (root) One retry of a failed model call, for the owner to see while it waits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StepRetry {
+    /// The attempt that failed, from 1.
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay_seconds: f64,
+    pub error: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

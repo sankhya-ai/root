@@ -426,3 +426,66 @@ select.input {
   cursor: default;
   opacity: 0.5;
 }
+.terminalDrawer {
+  background: var(--raised);
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+.terminalDrawer[hidden] {
+  display: none;
+}
+.terminalResize {
+  cursor: row-resize;
+  height: 9px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: -5px;
+  touch-action: none;
+  z-index: 2;
+}
+.terminalResize:hover,
+.terminalResize:active {
+  background: linear-gradient(transparent 4px, var(--line-strong) 4px 5px, transparent 5px);
+}
+.terminalHead {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  padding: 6px 10px 4px 16px;
+}
+.terminalHead .spacer {
+  flex: 1;
+}
+.terminalLoading {
+  padding: 0 16px;
+}
+.terminalPanel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.terminalPanel[hidden] {
+  display: none;
+}
+.terminalHost {
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 6px 8px 16px;
+}
+.terminalBar {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 8px 16px;
+}

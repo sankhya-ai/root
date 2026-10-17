@@ -105,13 +105,18 @@ Keep local changes small and listed here so upstream updates stay mergeable.
     waits on its own request. It used to wait for the answer, so a long host
     tool call (a ten-minute `process` wait) held back every later event and a
     parallel call's approval until it returned.
+25. **Retries that ride out an outage** (`soul/kimisoul.rs` `retry_class`,
+    `retry_delay`; `wire/types.rs` `StepRetry`). A provider failure
+    (connection, timeout, 408/429/5xx/529) backs off 2s doubling to 30s, up to
+    `max_retries_per_step` attempts (root sets 10); an empty or malformed reply
+    keeps three quick attempts. Each retry sends a `StatusUpdate` with `retry`.
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were
 updated for 3 and 9; `tests/extra_skills_dirs.rs` for 5; unit tests in
 `args_repair.rs`, `tolerant.rs`, `repeat_guard.rs` and `walk.rs`, and
 `tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9; unit tests in
-`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24.
+`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24; a unit test in `kimisoul.rs` for 25.
 
 ## Updating from Tura
 
