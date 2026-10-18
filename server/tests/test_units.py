@@ -34,7 +34,8 @@ def test_config_uses_the_openrouter_protocol_and_keeps_the_key_out_of_env(tmp_pa
     spec = _spec(tmp_path, capabilities=["image_in"])
     path = launcher.write_runtime_config(spec, tmp_path / "rt")
     config = json.loads(path.read_text())
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # no mode bits on Windows: the profile folder's ACL keeps it private
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
     provider = config["providers"]["openrouter"]
     assert provider["api_key"] == "sk-or-env"  # the environment wins
     assert config["models"]["main"]["provider"] == "openrouter"
@@ -60,7 +61,7 @@ def test_director_off_switches_decisions_off(tmp_path):
 def test_overlay_for_plan_mode_with_memory(tmp_path):
     spec = _spec(tmp_path, permission_mode="plan")
     overlay = launcher.write_agent_overlay(spec, tmp_path / "rt").read_text()
-    assert f'extend: "{launcher.base_agent_file()}"' in overlay
+    assert f"extend: {json.dumps(str(launcher.base_agent_file()))}" in overlay
     assert "context_continuity_tool: memory_checkpoint" in overlay
     assert "PLAN MODE" in overlay and "memory_recall" in overlay
     assert '"kimi_cli.tools.file:WriteFile"' in overlay
@@ -91,7 +92,8 @@ def test_settings_never_expose_the_key_and_blank_means_unchanged(tmp_path, monke
     assert settings.openrouter_api_key == "sk-or-v1-abcdefgh" and settings.model == "a/b"
     public = settings.public()
     assert public["openrouter_api_key"] == "" and public["api_key_set"] and public["api_key_hint"] == "…efgh"
-    assert oct((tmp_path / "settings.json").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct((tmp_path / "settings.json").stat().st_mode & 0o777) == "0o600"
     store.update({"clear_api_key": True})
     assert store.get().openrouter_api_key == ""
 
@@ -334,13 +336,13 @@ def test_one_root_per_data_directory(tmp_path):
 def test_folder_dialog_returns_the_choice_or_none(client, tmp_path, monkeypatch):
     from tura_code import workspace
 
+    import sys
+
     chosen = tmp_path / "picked"
     chosen.mkdir()
-    # A stand-in for osascript: prints the choice, or exits 1 as a cancelled dialog does.
-    fake = tmp_path / "pick.sh"
-    fake.write_text('#!/bin/sh\n[ -n "$PICK" ] && echo "$PICK/" && exit 0\nexit 1\n')
-    fake.chmod(0o755)
-    monkeypatch.setattr(workspace, "PICK_FOLDER", [str(fake)])
+    # A stand-in for the dialog: prints the choice, or exits 1 as a cancelled dialog does.
+    fake = "import os, sys\npick = os.environ.get('PICK')\nprint(pick + os.sep) if pick else sys.exit(1)\n"
+    monkeypatch.setattr(workspace, "picker_command", lambda begin: ([sys.executable, "-c", fake], None))
     monkeypatch.setattr(workspace, "folder_picker", lambda: True)
     assert client.get("/api/health").json()["folder_picker"] is True
     monkeypatch.setenv("PICK", str(chosen))

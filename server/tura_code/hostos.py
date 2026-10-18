@@ -31,6 +31,9 @@ WINDOWS = os.name == "nt"
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
+#: Windows locks byte ranges, and a locked byte cannot even be read by another
+#: process: lock one far past what the file holds, so the holder's details stay readable.
+_LOCK_OFFSET = 1 << 30
 
 
 def lock(handle: IO[str]) -> None:
@@ -38,11 +41,13 @@ def lock(handle: IO[str]) -> None:
     if WINDOWS:
         import msvcrt
 
-        handle.seek(0)
+        handle.seek(_LOCK_OFFSET)
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
         except OSError as error:
             raise BlockingIOError(str(error)) from error
+        finally:
+            handle.seek(0)
         return
     import fcntl
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
+from tura_code import hostos
 from tura_code.toolbox.env import ToolboxError, check_requirements, requirement_name
 
 
@@ -86,7 +87,7 @@ def test_install_on_demand_run_and_hand_back_the_file(client, workspace, script,
     assert [f["path"] for f in listed] == ["report.txt"]
     served = client.get(f"/api/sessions/{session_id}/file", params={"path": "report.txt"})
     assert served.text == "READY!" and served.headers["content-security-policy"] == "sandbox"
-    assert (home / "toolbox" / "venv" / "bin" / "python").exists(), "the toolbox lives in root's data, per person"
+    assert hostos.venv_python(home / "toolbox" / "venv").exists(), "the toolbox lives in root's data, per person"
 
 
 def test_files_are_served_safely(client, workspace):

@@ -28,6 +28,13 @@ _READ_PROGRAMS = {
     "sha1sum", "sha256sum", "shasum", "cd", "less", "more", "strings", "comm", "join", "paste", "fold",
     "expand", "unexpand", "rev", "tac", "seq", "sleep", "printenv", "locale", "nproc", "free", "uptime",
     "ps", "lsof", "git-lfs",
+    # PowerShell (the runtime's shell on Windows): cmdlets and aliases that only read or format.
+    "get-childitem", "gci", "dir", "get-content", "gc", "select-string", "sls", "get-location", "gl",
+    "test-path", "get-item", "gi", "get-itemproperty", "gp", "measure-object", "measure", "resolve-path", "rvpa",
+    "get-command", "gcm", "get-date", "write-output", "write", "write-host", "select-object", "select",
+    "sort-object", "get-process", "gps", "format-table", "ft", "format-list", "fl", "out-string",
+    "get-filehash", "get-help", "compare-object", "get-member", "gm", "convertto-json", "convertfrom-json",
+    "split-path", "join-path", "where.exe", "findstr", "set-location", "sl", "chdir", "get-variable", "gv",
 }
 
 # Git subcommands that only read the repository.
@@ -75,7 +82,7 @@ _SUBSTITUTION = ("$(", "`", "<(", ">(")
 _SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")", ";;", "|&", "{", "}", "!"}
 _OUTPUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
 _INPUT_REDIRECTS = {"<", "<<", "<<<", "<&"}
-_HARMLESS_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "&1", "&2", "1", "2", "-"}
+_HARMLESS_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "&1", "&2", "1", "2", "-", "$null", "NUL", "nul"}
 
 
 @dataclass(frozen=True)
@@ -300,7 +307,9 @@ def _classify_words(words: list[str]) -> tuple[str, str, str, str]:
     if not words:
         return TIER_READ, "", "", ""
     raw = words[0]
-    program = raw if raw.startswith("./") else raw.rsplit("/", 1)[-1].lower()
+    program = raw if raw.startswith("./") else re.split(r"[\\/]", raw)[-1].lower()
+    if program.endswith(".exe") and program != "where.exe":
+        program = program[: -len(".exe")]  # Windows: `git.exe status` is `git status`
     args = words[1:]
     if program == "git":
         tier, sub, reason = _git(args)
