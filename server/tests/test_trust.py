@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
 from tura_code import trust
+
+# POSIX paths and commands; test_windows.py checks the same rules with Windows ones.
+posix_paths = pytest.mark.skipif(os.name == "nt", reason="POSIX paths; see test_windows.py")
 
 
 @pytest.mark.parametrize(
@@ -222,6 +227,7 @@ def _command(command: str) -> dict:
     return {"id": "r", "tool_call_id": "c", "sender": "Shell", "action": "run command", "description": command, "display": [{"type": "shell", "command": command}]}
 
 
+@posix_paths
 def test_reaching_outside_the_workspace_asks_unless_auto_approve_on_a_local_install(tmp_path):
     from tura_code.trust import TrustLedger, decide
 
@@ -244,6 +250,7 @@ def test_reaching_outside_the_workspace_asks_unless_auto_approve_on_a_local_inst
     assert decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), ask_owner=False, roam=True).response == "reject"
 
 
+@posix_paths
 def test_reading_or_editing_an_outside_file_asks_unless_auto_approve_on_a_local_install(tmp_path):
     from tura_code.trust import ACTION_EDIT_OUTSIDE, ACTION_READ_OUTSIDE, TrustLedger, decide
 
@@ -261,6 +268,7 @@ def test_reading_or_editing_an_outside_file_asks_unless_auto_approve_on_a_local_
     assert decide(system, mode="default", ledger=ledger, workspace=str(ws)).response == "approve"
 
 
+@posix_paths
 def test_commands_are_read_for_the_paths_they_reach(tmp_path):
     from tura_code.trust.boundary import outside_paths
 
@@ -274,6 +282,7 @@ def test_commands_are_read_for_the_paths_they_reach(tmp_path):
         assert reach(fine) == [], fine
 
 
+@posix_paths
 @requires_runtime
 def test_auto_approve_on_a_local_install_reaches_outside_without_asking(client, workspace, script, tmp_path):
     secret = tmp_path / "elsewhere" / "notes.txt"

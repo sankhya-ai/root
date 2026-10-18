@@ -39,6 +39,15 @@ def test_stopping_a_command_stops_what_it_started(tmp_path):
     assert beat.stat().st_size == size, "the grandchild outlived its tree"
 
 
+def test_powershell_reads_run_without_asking_and_writes_still_ask():
+    from tura_code.trust import classify_command
+
+    for read in ("Get-ChildItem -Recurse src | Select-String TODO", r"Get-Content .\README.md | Select-Object -First 20", "git.exe status", "Test-Path x > $null"):
+        assert classify_command(read).tier == "read", read
+    for write in ("Get-Content a | Set-Content b", "Get-ChildItem | Remove-Item", "Get-Content a | ForEach-Object { Remove-Item $_ }", "Write-Output hi > out.txt", "Get-Content $(Remove-Item x)", "Out-File x"):
+        assert classify_command(write).tier == "needs_trust", write
+
+
 @windows
 def test_host_commands_run_in_powershell(tmp_path):
     async def run() -> str:
@@ -152,3 +161,31 @@ def test_deleting_a_session_stops_its_background_processes_on_windows(client, wo
     while _alive(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not _alive(pid)
+
+
+def _command(command: str) -> dict:
+    return {"id": "r", "tool_call_id": "c", "sender": "Shell", "action": "run command", "description": command, "display": [{"type": "shell", "command": command}]}
+
+
+@windows
+def test_reaching_outside_the_workspace_asks_on_windows_unless_auto_approve(tmp_path):
+    from tura_code.trust import ACTION_EDIT_OUTSIDE, ACTION_READ_OUTSIDE, TrustLedger, decide
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ledger = TrustLedger(tmp_path / "trust.json")
+    outside = f"Get-Content {tmp_path}\\other\\notes.txt"
+    for mode, roam in (("default", True), ("accept_edits", True), ("yolo", False)):
+        decision = decide(_command(outside), mode=mode, ledger=ledger, workspace=str(ws), roam=roam)
+        assert decision.response is None, mode
+        assert decision.trust_info(ledger)["outside"].lower().endswith("other\\notes.txt"), mode
+    auto = decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), roam=True)
+    assert auto.response == "approve" and auto.promotable is False
+    assert decide(_command(r"Get-Content .\notes.txt"), mode="default", ledger=ledger, workspace=str(ws)).response == "approve"
+    assert decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), ask_owner=False, roam=True).response == "reject"
+
+    read = {"id": "r", "sender": "ReadFile", "action": ACTION_READ_OUTSIDE, "description": f"Read `{tmp_path}\\secret.txt`"}
+    edit = {"id": "e", "sender": "WriteFile", "action": ACTION_EDIT_OUTSIDE, "description": f"Write file `{tmp_path}\\x.py`"}
+    assert decide(read, mode="yolo", ledger=ledger, workspace=str(ws)).response is None
+    assert decide(edit, mode="default", ledger=ledger, workspace=str(ws), roam=True).response is None
+    assert decide(edit, mode="yolo", ledger=ledger, workspace=str(ws), roam=True).response == "approve"

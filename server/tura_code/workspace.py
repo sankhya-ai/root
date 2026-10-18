@@ -175,16 +175,20 @@ def folder_picker() -> bool:
     return sys.platform == "darwin" and shutil.which(PICK_FOLDER[0]) is not None
 
 
+def picker_command(begin: Path) -> tuple[list[str], dict[str, str] | None]:
+    """The native dialog's argv and environment: osascript on a Mac, WinForms through PowerShell on Windows."""
+    if hostos.WINDOWS:
+        argv = [hostos.powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", PICK_FOLDER_WINDOWS]
+        return argv, {**os.environ, "ROOT_PICK_START": str(begin)}
+    return [*PICK_FOLDER, str(begin)], None
+
+
 async def pick_folder(start: str | None = None) -> str | None:
     """The folder the owner chooses in the native dialog, or None when they cancel."""
     begin = Path(start).expanduser() if start else Path.home()
     if not begin.is_dir():
         begin = Path.home()
-    if hostos.WINDOWS:
-        argv = [hostos.powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", PICK_FOLDER_WINDOWS]
-        env = {**os.environ, "ROOT_PICK_START": str(begin)}
-    else:
-        argv, env = [*PICK_FOLDER, str(begin)], None
+    argv, env = picker_command(begin)
     process = await asyncio.create_subprocess_exec(*argv, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
         output, _ = await asyncio.wait_for(process.communicate(), PICK_TIMEOUT)

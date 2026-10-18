@@ -33,7 +33,7 @@ def claim(home: Path, url: str) -> IO[str]:
         handle.seek(0)
         try:
             other = json.loads(handle.read() or "{}")
-        except ValueError:
+        except (OSError, ValueError):
             other = {}
         handle.close()
         where = f" at {other['url']}" if other.get("url") else ""
