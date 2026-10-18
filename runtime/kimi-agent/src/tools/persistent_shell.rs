@@ -252,10 +252,12 @@ fn kill_tree(mut child: Child) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn bash(dir: &std::path::Path) -> PersistentShell {
         PersistentShell::new("bash", Dialect::Bash, dir)
     }
 
+    #[cfg(unix)] // Windows' bash.exe is the WSL launcher; the runtime uses PowerShell there
     #[tokio::test]
     async fn state_carries_over_and_exit_codes_come_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -272,6 +274,7 @@ mod tests {
         assert_eq!(multi.output, "line 1 'quoted' \"too\"\nline 2 'quoted' \"too\"\n");
     }
 
+    #[cfg(unix)] // Windows' bash.exe is the WSL launcher; the runtime uses PowerShell there
     #[tokio::test]
     async fn a_timeout_or_an_exit_starts_the_next_command_in_a_fresh_shell() {
         let dir = tempfile::tempdir().unwrap();
@@ -287,6 +290,7 @@ mod tests {
         assert_eq!((fresh.output.trim(), fresh.exit_code), ("again", Some(0)));
     }
 
+    #[cfg(unix)] // Windows' bash.exe is the WSL launcher; the runtime uses PowerShell there
     #[tokio::test]
     async fn a_cancelled_command_does_not_keep_running() {
         let dir = tempfile::tempdir().unwrap();
