@@ -6,18 +6,19 @@ Note that you are running on Windows, so make sure to use Windows commands, path
 The stdout and stderr streams are combined and returned as a single string. Extremely long output may be truncated. When a command fails, the exit code is provided in a system tag.
 
 **Guidelines for safety and security:**
-- Every tool call starts a fresh ${SHELL} session. Environment variables, `cd` changes, and command history do not persist between calls.
+- Your commands run in one ${SHELL} session that stays open between calls: variables, `$env:` changes, functions and imported modules persist. Every call starts in the working directory again, so `cd` does not carry over. A timeout or `exit` resets the session.
 - Do not launch interactive programs or anything that is expected to block indefinitely; ensure each command finishes promptly. Provide a `timeout` argument for potentially long runs.
 - Avoid using `..` to leave the working directory, and never touch files outside that directory unless explicitly instructed.
 - Never attempt commands that require elevated (Administrator) privileges unless explicitly authorized.
 
 **Guidelines for efficiency:**
 - Chain related commands with `;` and use `if ($?)` or `if (-not $?)` to conditionally execute commands based on the success or failure of previous ones.
-- Redirect or pipe output with `>`, `>>`, `|`, and leverage `for /f`, `if`, and `set` to build richer one-liners instead of multiple tool calls.
-- Reuse built-in utilities (e.g., `findstr`, `where`) to filter, transform, or locate data in a single invocation.
+- Redirect or pipe output with `>`, `>>`, `|`, and use `ForEach-Object`, `Where-Object` and `Select-String` to build richer one-liners instead of multiple tool calls.
+- Reuse built-in utilities (e.g., `findstr`, `where.exe`) to filter, transform, or locate data in a single invocation.
+- Programs that wait for keyboard input block until the timeout; pass their input as arguments or pipe it in.
 
 **Commands available:**
-- Shell environment: `cd`, `dir`, `set`, `setlocal`, `echo`, `call`, `where`
+- Shell environment: `cd`, `dir`, `$env:NAME`, `echo`, `where.exe`
 - File operations: `type`, `copy`, `move`, `del`, `erase`, `mkdir`, `rmdir`, `attrib`, `mklink`
 - Text/search: `find`, `findstr`, `more`, `sort`, `Get-Content`
 - System info: `ver`, `systeminfo`, `tasklist`, `wmic`, `hostname`

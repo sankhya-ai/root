@@ -110,13 +110,24 @@ Keep local changes small and listed here so upstream updates stay mergeable.
     (connection, timeout, 408/429/5xx/529) backs off 2s doubling to 30s, up to
     `max_retries_per_step` attempts (root sets 10); an empty or malformed reply
     keeps three quick attempts. Each retry sends a `StatusUpdate` with `retry`.
+26. **One PowerShell per agent on Windows, and no console windows**
+    (`tools/persistent_shell.rs`, `tools/shell.rs`, `kaos::no_window`). As in
+    DeepSeek Harness's persistent `pwsh` tool, `Shell` keeps one hidden
+    PowerShell open and sends each command into it (an id and the command in
+    base64, read back up to an end marker with the exit code), so variables,
+    functions and modules persist; every call is anchored to the work dir
+    again. A timeout, a cancelled call or `exit` kills its process tree and
+    the next call starts fresh. bash keeps one process per call. Every child
+    the runtime starts on Windows (shells, ripgrep, MCP servers) gets
+    `CREATE_NO_WINDOW`: the host runs it without a console, so each used to
+    open a window. The tool description says the session persists.
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were
 updated for 3 and 9; `tests/extra_skills_dirs.rs` for 5; unit tests in
 `args_repair.rs`, `tolerant.rs`, `repeat_guard.rs` and `walk.rs`, and
 `tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9; unit tests in
-`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24; a unit test in `kimisoul.rs` for 25.
+`verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24; a unit test in `kimisoul.rs` for 25; unit tests in `persistent_shell.rs` (the bash twin everywhere, PowerShell on Windows) and the host's `test_windows.py` for 26.
 
 ## Updating from Tura
 

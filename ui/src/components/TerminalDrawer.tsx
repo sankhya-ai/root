@@ -4,6 +4,7 @@
 
 import { X } from "lucide-react";
 import { lazy, Suspense, useRef, useState, type PointerEvent } from "react";
+import { shortcut } from "../lib/keys.ts";
 
 // xterm.js is loaded the first time the terminal opens, not with the page.
 const TerminalPanel = lazy(() => import("./TerminalPanel.tsx"));
@@ -63,10 +64,10 @@ export function TerminalDrawer({ sessionId, open, onClose }: { sessionId: string
       <div className="terminalHead">
         <span className="small">Terminal</span>
         <span className="faint small hideNarrow">
-          <span className="kbd">⌘J</span> to hide
+          <span className="kbd">{shortcut("J")}</span> to hide
         </span>
         <span className="spacer" />
-        <button className="iconButton" onClick={onClose} title="Hide the terminal (⌘J) — it keeps running" aria-label="Hide terminal">
+        <button className="iconButton" onClick={onClose} title={`Hide the terminal (${shortcut("J")}) — it keeps running`} aria-label="Hide terminal">
           <X size={14} />
         </button>
       </div>

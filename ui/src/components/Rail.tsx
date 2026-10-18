@@ -6,6 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import type { Session } from "../lib/types.ts";
 import { Brand, TuraMark } from "./TuraBrand.tsx";
+import { shortcut } from "../lib/keys.ts";
 
 export type View = "home" | "session" | "schedules";
 
@@ -113,7 +114,7 @@ export function Rail({
       <div className="railHead">
         <Brand />
         <span className="railHeadActions">
-          <button className="iconButton" onClick={onSearch} title="Search (⌘K)" aria-label="Search">
+          <button className="iconButton" onClick={onSearch} title={`Search (${shortcut("K")})`} aria-label="Search">
             <Search size={17} />
           </button>
           <button className="iconButton" onClick={onToggleCollapsed} title="Collapse sidebar">

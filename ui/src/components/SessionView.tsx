@@ -9,6 +9,7 @@ import { Inspector, type InspectorTab } from "./inspector/Inspector.tsx";
 import { TerminalDrawer } from "./TerminalDrawer.tsx";
 import { MODE_ORDER, ModeMenu } from "./ModeMenu.tsx";
 import { Transcript } from "./Transcript.tsx";
+import { shortcut } from "../lib/keys.ts";
 
 const DEFAULT_COMMANDS: SlashCommand[] = [
   { name: "verify", description: "Run automated tests & verification suite", aliases: ["test"] },
@@ -265,7 +266,7 @@ export function SessionView({
               {Math.round(context * 100)}%
             </span>
           ) : null}
-          <button className={`iconButton${terminalOpen ? " on" : ""}`} onClick={() => setTerminalOpen((open) => !open)} title="Terminal (⌘J)" aria-label="Terminal">
+          <button className={`iconButton${terminalOpen ? " on" : ""}`} onClick={() => setTerminalOpen((open) => !open)} title={`Terminal (${shortcut("J")})`} aria-label="Terminal">
             <SquareTerminal size={17} />
           </button>
           <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files and plan">

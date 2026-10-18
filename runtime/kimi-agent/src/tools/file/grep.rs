@@ -165,6 +165,7 @@ impl CallableTool2 for Grep {
         };
 
         let mut command = Command::new(&rg_path);
+        kaos::no_window(&mut command);
         command.current_dir(self.work_dir.as_path());
         if params.ignore_case {
             command.arg("-i");
