@@ -18,6 +18,10 @@ def _read_until(ws, marker: bytes, limit: int = 400) -> bytes:
     raise AssertionError(f"{marker!r} never came; got {seen[-400:]!r}")
 
 
+posix = pytest.mark.skipif(os.name == "nt", reason="a POSIX shell; test_windows.py drives PowerShell's")
+
+
+@posix
 def test_the_terminal_is_a_shell_in_the_session_folder_without_roots_keys(client, workspace, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-must-not-leak")
     session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
@@ -29,6 +33,7 @@ def test_the_terminal_is_a_shell_in_the_session_folder_without_roots_keys(client
     assert b"key:none" in out and b"sk-or-must-not-leak" not in out
 
 
+@posix
 def test_closing_the_tab_ends_what_the_shell_started(client, workspace, tmp_path):
     marker = tmp_path / "pid"
     session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]

@@ -127,4 +127,28 @@ def test_a_turn_runs_powershell_and_a_background_process_on_windows(client, work
     assert "id: p1" in results["s"]["output"] and "ready" in results["t"]["output"]
     assert "status: killed" in results["k"]["output"]
     listed = client.get(f"/api/sessions/{session_id}/processes").json()["processes"]
-    assert listed[0]["status"] == "killed"
+    assert listed[0]["status"] == "killed" and not _alive(listed[0]["pid"])
+
+
+def _alive(pid: int) -> bool:
+    """Never `os.kill(pid, 0)` on Windows: it sends Ctrl+C to the target's console group."""
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, check=False).stdout
+    return str(pid) in out
+
+
+@windows
+@requires_runtime
+def test_deleting_a_session_stops_its_background_processes_on_windows(client, workspace, script):
+    script([tool_call("s", "process", {"action": "start", "command": "Start-Sleep -Seconds 120"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    client.patch(f"/api/sessions/{session_id}", json={"permission_mode": "yolo"})
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "start a sleeper", timeout=120)
+    pid = client.get(f"/api/sessions/{session_id}/processes").json()["processes"][0]["pid"]
+    assert _alive(pid)
+    assert client.delete(f"/api/sessions/{session_id}").json() == {"ok": True}
+    deadline = time.monotonic() + 10
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(pid)
