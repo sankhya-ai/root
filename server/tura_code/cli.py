@@ -12,6 +12,9 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import hostos
+
+    hostos.configure_console()
     parser = argparse.ArgumentParser(prog="tura-code", description="root — a coding agent in your browser.")
     sub = parser.add_subparsers(dest="command")
     serve = sub.add_parser("serve", help="Run the server (default).")

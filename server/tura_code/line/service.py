@@ -172,12 +172,12 @@ class LineService:
         runtime = tenant.sessions.create(self.config.workspace, title=f"Line · {sender}", kind="line", mode="plan")
         conversations[sender] = runtime.record.id
         self._conversations_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conversations_path.write_text(json.dumps(conversations, indent=1))
+        self._conversations_path.write_text(json.dumps(conversations, indent=1), "utf-8")
         return runtime
 
     def _conversations(self) -> dict[str, str]:
         try:
-            return dict(json.loads(self._conversations_path.read_text()))
+            return dict(json.loads(self._conversations_path.read_text("utf-8")))
         except (OSError, ValueError, TypeError):
             return {}
 

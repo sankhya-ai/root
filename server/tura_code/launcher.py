@@ -28,6 +28,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import hostos
 from .memory import CHECKPOINT_TOOL as MEMORY_CHECKPOINT_TOOL
 from .memory import MEMORY_ROLE
 from .sandbox import Mounts, Sandbox
@@ -91,10 +92,10 @@ def find_runtime_binary() -> Path:
     explicit = os.environ.get(RUNTIME_ENV, "").strip()
     candidates = [Path(explicit).expanduser()] if explicit else []
     if resources() is not None:
-        candidates.append(resources() / "bin" / "kimi-agent")
+        candidates.append(resources() / "bin" / hostos.executable("kimi-agent"))
     candidates += [
-        REPO_ROOT / "runtime" / "target" / "release" / "kimi-agent",
-        REPO_ROOT / "runtime" / "target" / "debug" / "kimi-agent",
+        REPO_ROOT / "runtime" / "target" / "release" / hostos.executable("kimi-agent"),
+        REPO_ROOT / "runtime" / "target" / "debug" / hostos.executable("kimi-agent"),
     ]
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -408,8 +409,8 @@ def child_environment(spec: LaunchSpec, share_dir: Path, binary: Path | None = N
         env["ROOT_SCRATCH"] = str(scratch)
     if spec.toolbox is not None:
         # Last on PATH: the project's and the owner's own tools always win.
-        env["ROOT_PYTHON"] = str(spec.toolbox / "venv" / "bin" / "python")
-        env["PATH"] = os.pathsep.join(filter(None, [env.get("PATH", ""), str(spec.toolbox / "venv" / "bin")]))
+        env["ROOT_PYTHON"] = str(hostos.venv_python(spec.toolbox / "venv"))
+        env["PATH"] = os.pathsep.join(filter(None, [env.get("PATH", ""), str(hostos.venv_bin(spec.toolbox / "venv"))]))
     if binary is not None:
         env = spec.sandbox.environment(env, spec.mounts(binary))
     return env

@@ -7,9 +7,12 @@ root's credentials stay out of it. Local installs only — hosted mode never
 runs anything unsandboxed, so there the socket closes with 4403.
 
 The pseudo-terminal handling is adapted from Hermes Agent's ``pty_bridge.py``
-(MIT, Copyright (c) 2025 Nous Research): ``ptyprocess`` to spawn, a
-non-blocking master, clamped resizes, and closing the shell's whole process
-group so nothing it started outlives the tab.
+and ``win_pty_bridge.py`` (MIT, Copyright (c) 2025 Nous Research). On macOS
+and Linux: ``ptyprocess`` to spawn, a non-blocking master, clamped resizes,
+and closing the shell's whole process group so nothing it started outlives
+the tab. On Windows: ConPTY through ``pywinpty`` running PowerShell; ConPTY
+has no descriptor to wait on, so reads poll on a worker thread, and closing
+stops the shell's process tree.
 
 Protocol: the page sends JSON text frames — ``{"type": "input", "data": …}``
 and ``{"type": "resize", "cols": …, "rows": …}`` — and receives the
@@ -20,19 +23,15 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
 import json
 import logging
 import os
-import pwd
-import signal
 import struct
-import termios
 import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from . import launcher
+from . import hostos, launcher
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +45,8 @@ def _clamp(value: object, maximum: int) -> int:
         return 1
 
 
-def login_shell() -> str:
-    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
-    return shell if shell and os.path.exists(shell) else "/bin/sh"
-
-
 class Pty:
-    """One shell behind a pseudo-terminal. Owned by the socket that opened it."""
+    """One shell behind a pseudo-terminal (macOS, Linux). Owned by the socket that opened it."""
 
     def __init__(self, argv: list[str], *, cwd: str, env: dict[str, str], cols: int = 80, rows: int = 24) -> None:
         import ptyprocess
@@ -90,6 +84,9 @@ class Pty:
     def resize(self, cols: object, rows: object) -> None:
         if self._closed:
             return
+        import fcntl
+        import termios
+
         size = struct.pack("HHHH", _clamp(rows, _MAX_ROWS), _clamp(cols, _MAX_COLS), 0, 0)
         try:
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, size)
@@ -98,6 +95,8 @@ class Pty:
 
     def close(self) -> None:
         """End the shell and everything it started (SIGHUP → SIGTERM → SIGKILL). Blocks briefly."""
+        import signal
+
         if self._closed:
             return
         self._closed = True
@@ -115,6 +114,67 @@ class Pty:
             self._proc.close(force=True)
         except Exception:  # noqa: BLE001 - closing must not fail
             pass
+
+
+class WinPty:
+    """One PowerShell behind ConPTY (Windows): the same surface as ``Pty``, without a descriptor."""
+
+    fd = None
+
+    def __init__(self, argv: list[str], *, cwd: str, env: dict[str, str], cols: int = 80, rows: int = 24) -> None:
+        from winpty import PtyProcess  # pywinpty
+
+        self._proc = PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(rows, cols))
+        self._closed = False
+
+    def read(self) -> bytes | None:
+        """Blocks up to a moment; ``b""`` for nothing yet, ``None`` once the shell is gone."""
+        if self._closed:
+            return None
+        try:
+            data = self._proc.read(65536)
+        except EOFError:
+            return None
+        except Exception:  # noqa: BLE001 - a closed ConPTY raises various errors
+            return None if self._closed or not self._proc.isalive() else b""
+        if not data:
+            if not self._proc.isalive():
+                return None
+            time.sleep(0.02)  # no descriptor to wait on: don't spin
+            return b""
+        # pywinpty decodes for us, so a multibyte character can split across reads; xterm.js copes.
+        return data if isinstance(data, bytes) else data.encode("utf-8", errors="replace")
+
+    async def write(self, data: bytes, timeout: float = 10.0) -> bool:
+        if self._closed:
+            return False
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._proc.write, data.decode("utf-8", errors="replace")), timeout)
+        except Exception:  # noqa: BLE001 - a wedged ConPTY: the tab is over
+            await asyncio.to_thread(self.close)
+            return False
+        return True
+
+    def resize(self, cols: object, rows: object) -> None:
+        if not self._closed:
+            try:
+                self._proc.setwinsize(_clamp(rows, _MAX_ROWS), _clamp(cols, _MAX_COLS))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        hostos.stop_tree(self._proc.pid)
+        try:
+            self._proc.terminate(force=True)
+        except Exception:  # noqa: BLE001 - closing must not fail
+            pass
+
+
+def open_shell(cwd: str, env: dict[str, str]) -> "Pty | WinPty":
+    return (WinPty if hostos.WINDOWS else Pty)(hostos.login_shell(), cwd=cwd, env=env)
 
 
 def router(app_state) -> APIRouter:
@@ -138,7 +198,7 @@ def router(app_state) -> APIRouter:
         await websocket.accept()
         env = {**launcher.scrubbed_environment(), "TERM": "xterm-256color", "COLORTERM": "truecolor"}
         try:
-            pty = Pty([login_shell(), "-l"], cwd=runtime.record.workspace, env=env)
+            pty = open_shell(runtime.record.workspace, env)
         except Exception as error:  # noqa: BLE001 - say why on the page, not just in a log
             await websocket.send_bytes(f"root could not start a shell: {error}\r\n".encode())
             await websocket.close()
@@ -148,7 +208,7 @@ def router(app_state) -> APIRouter:
     return api
 
 
-async def serve(websocket: WebSocket, pty: Pty) -> None:
+async def serve(websocket: WebSocket, pty: "Pty | WinPty") -> None:
     loop = asyncio.get_running_loop()
     output: asyncio.Queue[bytes | None] = asyncio.Queue()
 
@@ -162,12 +222,23 @@ async def serve(websocket: WebSocket, pty: Pty) -> None:
                 loop.remove_reader(pty.fd)
                 return
 
+    async def poll() -> None:
+        """ConPTY: read on a worker thread until the shell is gone."""
+        while (data := await asyncio.to_thread(pty.read)) is not None:
+            if data:
+                output.put_nowait(data)
+        output.put_nowait(None)
+
     async def pump() -> None:
         while (data := await output.get()) is not None:
             await websocket.send_bytes(data)
         await websocket.close()  # the shell exited (`exit`, ^D)
 
-    loop.add_reader(pty.fd, readable)
+    poller = None
+    if pty.fd is None:
+        poller = asyncio.create_task(poll())
+    else:
+        loop.add_reader(pty.fd, readable)
     sender = asyncio.create_task(pump())
     try:
         while True:
@@ -180,8 +251,11 @@ async def serve(websocket: WebSocket, pty: Pty) -> None:
         pass
     finally:
         sender.cancel()
-        try:
-            loop.remove_reader(pty.fd)
-        except (OSError, ValueError):
-            pass
+        if pty.fd is not None:
+            try:
+                loop.remove_reader(pty.fd)
+            except (OSError, ValueError):
+                pass
         await asyncio.to_thread(pty.close)
+        if poller is not None:
+            poller.cancel()

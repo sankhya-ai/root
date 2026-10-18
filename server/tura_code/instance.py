@@ -9,11 +9,12 @@ running root is.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from pathlib import Path
 from typing import IO
+
+from . import hostos
 
 LOCK = "server.lock"
 
@@ -27,7 +28,7 @@ def claim(home: Path, url: str) -> IO[str]:
     home.mkdir(parents=True, exist_ok=True)
     handle = open(home / LOCK, "a+", encoding="utf-8")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        hostos.lock(handle)
     except BlockingIOError:
         handle.seek(0)
         try:

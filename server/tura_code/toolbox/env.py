@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shutil
-import signal
 import sys
 from pathlib import Path
 from typing import Callable
+
+from .. import hostos
 
 INSTALL_TIMEOUT = 600.0
 _REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?(\s*(==|>=|<=|~=|!=|>|<)\s*[A-Za-z0-9.*+!_-]+\s*,?)*$")
@@ -55,16 +55,13 @@ def base_python() -> str:
 
 
 def _kill_group(pid: int) -> None:
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    hostos.stop_tree(pid)
 
 
 async def run(argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float) -> tuple[int, str, str]:
     """Run, capturing output; on timeout the whole process group is killed and the code is -9."""
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=str(cwd), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True
+        *argv, cwd=str(cwd), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **hostos.spawn_options()
     )
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout)
@@ -89,11 +86,11 @@ class Toolbox:
 
     @property
     def bin(self) -> Path:
-        return self.venv / "bin"
+        return hostos.venv_bin(self.venv)
 
     @property
     def python(self) -> Path:
-        return self.bin / "python"
+        return hostos.venv_python(self.venv)
 
     @property
     def ready(self) -> bool:
