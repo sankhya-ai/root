@@ -7,7 +7,10 @@ import time
 
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
-pytestmark = requires_runtime
+import pytest
+
+# POSIX commands and liveness checks; test_windows.py runs the Windows equivalents.
+pytestmark = [requires_runtime, pytest.mark.skipif(os.name == "nt", reason="POSIX commands; see test_windows.py")]
 
 INTERACTIVE = "echo ready; read line; echo got:$line; sleep 30"
 

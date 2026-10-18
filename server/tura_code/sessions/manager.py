@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -77,7 +79,7 @@ class SessionManager:
         runtime = self.get(session_id)
         await runtime.close()
         self.runtimes.pop(session_id, None)
-        shutil.rmtree(runtime.dir, ignore_errors=True)
+        await asyncio.to_thread(_remove_tree, runtime.dir)
 
     async def close(self) -> None:
         for runtime in list(self.runtimes.values()):
@@ -85,3 +87,14 @@ class SessionManager:
                 await runtime.close()
             except Exception:  # noqa: BLE001
                 logger.exception("closing session %s", runtime.record.id)
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a session's folder. Windows frees a stopped process's files a moment
+    after it exits, and refuses to delete an open file, so try for a few seconds."""
+    for _ in range(50):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.1)
+    logger.warning("could not fully delete %s", path)

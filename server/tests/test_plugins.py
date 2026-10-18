@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
@@ -50,7 +51,8 @@ def test_mcp_servers_are_added_switched_and_removed(client, home):
     assert "lin_secret" not in json.dumps(client.get("/api/plugins").json()), "env values never go back to the UI"
     stored = json.loads((home / "mcp.json").read_text())
     assert stored["mcpServers"]["linear"]["env"] == {"LINEAR_TOKEN": "lin_secret"}
-    assert (home / "mcp.json").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # Windows has no mode bits; the profile folder's ACL keeps it private
+        assert (home / "mcp.json").stat().st_mode & 0o777 == 0o600
 
     # Switching it off keeps its token; the runtime's file no longer lists it.
     client.put("/api/plugins/mcp/linear", json={"command": "npx", "args": ["-y", "linear-mcp"], "env": {"LINEAR_TOKEN": ""}, "enabled": False})
