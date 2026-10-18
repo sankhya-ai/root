@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import hostos
+
 IGNORED_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build",
     ".next", ".turbo", ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea",
@@ -28,6 +30,17 @@ PICK_FOLDER = [
     "-e", 'POSIX path of (choose folder with prompt "Choose a workspace folder" default location (POSIX file (item 1 of argv)))',
     "-e", "end run",
 ]
+#: The same on Windows: the WinForms folder dialog, on top of the browser. The
+#: start folder comes in through the environment, never as code.
+PICK_FOLDER_WINDOWS = (
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+    "Add-Type -AssemblyName System.Windows.Forms; "
+    "$owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; "
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+    "$dialog.Description = 'Choose a workspace folder'; "
+    "$dialog.SelectedPath = $env:ROOT_PICK_START; "
+    "if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath } else { exit 1 }"
+)
 PICK_TIMEOUT = 600
 
 
@@ -72,7 +85,7 @@ def list_files(workspace: Path) -> dict:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS and not d.startswith("."))
         for name in sorted(filenames):
-            files.append(str((Path(dirpath) / name).relative_to(root)))
+            files.append((Path(dirpath) / name).relative_to(root).as_posix())
             if len(files) >= MAX_FILES:
                 return {"files": files, "truncated": True, "git": False}
     return {"files": files, "truncated": False, "git": False}
@@ -157,6 +170,8 @@ def list_dirs(path: str | None, root: Path | None = None) -> dict:
 
 def folder_picker() -> bool:
     """Whether this machine can show the native folder dialog."""
+    if hostos.WINDOWS:
+        return True
     return sys.platform == "darwin" and shutil.which(PICK_FOLDER[0]) is not None
 
 
@@ -165,7 +180,12 @@ async def pick_folder(start: str | None = None) -> str | None:
     begin = Path(start).expanduser() if start else Path.home()
     if not begin.is_dir():
         begin = Path.home()
-    process = await asyncio.create_subprocess_exec(*PICK_FOLDER, str(begin), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    if hostos.WINDOWS:
+        argv = [hostos.powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", PICK_FOLDER_WINDOWS]
+        env = {**os.environ, "ROOT_PICK_START": str(begin)}
+    else:
+        argv, env = [*PICK_FOLDER, str(begin)], None
+    process = await asyncio.create_subprocess_exec(*argv, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
         output, _ = await asyncio.wait_for(process.communicate(), PICK_TIMEOUT)
     except asyncio.TimeoutError:
@@ -176,4 +196,6 @@ async def pick_folder(start: str | None = None) -> str | None:
     path = output.decode(errors="replace").strip()
     if process.returncode != 0 or not path:
         return None
+    if hostos.WINDOWS:
+        return path if path.endswith(":\\") else path.rstrip("\\")
     return path.rstrip("/") or "/"

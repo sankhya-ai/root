@@ -15,6 +15,11 @@ ordinary case of an agent wandering off, not a determined one; the sandbox is
 what stops that.
 
 Toolchain and system locations every build reads are allowed without asking.
+
+On Windows the runtime's shell is PowerShell, so paths are read the Windows way
+too: drive paths (``C:\\x``, ``C:/x``), shares (``\\\\server\\share``), ``..\\``,
+``~\\``, ``$env:USERPROFILE`` and ``%USERPROFILE%``, compared without case;
+``Set-Location``/``sl``/``pushd`` move the working folder as ``cd`` does.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+
+from .. import hostos
 
 #: Read-only system and toolchain locations any build may touch.
 ALLOWED_PREFIXES = (
@@ -43,35 +50,82 @@ ALLOWED_EXACT = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/
 #: Dependency caches and toolchains under the home directory.
 ALLOWED_HOME = (".cargo/registry", ".cargo/git", ".rustup", ".npm", ".nvm", ".pyenv", ".cache/pip", ".cache/uv", ".m2", ".gradle", "go/pkg", ".local/share/uv", ".bun")
 
+if hostos.WINDOWS:
+    _system = os.environ.get("SystemRoot", r"C:\Windows")
+    ALLOWED_PREFIXES = tuple(
+        os.path.join(folder, "")
+        for folder in (
+            _system,
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser(r"~\AppData\Local")), "Programs"),
+        )
+    )
+    ALLOWED_EXACT = {"NUL", "nul", "$null"}
+    ALLOWED_HOME = tuple(rel.replace("/", "\\") for rel in ALLOWED_HOME) + (
+        r"AppData\Local\pip\Cache",
+        r"AppData\Local\uv",
+        r"AppData\Local\npm-cache",
+        r"AppData\Roaming\npm",
+        r"scoop\apps",
+    )
+
 GRANT_PREFIX = "outside workspace: "
 
 _ABSOLUTE = re.compile(r"(?<![\w.:/$~-])(?:~|\$HOME|\$\{HOME\})?/[\w.@%+=,:-][\w.@%+=,:/-]*|(?<![\w.:/$-])~(?=/|\s|$)")
 _PARENT = re.compile(r"(?<![\w./-])\.\.(?:/[\w.@%+=,:-]*)*")
 _SPLIT = re.compile(r"&&|\|\||[;|\n]")
+_CD = {"cd"}
+if hostos.WINDOWS:
+    _HOME = r"(?:~|\$HOME|\$env:USERPROFILE|\$\{env:USERPROFILE\}|%USERPROFILE%)"
+    _ABSOLUTE = re.compile(
+        r"(?<![\w$%~-])(?:[A-Za-z]:[\\/]|\\\\|" + _HOME + r"(?=[\\/]|\s|$|[\"'])[\\/]?)[^\s'\"`;|&<>(){}]*",
+        re.IGNORECASE,
+    )
+    _PARENT = re.compile(r"(?<![\w.\\/-])\.\.(?:[\\/][^\s'\"`;|&<>(){}\\/]*)*")
+    _CD = {"cd", "chdir", "set-location", "sl", "pushd"}
 
 
 def _real(path: str) -> str:
     return os.path.realpath(os.path.expanduser(path))
 
 
+def _key(path: str) -> str:
+    return os.path.normcase(path)
+
+
 def inside(path: str, root: str) -> bool:
-    real, base = _real(path), _real(root)
-    return real == base or real.startswith(base.rstrip("/") + "/")
+    real, base = _key(_real(path)), _key(_real(root))
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
 
 def allowed(path: str) -> bool:
     """A system or toolchain location, fine to read without asking."""
-    real = _real(path)
-    if real in ALLOWED_EXACT or path in ALLOWED_EXACT:
+    if path in ALLOWED_EXACT:
         return True
-    if any(real.startswith(p) or path.startswith(p) for p in ALLOWED_PREFIXES):
+    real = _key(_real(path))
+    if real in {_key(p) for p in ALLOWED_EXACT}:
+        return True
+    if any(real.startswith(_key(p)) or _key(path).startswith(_key(p)) for p in ALLOWED_PREFIXES):
         return True
     home = os.path.realpath(os.path.expanduser("~"))
-    return any(real.startswith(os.path.join(home, rel) + "/") or real == os.path.join(home, rel) for rel in ALLOWED_HOME)
+    return any(real.startswith(_key(os.path.join(home, rel)) + os.sep) or real == _key(os.path.join(home, rel)) for rel in ALLOWED_HOME)
 
 
 def _expand(word: str) -> str:
+    word = word.strip("'\"")
+    if hostos.WINDOWS:
+        word = re.sub(r"\$\{?env:USERPROFILE\}?|%USERPROFILE%", "~", word, flags=re.IGNORECASE)
     return os.path.expanduser(word.replace("${HOME}", "~").replace("$HOME", "~"))
+
+
+def _argv(words: str) -> list[str]:
+    """A command's words. Windows paths keep their backslashes (POSIX quoting would eat them)."""
+    try:
+        argv = shlex.split(words, posix=not hostos.WINDOWS)
+    except ValueError:
+        argv = words.split()
+    return [word.strip("'\"") for word in argv] if hostos.WINDOWS else argv
 
 
 def outside_paths(command: str, workspace: str) -> list[str]:
@@ -86,15 +140,13 @@ def outside_paths(command: str, workspace: str) -> list[str]:
         words = segment.strip()
         if not words:
             continue
-        try:
-            argv = shlex.split(words)
-        except ValueError:
-            argv = words.split()
+        argv = _argv(words)
         candidates = [_expand(m) for m in _ABSOLUTE.findall(words)]
         candidates += [os.path.join(cwd, m) for m in _PARENT.findall(words)]
-        candidates += ["/" for word in argv[1:] if word == "/"]
-        if argv and argv[0] == "cd":
-            target = _expand(argv[1]) if len(argv) > 1 else os.path.expanduser("~")
+        candidates += [os.sep for word in argv[1:] if word in ("/", "\\")]
+        if argv and argv[0].lower() in _CD:
+            rest = [word for word in argv[1:] if not word.startswith("-")]
+            target = _expand(rest[0]) if rest else os.path.expanduser("~")
             cwd = _real(os.path.join(cwd, target))
             candidates.append(cwd)
         for candidate in candidates:

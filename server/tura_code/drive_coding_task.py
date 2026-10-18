@@ -40,8 +40,8 @@ def run_benchmark():
     sandbox = Path(tempfile.mkdtemp(prefix="root_bench_"))
     print(f"\n[1/5] Initializing sandbox workspace at:\n      {sandbox}")
 
-    (sandbox / "pyproject.toml").write_text("[project]\nname = 'token-limiter'\nversion = '0.1.0'\n")
-    (sandbox / "AGENTS.md").write_text("# Instructions\nRun verification using: pytest tests/ -v\n")
+    (sandbox / "pyproject.toml").write_text("[project]\nname = 'token-limiter'\nversion = '0.1.0'\n", "utf-8")
+    (sandbox / "AGENTS.md").write_text("# Instructions\nRun verification using: pytest tests/ -v\n", "utf-8")
 
     # A rate limiter with a bug: allows requests even when tokens are exhausted!
     buggy_code = """class TokenBucket:
@@ -58,7 +58,7 @@ def run_benchmark():
             return True
         return False
 """
-    (sandbox / "limiter.py").write_text(buggy_code)
+    (sandbox / "limiter.py").write_text(buggy_code, "utf-8")
 
     tests_dir = sandbox / "tests"
     tests_dir.mkdir()
@@ -75,7 +75,7 @@ def test_reject_when_exceeded():
     # Now empty: must reject!
     assert b.consume(1) is False
 """
-    (sandbox / "tests" / "test_limiter.py").write_text(test_code)
+    (sandbox / "tests" / "test_limiter.py").write_text(test_code, "utf-8")
 
     # 2. Verify facts detection
     print("\n[2/5] Inspecting workspace context & verification engine...")
@@ -111,7 +111,7 @@ def test_reject_when_exceeded():
     ]
 
     script_path = sandbox / "driver_script.json"
-    script_path.write_text(json.dumps(script_steps))
+    script_path.write_text(json.dumps(script_steps), "utf-8")
     os.environ["TURA_CODE_SCRIPTED_ECHO"] = str(script_path)
     os.environ["TURA_CODE_VERIFY_GATE"] = "1"
 
@@ -165,7 +165,7 @@ def test_reject_when_exceeded():
 
         # 5. Check actual disk file modification
         print("\n[5/5] Inspecting patched code on disk:")
-        patched_code = (sandbox / "limiter.py").read_text()
+        patched_code = (sandbox / "limiter.py").read_text("utf-8")
         print("-" * 50)
         print(patched_code.strip())
         print("-" * 50)

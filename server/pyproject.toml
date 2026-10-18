@@ -14,8 +14,9 @@ dependencies = [
   "httpx>=0.27.0",
   # The team line: the relay connection and end-to-end sealing.
   "websockets>=13.0",
-  # The owner's terminal tab: a shell behind a pseudo-terminal (POSIX).
-  "ptyprocess>=0.7,<1",
+  # The owner's terminal tab: a shell behind a pseudo-terminal (POSIX), or ConPTY (Windows).
+  "ptyprocess>=0.7,<1; sys_platform != 'win32'",
+  "pywinpty>=2.0,<4; sys_platform == 'win32'",
   "cryptography>=42.0",
   # Documents: reading and editing PDFs and spreadsheets.
   "pypdf>=5.0",

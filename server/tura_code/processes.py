@@ -23,12 +23,13 @@ import asyncio
 import contextlib
 import os
 import shlex
-import signal
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import hostos
 
 TOOL_NAME = "process"
 ACTIONS = ("start", "list", "poll", "log", "wait", "write", "submit", "close", "kill")
@@ -42,7 +43,7 @@ def tool_definition() -> dict[str, Any]:
         "name": TOOL_NAME,
         "description": (
             "Run and manage background processes (dev servers, watchers, long builds) that must keep running "
-            "while you work. `start` launches a shell command in the background and returns its id at once; "
+            f"while you work. `start` launches a {hostos.shell_name()} command in the background and returns its id at once; "
             "`poll` gives status and recent output; `log` pages through output lines; `wait` blocks until it "
             "exits or the timeout passes; `write`/`submit` send stdin (submit adds a newline); `close` closes "
             "stdin; `kill` stops it and its children; `list` shows this session's processes. Use `Shell` for "
@@ -52,7 +53,7 @@ def tool_definition() -> dict[str, Any]:
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": list(ACTIONS)},
-                "command": {"type": "string", "description": "For start: the shell command."},
+                "command": {"type": "string", "description": f"For start: the {hostos.shell_name()} command."},
                 "cwd": {"type": "string", "description": "For start: directory relative to the workspace (default: the workspace)."},
                 "label": {"type": "string", "description": "For start: a short name, e.g. `dev server`."},
                 "process_id": {"type": "string", "description": "The id `start` returned (every action but start and list)."},
@@ -161,7 +162,9 @@ class ProcessManager:
         item = Managed(process_id, command, str(directory), (label or command)[:80], log_path)
         log = log_path.open("wb")
         try:
-            argv = self.wrap(["/bin/sh", "-c", f"cd {shlex.quote(str(directory))} && {command}"])
+            # The `cd` is for a sandbox, whose working directory is its own; Windows has none.
+            line = command if hostos.WINDOWS else f"cd {shlex.quote(str(directory))} && {command}"
+            argv = self.wrap(hostos.shell_argv(line))
             item.process = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(directory),
@@ -169,7 +172,7 @@ class ProcessManager:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=log,
                 stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
+                **hostos.spawn_options(),
             )
         finally:
             log.close()
@@ -227,9 +230,8 @@ class ProcessManager:
             return item
         item.killed = True
         pid = item.process.pid
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pid, sig)
+        for force in (False, True):
+            await asyncio.to_thread(hostos.stop_tree, pid, force=force)
             if item.waiter is not None:
                 try:
                     await asyncio.wait_for(asyncio.shield(item.waiter), grace)

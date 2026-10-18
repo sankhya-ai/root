@@ -23,6 +23,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import hostos
+
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "1.1"
@@ -84,7 +86,7 @@ class WireProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=LINE_LIMIT,
-            start_new_session=True,
+            **hostos.spawn_options(),
         )
         self._reader = asyncio.create_task(self._read_stdout())
         self._stderr_reader = asyncio.create_task(self._read_stderr())
