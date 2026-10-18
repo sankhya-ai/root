@@ -52,6 +52,8 @@ export type Block =
       checks?: number;
       /** The workspace checkpoint taken before this turn: restoring it undoes the turn. */
       checkpoint?: string;
+      /** The permission mode the turn ran in (absent in history from before it was recorded). */
+      mode?: string;
     }
   | { kind: "rollback"; key: string; turn: string | null; label: string; undo: string; restored: string[]; removed: string[] };
 
@@ -373,6 +375,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         verified: typeof p.verified === "boolean" ? p.verified : undefined,
         checks: typeof p.checks === "number" ? p.checks : undefined,
         checkpoint: p.checkpoint ? String(p.checkpoint) : undefined,
+        mode: p.mode ? String(p.mode) : undefined,
       });
       break;
     }

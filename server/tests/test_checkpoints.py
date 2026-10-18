@@ -137,4 +137,6 @@ def test_plan_mode_takes_no_checkpoint(client, workspace, script):
         ws.receive_json()
         events = run_turn(ws, "plan something")
     assert of_type(events, "Checkpoint") == []
+    # The turn says it was a plan, so only it — not a turn before plan mode was chosen — is offered for approval.
+    assert of_type(events, "TurnFinished")[0]["payload"]["mode"] == "plan"
     assert client.post(f"/api/sessions/{session_id}/rollback", json={}).status_code == 409
