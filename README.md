@@ -84,7 +84,7 @@ Releases: a `v*` tag runs `.github/workflows/release.yml` — Apple silicon and 
 ## Run it from a clone
 
 ### Prerequisites
-* **macOS or Linux**, with `git` and `make`
+* **macOS or Linux**, with `git` and `make` — on Windows, see [Windows](#windows) below
 * **Rust** 1.85 or newer (the runtime is edition 2024): `rustup update stable`
 * **Python** 3.11–3.13 — not 3.14 yet (some server dependencies don't build on it)
 * **Node.js** 22+ with npm
@@ -130,6 +130,29 @@ root needs one OpenAI-compatible chat endpoint. Either:
   root keeps that file readable only by you (0600); the Mac app moves the key into the Keychain. The runtime never sees it: every model call goes through root's own proxy.
 
 To keep such a setup apart from your normal root, give it its own folder and port: `TURA_CODE_HOME=~/.root-other server/.venv/bin/tura-code --port 8799`.
+
+### Windows
+
+root runs natively on Windows 10 and 11 in your browser (there is no Windows app yet). You need [Git for Windows](https://git-scm.com/download/win), [Rust](https://rustup.rs) with the Visual Studio C++ build tools it asks for, Python 3.11–3.13 and Node.js 22+. In PowerShell:
+
+```powershell
+git clone https://github.com/tura-learn/root.git; cd root
+git checkout root-agentrouter
+
+cargo build --release --manifest-path runtime/Cargo.toml --bin kimi-agent
+py -3.12 -m venv server\.venv
+server\.venv\Scripts\python -m pip install -e ".\server[memory]"
+cd ui; npm install; npm run build; cd ..
+
+server\.venv\Scripts\tura-code --open      # http://localhost:8787
+```
+
+What is different on Windows:
+
+* The agent's commands run in **PowerShell** — its `Shell` tool, background processes and flow checks alike — and the terminal drawer (⌘J / Ctrl+J) is PowerShell too. `pwsh` (PowerShell 7) is used when installed.
+* Settings, sessions and memory live in `%USERPROFILE%\.tura-code`; the other settings above work the same (`$env:TURA_CODE_HOME`, `--port`).
+* Commands that reach outside the session's folder — `C:\...` paths, `..\`, `$env:USERPROFILE` — ask first, as on a Mac.
+* Hosted mode (many people on one server) needs Linux's Bubblewrap sandbox, so it is Linux only.
 
 ### 4. Put root on your team's chamber (optional)
 Once you have joined a chamber with the `chamber` tool, have root answer your teammates' agents from a repository:

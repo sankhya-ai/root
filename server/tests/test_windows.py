@@ -103,7 +103,8 @@ def test_the_terminal_is_powershell_in_the_session_folder_without_roots_keys(cli
 def test_a_turn_runs_powershell_and_a_background_process_on_windows(client, workspace, script):
     script(
         [
-            tool_call("sh", "Shell", {"command": "Write-Output ('hello-' + (40 + 2))"}),
+            tool_call("sh", "Shell", {"command": "$root_n = 41; Write-Output ('hello-' + ($root_n + 1)); Write-Output \"pid:$PID\""}),
+            tool_call("sh2", "Shell", {"command": "Write-Output ('again-' + ($root_n + 1)); Write-Output \"pid:$PID\"; Write-Output \"at:$((Get-Location).Path)\""}),
             tool_call("s", "process", {"action": "start", "command": "Write-Output ready; Start-Sleep -Seconds 60", "label": "sleeper"}),
             tool_call("t", "process", {"action": "wait", "process_id": "p1", "timeout": 2}),
             tool_call("k", "process", {"action": "kill", "process_id": "p1"}),
@@ -118,6 +119,11 @@ def test_a_turn_runs_powershell_and_a_background_process_on_windows(client, work
     assert of_type(events, "TurnFinished")[0]["payload"]["status"] == "finished"
     results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(events, "ToolResult")}
     assert "hello-42" in results["sh"]["output"], results["sh"]
+    # One PowerShell for the session: the variable carried over, the process is the same, and the call began in the workspace.
+    assert "again-42" in results["sh2"]["output"], results["sh2"]
+    pid = lambda output: output.split("pid:")[1].split()[0]
+    assert pid(results["sh"]["output"]) == pid(results["sh2"]["output"])
+    assert f"at:{workspace}".lower() in results["sh2"]["output"].lower()
     assert "id: p1" in results["s"]["output"] and "ready" in results["t"]["output"]
     assert "status: killed" in results["k"]["output"]
     listed = client.get(f"/api/sessions/{session_id}/processes").json()["processes"]

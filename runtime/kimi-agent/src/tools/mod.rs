@@ -15,6 +15,7 @@ pub mod utils;
 pub mod dmail;
 pub mod file;
 pub mod multiagent;
+pub mod persistent_shell;
 pub mod shell;
 pub mod test;
 pub mod think;

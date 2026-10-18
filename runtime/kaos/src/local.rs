@@ -433,6 +433,7 @@ impl Kaos for LocalKaos {
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
+        crate::no_window(&mut command);
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("missing stdin"))?;
         let stdout = child
