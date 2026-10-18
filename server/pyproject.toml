@@ -26,7 +26,8 @@ dependencies = [
 # Dhee is the memory layer. Without it the agent still runs; it simply has no
 # long-term memory tools and no per-turn memory context.
 memory = [
-  "dhee[openai,zvec]>=7.4.4,<8",
+  # `gemma`: EmbeddingGemma 2, local memory's embedder (downloaded on first use).
+  "dhee[openai,zvec,gemma]>=7.6.0,<8",
 ]
 # Credentials in the macOS Keychain (the app sets TURA_CODE_SECRETS=keychain).
 keychain = [

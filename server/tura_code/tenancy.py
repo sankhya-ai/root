@@ -13,6 +13,7 @@ memory scope and (hosted) workspaces. Tenants are built on first use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -55,7 +56,9 @@ class Tenant:
         self.memory = MemoryView(server.gateway, owner_scope)
         self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset()]
         #: Awaited when the tenant closes (a service's background work).
-        self.closers: list[Any] = []
+        self.closers: list[Any] = [self._close_digests]
+        #: Turn digests still writing to memory (``_checkpoint``).
+        self._digests: set[asyncio.Task] = set()
         self.sessions = SessionManager(self)
         for extension in server.extensions:
             extension(self)
@@ -186,22 +189,32 @@ class Tenant:
                 logger.exception("after-turn hook failed")
 
     async def _checkpoint(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
-        """Checkpoint turns that did real work; a quick answer is not an episode."""
+        """Checkpoint turns that did real work; a quick answer is not an episode.
+
+        The digest is a model call, so it runs beside the session: the next
+        (queued) message never waits for memory.
+        """
         if not self.memory.enabled or turn.prompt.startswith("/") or runtime.record.kind != "session":
             return
         if not turn.files_touched and turn.tool_count < 3:
             return
-        summary = f"Request: {turn.prompt[:400]}\nOutcome ({status}): {turn.reply()[:600] or 'no final reply'}"
+        task = asyncio.create_task(self._digest(runtime, turn, status))
+        self._digests.add(task)
+        task.add_done_callback(self._digests.discard)
+
+    async def _digest(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
+        from .memory.digest import digest_turn
+
         try:
-            await self.memory.checkpoint(
-                Path(runtime.record.workspace),
-                summary=summary,
-                status="completed" if status == "finished" else "paused",
-                files_touched=turn.files_touched,
-            )
-            runtime.emit("MemoryCheckpoint", {"saved": True, "files_touched": turn.files_touched})
+            result = await digest_turn(self.memory, Path(runtime.record.workspace), turn, status, settings=self.settings.get(), api_key=self.api_key())
+            runtime.emit("MemoryCheckpoint", {"saved": True, "files_touched": turn.files_touched, **result})
         except Exception as error:  # noqa: BLE001
             logger.info("turn checkpoint skipped: %s", error)
+
+    async def _close_digests(self) -> None:
+        for task in list(self._digests):
+            task.cancel()
+        await asyncio.gather(*self._digests, return_exceptions=True)
 
     async def close(self) -> None:
         for closer in self.closers:

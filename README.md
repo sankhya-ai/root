@@ -174,7 +174,7 @@ Settings can be changed directly in the UI or in `~/.tura-code/settings.json` (0
 | **Reasoning Effort** | `model default` | `none`, `low`, `medium`, `high`. |
 | **Provider Sort** | `balanced` | `throughput` (fastest), `price` (cheapest), or balanced. |
 | **Jev Director** | `on` | `on`, `shadow` (log only), `off`. |
-| **Dhee Memory** | `local` | `local` (lexical SQLite), `openrouter` (embeddings), `off`. |
+| **Dhee Memory** | `local` | `local` (EmbeddingGemma 2 on the CPU, no key), `openrouter` (OpenRouter embeddings), `off`. After a working turn, one call to the session's model writes what worked, what failed and any new durable facts. |
 | **Web Search** | `on (keyless)` | Free Parallel + Firecrawl search tiers out of the box. |
 | **Permission Mode** | `Ask before acting` | `Ask before acting`, `Accept edits`, `Plan`, `Auto-approve all`. |
 
@@ -189,7 +189,7 @@ server/tura_code/
   app/                   FastAPI routes (sessions, auth, workspaces, health)
   sessions/              Runtime processes, turns, approvals, host tools
   trust/                 Command classifier & trust ledger
-  memory/                Dhee persistent memory gateway
+  memory/                Dhee memory: the gateway, the local embedder, the turn digest
   documents/             Reading PDF/Office/CSV; editing spreadsheets and PDFs
   toolbox/               root's own Python: install on demand, run_python, scratch files
   connections/           GitHub and Gmail

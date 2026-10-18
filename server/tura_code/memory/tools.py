@@ -128,6 +128,8 @@ async def handle_tool(memory: "MemoryView", name: str, arguments: dict[str, Any]
                 reason = result.get("reason") or result.get("event") or "rejected by Dhee's admission policy"
                 return _return(f"Not stored: {reason}", "", brief="Not stored")
             memory_id = result.get("id", "") if isinstance(result, dict) else ""
+            if isinstance(result, dict) and result.get("duplicate"):
+                return _return(f"Already in {scope} memory (id: {memory_id}).", "", brief="Already remembered")
             return _return(f"Stored in {scope} memory (id: {memory_id}).", "", brief=f"Remembered ({scope})")
         if name == CHECKPOINT_TOOL:
             summary = str(arguments.get("summary") or "").strip() or "Work in progress."
