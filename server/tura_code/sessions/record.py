@@ -65,6 +65,8 @@ class TurnState:
     unchecked_edits: bool = False
     #: The workspace checkpoint taken before this turn (``checkpoints``), if any.
     checkpoint: str = ""
+    #: The permission mode the turn ran in: a plan is only offered for approval after a plan-mode turn.
+    mode: str = ""
 
     def note_edit(self) -> None:
         self.unchecked_edits = True

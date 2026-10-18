@@ -148,3 +148,13 @@ test("provider retries fold into one notice that counts up", () => {
   assert.equal(notices.length, 1);
   assert.ok(notices[0].kind === "notice" && notices[0].tone === "warn" && notices[0].text.includes("(4 of 10) in 8s"));
 });
+
+test("a turn records the permission mode it ran in", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [], mode: "default" }));
+  applyEvent(state, ev("ModeChanged", { mode: "plan" }));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [], mode: "plan" }, "t2"));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [] }, "t3"));
+  const modes = state.blocks.filter((b) => b.kind === "turn_end").map((b) => (b.kind === "turn_end" ? b.mode : null));
+  assert.deepEqual(modes, ["default", "plan", undefined]);
+});

@@ -306,7 +306,7 @@ export function Transcript({
                   {turn.end ? <Footer end={turn.end} text={answer} onRestore={running ? undefined : onRestore} /> : null}
                 </div>
               ) : null}
-              {last && planMode && !state.running && turn.end?.status === "finished" ? (
+              {last && planMode && !state.running && turn.end?.status === "finished" && turn.end.mode === "plan" ? (
                 <div className="planBar">
                   <ClipboardList size={16} />
                   <span className="grow">Plan mode: nothing has been changed. Approve the plan to let root implement it.</span>

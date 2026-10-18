@@ -321,7 +321,7 @@ class SessionRuntime(Approvals, Rollback, Queue):
         elif text in ("/diff", "/changes"):
             text = "Review all uncommitted changes and git diffs in this workspace, summarize modifications, and check for bugs or missing test coverage."
         workspace = Path(self.record.workspace)
-        turn = TurnState(id=uuid.uuid4().hex[:12], prompt=text)
+        turn = TurnState(id=uuid.uuid4().hex[:12], prompt=text, mode=self.record.permission_mode)
         self.turn = turn
         self._turn_done.clear()
         try:
@@ -369,7 +369,7 @@ class SessionRuntime(Approvals, Rollback, Queue):
             self._settle_pending("reject", "turn ended")
             self.log.flush()
             duration = round(time.time() - turn.started_at, 2)
-            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, "checkpoint": turn.checkpoint, **extra})
+            self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, "checkpoint": turn.checkpoint, "mode": turn.mode, **extra})
             self.record.last_status = status
             self.record.updated_at = time.time()
             self.save_record()
