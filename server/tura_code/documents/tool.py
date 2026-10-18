@@ -105,7 +105,7 @@ class DocumentToolset:
     plugin = "documents"
 
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        if runtime.record.permission_mode == "plan" or runtime.record.kind == "line":
+        if runtime.record.permission_mode == "plan" or runtime.record.answering:
             return [DEFINITIONS[READ_TOOL]]
         return list(DEFINITIONS.values())
 
@@ -123,7 +123,7 @@ class DocumentToolset:
                     readers.read, path, pages=str(arguments.get("pages") or ""), sheet=str(arguments.get("sheet") or ""), cells=str(arguments.get("cells") or "")
                 )
                 return _ok(result["text"], f"Read {path.name}: {result['summary']}")
-            if runtime.record.permission_mode == "plan" or runtime.record.kind == "line":
+            if runtime.record.permission_mode == "plan" or runtime.record.answering:
                 return tool_error("This session is read-only.", "Read-only")
             operations = arguments.get("operations")
             if not isinstance(operations, list):

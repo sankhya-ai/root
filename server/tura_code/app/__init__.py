@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .. import __version__, extensions, launcher, terminal
+from .. import __version__, extensions, launcher, maritime, terminal
 from ..pool import RuntimePool
 from ..sandbox import Sandbox
 from ..settings import data_dir
@@ -67,6 +67,8 @@ def create_app(
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
+        if maritime.enabled() and request.url.path in maritime.ROUTES:
+            return await call_next(request)  # Maritime's front door: the VM is not reachable otherwise
         if not host_ok(request.headers.get("host")):
             return JSONResponse({"detail": "Host not allowed."}, status_code=403)
         path = request.url.path
@@ -78,6 +80,8 @@ def create_app(
             request.state.user = user
         return await call_next(request)
 
+    if maritime.enabled():
+        app.include_router(maritime.router(server))
     app.include_router(routes_core.router(state))
     app.include_router(routes_sessions.router(state))
     app.include_router(routes_workspace.router(state))

@@ -74,7 +74,7 @@ class GitHubToolset:
         self.store = store
 
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        if runtime.record.kind == "line":
+        if runtime.record.answering:
             return []
         return [DEFINITION]
 

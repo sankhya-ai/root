@@ -136,7 +136,7 @@ class Tenant:
             home=self.home,
             extra_writable=self._git_dirs(runtime),
             planning_mode=settings.planning_mode,
-            answering_line=runtime.record.kind == "line",
+            answering=runtime.record.kind if runtime.record.answering else "",
             toolbox=getattr(getattr(self, "toolbox", None), "root", None),
         )
 

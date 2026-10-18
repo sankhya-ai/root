@@ -154,6 +154,27 @@ What is different on Windows:
 * Commands that reach outside the session's folder — `C:\...` paths, `..\`, `$env:USERPROFILE` — ask first, as on a Mac.
 * Hosted mode (many people on one server) needs Linux's Bubblewrap sandbox, so it is Linux only.
 
+### Talk to root from Slack, WhatsApp, iMessage or Telegram
+
+root answers in a chat when it is called — an @mention, a reply to it, or a direct message — reads the conversation around the call, and replies there. Chat sessions are read-only and unattended: anything that would need your approval is declined. Each conversation is a session you can open in the UI.
+
+* **Slack (direct):** Settings → Plugins → Slack → *Copy the app manifest*, create the app from it at [api.slack.com/apps](https://api.slack.com/apps?new_app=1), install it, and paste its bot token (`xoxb-…`) and app-level token (`xapp-…`). It uses Socket Mode, so no public URL. Then `/invite @root` to a channel.
+* **Keiki (WhatsApp, iMessage, Telegram, SMS, email, Slack):** at [onkeiki.com](https://onkeiki.com) create an agent, add its channels, set its harness to *External* in *inbox* mode, and paste its harness API key in Settings → Plugins → Keiki. root polls Keiki for turns, so it needs no public URL either; Keiki decides when root is spoken to (in groups, only when @mentioned) and delivers its replies.
+
+### Run root on Maritime
+
+[Maritime](https://maritime.sh) runs root in its own micro-VM, from this repository's `Dockerfile`, with everything (settings, sessions, memory, the toolbox) in `/data`, which survives sleep and redeploys.
+
+```bash
+npm install -g maritime-cli && maritime login
+maritime create root --repo https://github.com/tura-learn/root      # private agent; never --public
+maritime env set root OPENROUTER_API_KEY=sk-or-… TURA_CODE_TOKEN=<a long random string> --reload
+maritime env set root KEIKI_API_KEY=… --reload                       # and/or SLACK_BOT_TOKEN=xoxb-… SLACK_APP_TOKEN=xapp-…
+maritime chat root "what can you do?"
+```
+
+Maritime reaches root through `GET /health` and `POST /chat` (its dashboard, CLI, Telegram and scheduled wakes); a long answer comes back on the next `status`. The web UI asks for `TURA_CODE_TOKEN` (the image sets `TURA_CODE_BOOTSTRAP=0`). Keiki and Slack keep a connection open, and a sleeping VM drops it, so give the agent Maritime's *always-on* add-on when root should answer chats.
+
 ### 4. Put root on your team's chamber (optional)
 Once you have joined a chamber with the `chamber` tool, have root answer your teammates' agents from a repository:
 
@@ -222,6 +243,7 @@ server/tura_code/
   learning/              Automatic skill extraction & review loop
   flows/                 Git worktree candidate branches & judge evaluation
   line/                  root on chamber: answering teammates' agents read-only
+  slack/                 root in Slack: @mentions and DMs answered in the thread, read-only
   launcher.py            Process arguments & credential-scrubbed environments
 macos/                   The Mac app: a Swift package (window, server, native bridge) with Sparkle
 ui/                      React 19 + TypeScript + Vite frontend:

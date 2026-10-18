@@ -11,6 +11,11 @@ from typing import Any
 MODES: tuple[str, ...] = ("default", "accept_edits", "plan", "yolo")
 
 
+#: Sessions that answer someone else: a teammate's agent on the line, a team chat
+#: (Slack), a conversation Keiki brings (WhatsApp, iMessage, Telegram…), or Maritime's chat.
+ANSWERING_KINDS = frozenset({"line", "slack", "keiki", "chat"})
+
+
 @dataclass
 class SessionRecord:
     id: str
@@ -23,7 +28,8 @@ class SessionRecord:
     last_status: str = ""
     #: Action classes the owner allowed "for this session" (trust keys).
     grants: list[str] = field(default_factory=list)
-    #: "session", or "candidate" for a coding-flow candidate run unattended.
+    #: "session"; "candidate" for a coding-flow candidate run unattended; or one of
+    #: ``ANSWERING_KINDS``, a read-only session that answers someone else.
     kind: str = "session"
     #: For a candidate: the session that owns its flow, and which candidate it is.
     parent: str = ""
@@ -32,6 +38,11 @@ class SessionRecord:
     unattended: bool = False
     #: The schedule that started this session, if any.
     schedule: str = ""
+
+    @property
+    def answering(self) -> bool:
+        """Answers someone other than the owner (another agent, a chat group): read-only, no owner accounts."""
+        return self.kind in ANSWERING_KINDS
 
     @classmethod
     def load(cls, path: Path) -> "SessionRecord":

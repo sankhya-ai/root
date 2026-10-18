@@ -21,7 +21,8 @@ def router(app_state) -> APIRouter:
 
     @api.post("/auth/bootstrap")
     async def bootstrap(response: Response) -> dict:
-        if server.mode != "local":
+        # A root in the cloud (TURA_CODE_BOOTSTRAP=0) hands its token to no one: sign in with TURA_CODE_TOKEN.
+        if server.mode != "local" or os.environ.get("TURA_CODE_BOOTSTRAP", "1") == "0":
             raise HTTPException(403, "Sign in with your token.")
         response.set_cookie(COOKIE, auth.local_token, httponly=True, samesite="strict", path="/")
         return {"ok": True}

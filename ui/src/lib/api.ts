@@ -5,6 +5,7 @@ import type {
   Flow,
   FlowReview,
   Health,
+  KeikiStatus,
   LearnedSkill,
   LearningCandidate,
   Me,
@@ -19,6 +20,7 @@ import type {
   SearchHit,
   Session,
   Settings,
+  SlackStatus,
   TrustEntry,
   WireEvent,
 } from "./types.ts";
@@ -128,6 +130,13 @@ export const api = {
   githubDisconnect: () => request<{ removed: boolean }>("/api/connections/github", { method: "DELETE" }),
   googleStart: () => post<{ url: string }>("/api/connections/google/start"),
   googleDisconnect: () => request<{ removed: boolean }>("/api/connections/google", { method: "DELETE" }),
+  slack: () => request<SlackStatus>("/api/slack"),
+  slackManifest: () => request<Record<string, unknown>>("/api/slack/manifest"),
+  slackConnect: (bot_token: string, app_token: string) => request<SlackStatus>("/api/slack", { method: "PUT", body: JSON.stringify({ bot_token, app_token }) }),
+  slackDisconnect: () => request<SlackStatus>("/api/slack", { method: "DELETE" }),
+  keiki: () => request<KeikiStatus>("/api/keiki"),
+  keikiConnect: (api_key: string) => request<KeikiStatus>("/api/keiki", { method: "PUT", body: JSON.stringify({ api_key }) }),
+  keikiDisconnect: () => request<KeikiStatus>("/api/keiki", { method: "DELETE" }),
 
   // ── History and schedules ──
   search: (query: string) => request<{ results: SearchHit[] }>(`/api/search?${q({ q: query })}`),

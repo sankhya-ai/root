@@ -73,7 +73,7 @@ class GmailToolset:
         self.store = store
 
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        if runtime.record.kind == "line" or self.store.get(google.NAME) is None:
+        if runtime.record.answering or self.store.get(google.NAME) is None:
             return []
         return [DEFINITION]
 

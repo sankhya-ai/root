@@ -318,6 +318,24 @@ export interface Connections {
   secrets: "keychain" | "file";
 }
 
+export interface SlackStatus {
+  configured: boolean;
+  team: string;
+  bot: string;
+  connected: boolean;
+  answers: boolean;
+  problem: string;
+}
+
+export interface KeikiStatus {
+  configured: boolean;
+  base: string;
+  connected: boolean;
+  answers: boolean;
+  turns_answered: number;
+  problem: string;
+}
+
 export interface DeviceFlow {
   device_code: string;
   user_code: string;

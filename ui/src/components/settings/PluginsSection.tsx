@@ -3,11 +3,11 @@
 // its connection state. A row opens to show what it gives the agent and, for a
 // connection, how to connect it. The owner's MCP servers come last.
 
-import { AlarmClock, Brain, ChevronDown, ChevronRight, FileText, GitMerge, Github, Globe, Mail, Plus, Search, Server, Terminal, Trash2 } from "lucide-react";
+import { AlarmClock, Brain, ChevronDown, ChevronRight, FileText, GitMerge, Github, Globe, Mail, MessageCircle, Plus, Search, Server, Slack, Terminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api } from "../../lib/api.ts";
-import type { Connections, DeviceFlow, McpServerInfo, Plugin, PluginCatalog } from "../../lib/types.ts";
+import type { Connections, DeviceFlow, KeikiStatus, McpServerInfo, Plugin, PluginCatalog, SlackStatus } from "../../lib/types.ts";
 import { Group, Section, Switch } from "./controls.tsx";
 
 const ICONS: Record<string, ReactNode> = {
@@ -20,6 +20,8 @@ const ICONS: Record<string, ReactNode> = {
   branch: <GitMerge size={16} />,
   globe: <Globe size={16} />,
   brain: <Brain size={16} />,
+  slack: <Slack size={16} />,
+  message: <MessageCircle size={16} />,
 };
 
 function PluginRow({ icon, name, summary, right, children }: { icon: ReactNode; name: string; summary: string; right: ReactNode; children?: ReactNode }) {
@@ -132,6 +134,142 @@ function GitHubDetails({ state, refresh }: { state: Connections["github"]; refre
           ; this updates when you are done.
         </p>
       ) : null}
+      {error ? <p className="pluginError">{error}</p> : null}
+    </>
+  );
+}
+
+function SlackDetails({ state, refresh }: { state: SlackStatus; refresh: () => void }) {
+  const [bot, setBot] = useState("");
+  const [app, setApp] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  if (state.configured) {
+    return (
+      <>
+        <p className="pluginNote">
+          {state.connected ? `Answering in ${state.team || "Slack"} as @${state.bot}.` : `Connecting to ${state.team || "Slack"}…`} Invite it to a channel with{" "}
+          <span className="mono">/invite @{state.bot || "root"}</span>, then @mention it.{" "}
+          <button className="linkish" onClick={() => api.slackDisconnect().then(refresh)}>
+            Disconnect
+          </button>
+        </p>
+        {!state.answers ? <p className="pluginError">root has no model key yet, so it can't answer. Add one in Settings → Model.</p> : null}
+        {state.problem ? <p className="pluginError">{state.problem}</p> : null}
+      </>
+    );
+  }
+  const copyManifest = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(await api.slackManifest(), null, 2));
+      setCopied(true);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const connect = () => {
+    setBusy(true);
+    setError("");
+    api.slackConnect(bot.trim(), app.trim()).then(
+      () => {
+        setBot("");
+        setApp("");
+        setBusy(false);
+        refresh();
+      },
+      (e: Error) => {
+        setBusy(false);
+        setError(e.message);
+      },
+    );
+  };
+  return (
+    <>
+      <ol className="pluginSteps">
+        <li>
+          <button className="linkish" onClick={() => void copyManifest()}>
+            {copied ? "Copied the app manifest" : "Copy the app manifest"}
+          </button>
+          , then at{" "}
+          <a href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noreferrer">
+            api.slack.com/apps
+          </a>{" "}
+          choose <em>From a manifest</em>, paste it, and install the app to your workspace.
+        </li>
+        <li>
+          From <em>OAuth &amp; Permissions</em>, copy the bot token (<span className="mono">xoxb-…</span>).
+        </li>
+        <li>
+          In <em>Basic Information → App-Level Tokens</em>, generate one with <span className="mono">connections:write</span> (<span className="mono">xapp-…</span>).
+        </li>
+      </ol>
+      <div className="settingsInline">
+        <input className="input" type="password" autoComplete="off" placeholder="Bot token (xoxb-…)" value={bot} onChange={(e) => setBot(e.target.value)} />
+        <input className="input" type="password" autoComplete="off" placeholder="App-level token (xapp-…)" value={app} onChange={(e) => setApp(e.target.value)} />
+        <button className="pill ink" disabled={busy || !bot.trim() || !app.trim()} onClick={connect}>
+          {busy ? "Checking…" : "Connect"}
+        </button>
+      </div>
+      {error ? <p className="pluginError">{error}</p> : null}
+    </>
+  );
+}
+
+function KeikiDetails({ state, refresh }: { state: KeikiStatus; refresh: () => void }) {
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  if (state.configured) {
+    return (
+      <>
+        <p className="pluginNote">
+          {state.connected ? `Taking turns from Keiki · ${state.turns_answered} answered since root started.` : "Connecting to Keiki…"}{" "}
+          <button className="linkish" onClick={() => api.keikiDisconnect().then(refresh)}>
+            Disconnect
+          </button>
+        </p>
+        {state.problem ? <p className="pluginError">{state.problem}</p> : null}
+      </>
+    );
+  }
+  const connect = () => {
+    setBusy(true);
+    setError("");
+    api.keikiConnect(key.trim()).then(
+      () => {
+        setKey("");
+        setBusy(false);
+        refresh();
+      },
+      (e: Error) => {
+        setBusy(false);
+        setError(e.message);
+      },
+    );
+  };
+  return (
+    <>
+      <ol className="pluginSteps">
+        <li>
+          At{" "}
+          <a href="https://onkeiki.com/dashboard" target="_blank" rel="noreferrer">
+            onkeiki.com
+          </a>
+          , create an agent and add its channels (WhatsApp, iMessage, Telegram, Slack…).
+        </li>
+        <li>
+          Set its harness to <em>External</em> in <em>inbox</em> mode, and copy the harness API key.
+        </li>
+      </ol>
+      <div className="settingsInline">
+        <input className="input" type="password" autoComplete="off" placeholder="Keiki harness API key" value={key} onChange={(e) => setKey(e.target.value)} />
+        <button className="pill ink" disabled={busy || !key.trim()} onClick={connect}>
+          {busy ? "Checking…" : "Connect"}
+        </button>
+      </div>
       {error ? <p className="pluginError">{error}</p> : null}
     </>
   );
@@ -258,12 +396,16 @@ function McpForm({ onSaved, onCancel }: { onSaved: (servers: McpServerInfo[]) =>
 export function PluginsSection() {
   const [catalog, setCatalog] = useState<PluginCatalog | null>(null);
   const [connections, setConnections] = useState<Connections | null>(null);
+  const [slack, setSlack] = useState<SlackStatus | null>(null);
+  const [keiki, setKeiki] = useState<KeikiStatus | null>(null);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = useCallback(() => {
     api.plugins().then(setCatalog, (e: Error) => setError(e.message));
     api.connections().then(setConnections, () => undefined);
+    api.slack().then(setSlack, () => undefined); // a hosted root has no Slack or Keiki
+    api.keiki().then(setKeiki, () => undefined);
   }, []);
   useEffect(refresh, [refresh]);
 
@@ -278,10 +420,24 @@ export function PluginsSection() {
   const setMcp = (servers: McpServerInfo[]) => setCatalog((c) => (c ? { ...c, mcp: servers } : c));
 
   if (!catalog) return <Section title="Plugins">{error ? <p className="pluginError">{error}</p> : null}</Section>;
-  const connectionPlugins = catalog.plugins.filter((p) => p.kind === "connection");
+  const connectionPlugins = catalog.plugins.filter((p) => p.kind === "connection" && (p.id !== "slack" || slack) && (p.id !== "keiki" || keiki));
   const builtIn = catalog.plugins.filter((p) => p.kind === "built-in");
 
   const connectionState = (plugin: Plugin) => {
+    if (plugin.id === "keiki") {
+      return keiki?.configured ? (
+        <span className={`pluginStatus${keiki.connected ? " on" : ""}`}>{keiki.connected ? "Connected" : keiki.problem ? "Problem" : "Connecting"}</span>
+      ) : (
+        <span className="pluginStatus">Not connected</span>
+      );
+    }
+    if (plugin.id === "slack") {
+      return slack?.configured ? (
+        <span className={`pluginStatus${slack.connected ? " on" : ""}`}>{slack.connected ? slack.team || "Connected" : slack.problem ? "Problem" : "Connecting"}</span>
+      ) : (
+        <span className="pluginStatus">Not connected</span>
+      );
+    }
     const state = plugin.id === "github" ? connections?.github : connections?.gmail;
     return state?.connected ? (
       <span className="pluginStatus on">{plugin.id === "github" ? (state as Connections["github"]).login ? `@${(state as Connections["github"]).login}` : "Connected" : (state as Connections["gmail"]).email || "Connected"}</span>
@@ -307,7 +463,11 @@ export function PluginsSection() {
             }
           >
             <Capabilities items={plugin.capabilities} />
-            {connections ? (
+            {plugin.id === "slack" ? (
+              slack ? <SlackDetails state={slack} refresh={refresh} /> : null
+            ) : plugin.id === "keiki" ? (
+              keiki ? <KeikiDetails state={keiki} refresh={refresh} /> : null
+            ) : connections ? (
               plugin.id === "github" ? (
                 <GitHubDetails state={connections.github} refresh={refresh} />
               ) : (
