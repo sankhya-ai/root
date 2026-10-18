@@ -35,11 +35,17 @@ from typing import Any, Callable
 
 from ..settings import Settings
 from .errors import MemoryUnavailableError
+from .lanes import reembed, use_openrouter
+from .local_embedder import MODEL as LOCAL_MODEL
+from .local_embedder import LocalEmbedder
 from .scopes import OWNER_SCOPE, PACKET_CHAR_LIMIT, Packet, clip, project_scope, words
 
 logger = logging.getLogger(__name__)
 
 CONTEXT_TIMEOUT_SECONDS = 6.0
+#: EmbeddingGemma 2's cosine below which a memory is not about the request.
+#: Measured: answers score 0.64-0.8, unrelated memories 0.55-0.62.
+GEMMA_SIMILARITY_FLOOR = 0.63
 
 
 class MemoryGateway:
@@ -53,13 +59,19 @@ class MemoryGateway:
         self._built_for: tuple | None = None
         self._error = ""
         self._active_mode = "off"
+        #: Local memory's vectors: EmbeddingGemma 2 once it is on disk, hashing until then.
+        self.local = LocalEmbedder()
+        self._embedder = "none"
 
     # ----- lifecycle -----------------------------------------------------
 
     def _wanted(self) -> tuple:
         s = self._settings()
-        if s.memory_mode == "openrouter":
+        if s.memory_mode == "openrouter" and s.api_key():
             return ("openrouter", s.api_key(), s.base_url, s.memory_llm_model, s.memory_embedding_model, s.memory_embedding_dims)
+        if s.memory_mode in ("openrouter", "local"):
+            # Local memory, asked for or until there is a key; the model landing rebuilds Dhee on it.
+            return ("local", self.local.ready())
         return (s.memory_mode,)
 
     @property
@@ -81,6 +93,8 @@ class MemoryGateway:
             "version": version,
             "ready": self._dhee is not None,
             "error": self._error,
+            "embedder": self._embedder,
+            "local_embedder": self.local.state(),
         }
 
     def _ensure(self) -> Any:
@@ -96,83 +110,36 @@ class MemoryGateway:
         try:
             from dhee import Dhee
         except Exception as error:  # noqa: BLE001
-            self._error = f"Dhee is not installed ({error}). Install with `pip install 'dhee[openai,zvec]'`."
+            self._error = f"Dhee is not installed ({error}). Install with `pip install 'dhee[openai,zvec,gemma]'`."
             self._built_for, self._active_mode = wanted, "off"
             return None
         data_dir = self.root / "dhee"
         data_dir.mkdir(parents=True, exist_ok=True)
-        dhee = Dhee(provider="mock", data_dir=data_dir, user_id=OWNER_SCOPE, auto_context=False, auto_checkpoint=False)
+        gemma = mode == "local" and bool(wanted[1])
+        dhee = Dhee(provider="gemma" if gemma else "mock", data_dir=data_dir, user_id=OWNER_SCOPE, auto_context=False, auto_checkpoint=False)
         self._error = ""
         self._active_mode = "local"
+        self._embedder = LOCAL_MODEL if gemma else "hash"
+        marker = data_dir / ".gemma-reembedded"
+        if gemma and not marker.exists():
+            reembed(dhee, marker)
+        elif not gemma:
+            marker.unlink(missing_ok=True)  # what is stored now needs embedding again later
+            if mode == "local":
+                self.local.fetch()
         # Real memory (extraction, embeddings, decisions) needs the OpenRouter key; until
         # there is one, local memory is the honest default rather than an error.
-        if mode == "openrouter" and self._settings().api_key():
+        if mode == "openrouter":
             try:
-                self._use_openrouter(dhee, self._settings())
+                use_openrouter(dhee, self._settings())
                 self._active_mode = "openrouter"
+                self._embedder = self._settings().memory_embedding_model
             except Exception as error:  # noqa: BLE001 - fall back to local memory, loudly
                 logger.warning("Dhee OpenRouter lane unavailable; using local memory", exc_info=True)
                 self._error = f"OpenRouter memory unavailable, using local memory: {error}"
         self._dhee = dhee
         self._built_for = wanted
         return dhee
-
-    @staticmethod
-    def _use_openrouter(dhee: Any, settings: Settings) -> None:
-        """Point Dhee's embedder and enrichment LLM at OpenRouter.
-
-        Dhee's facade picks providers from its own environment detection and
-        takes no config, so — as Tura's hub does — the memory is rebuilt here
-        with explicit OpenRouter lanes: the one place root reaches past Dhee's
-        public API (``_engram``, ``_memory``). A separate vector collection per
-        embedding width keeps vectors from two models from ever being compared.
-
-        Decisions (Dhee 7.4, Jev through OpenRouter) gate the write path: a fact
-        that restates a stored one reaffirms it instead of adding a duplicate.
-        No ``fact_subjects``: project memory is about the code, not a person.
-        """
-        key = settings.api_key()
-        if not key:
-            raise RuntimeError("no OpenRouter API key is configured")
-        from dhee.configs.base import DecisionConfig, EmbedderConfig, LLMConfig, VectorStoreConfig
-        from dhee.memory.main import FullMemory
-
-        engram = dhee._engram
-        base = engram.memory.config
-        dims = int(settings.memory_embedding_dims)
-        config = base.model_copy(deep=True)
-        config.llm = LLMConfig(
-            provider="openai",
-            config={
-                "model": settings.memory_llm_model,
-                "api_key": key,
-                "base_url": settings.base_url,
-                "temperature": 0.2,
-                "max_tokens": 2048,
-            },
-        )
-        config.embedder = EmbedderConfig(
-            provider="openai",
-            config={
-                "model": settings.memory_embedding_model,
-                "api_key": key,
-                "base_url": settings.base_url,
-                "embedding_dims": dims,
-            },
-        )
-        config.vector_store = VectorStoreConfig(
-            provider="zvec",
-            config={
-                "collection_name": f"tura_openrouter_{dims}",
-                "path": str(Path(engram.data_dir) / "zvec"),
-                "embedding_model_dims": dims,
-            },
-        )
-        config.embedding_model_dims = dims
-        if "openrouter.ai" in settings.base_url:
-            config.decisions = DecisionConfig(enabled=True, provider="openrouter", api_key=key)
-        engram._memory = FullMemory(config)
-        engram._provider = "openai"
 
     def _close_current(self) -> None:
         if self._dhee is not None:
@@ -222,9 +189,12 @@ class MemoryGateway:
                 if not text:
                     continue
                 overlap = len(query_words & words(text))
-                # Local mode embeds by hashing, so its similarity alone ranks
-                # unrelated facts highly. Shared words are the honest floor.
-                if self._active_mode == "local" and query_words and overlap == 0:
+                if self._embedder == LOCAL_MODEL:
+                    # EmbeddingGemma ranks by meaning: a floor on its cosine, not on shared words.
+                    if float(row.get("similarity", row.get("score") or 0.0)) < GEMMA_SIMILARITY_FLOOR:
+                        continue
+                elif self._active_mode == "local" and query_words and overlap == 0:
+                    # Hashed vectors rank unrelated facts highly: shared words are the honest floor.
                     continue
                 score = float(row.get("score") or 0.0) + 0.15 * overlap
                 item = {
@@ -336,7 +306,20 @@ class MemoryGateway:
     async def remember(self, content: str, workspace: Path, *, scope: str = "project", kind: str = "fact", session_id: str = "", owner: str = OWNER_SCOPE) -> dict[str, Any]:
         user_id = owner if scope == "owner" else project_scope(workspace)
         metadata = {"kind": kind, "source": "tura-code", "workspace": str(workspace), "session_id": session_id}
-        return await self._run(lambda dhee: dhee.remember(content, user_id=user_id, metadata=metadata))
+
+        def work(dhee: Any) -> dict[str, Any]:
+            # The same fact said again (the agent, the digest, a promoted lesson) is stored once.
+            same = " ".join(content.lower().split())
+            try:
+                rows = dhee.recall(content, user_id=user_id, limit=3) or []
+            except Exception:  # noqa: BLE001
+                rows = []
+            for row in rows:
+                if " ".join(str(row.get("memory") or "").lower().split()) == same:
+                    return {"id": str(row.get("id") or ""), "duplicate": True}
+            return dhee.remember(content, user_id=user_id, metadata=metadata)
+
+        return await self._run(work)
 
     async def checkpoint(self, workspace: Path, *, summary: str, status: str = "paused", **fields: Any) -> dict[str, Any]:
         scope = project_scope(workspace)
