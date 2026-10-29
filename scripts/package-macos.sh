@@ -6,8 +6,9 @@
 #     scripts/package-macos.sh               # signed, notarized, stapled: for everyone
 #
 # Optional: BUNDLE_ID (default ai.tura.root), BUILD (default: git commit count),
-# SPARKLE_PUBLIC_KEY (from Sparkle's generate_keys; without it the app has no
-# updater), FEED_URL (default: this repo's latest GitHub release appcast),
+# SPARKLE_PUBLIC_KEY (default: root's own update key, `generate_keys --account root`),
+# FEED_URL (default: the appcast turalearn.com serves beside the download, from what
+# scripts/publish-macos.py put in R2),
 # ROOT_GOOGLE_CLIENT_ID / ROOT_GOOGLE_CLIENT_SECRET (Gmail, a Google "Desktop app"
 # client), ROOT_GITHUB_CLIENT_ID (GitHub sign-in), PYTHON_DIR (a relocatable
 # CPython 3.11–3.13 install; default: uv's managed 3.13), SKIP_BUILD=1 (reuse the
@@ -27,7 +28,10 @@ version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/server/pyproject.toml")"
 build="${BUILD:-$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 1)}"
 bundle_id="${BUNDLE_ID:-ai.tura.root}"
 # One feed per architecture: these are separate builds, not a universal one.
-feed_url="${FEED_URL:-https://github.com/sankhya-ai/root/releases/latest/download/appcast-$(uname -m).xml}"
+feed_url="${FEED_URL:-https://www.turalearn.com/api/updates/root/stable/appcast-$(uname -m).xml}"
+# Public by design: the app checks every update against it. The private half is in
+# the login Keychain (Sparkle account "root") and ~/.tura-release/sparkle-root-private-key.
+sparkle_public_key="${SPARKLE_PUBLIC_KEY:-Ex/OirJAJc0n1BHgIyNDTkUckx9hS/QcG9YGQEBXMXg=}"
 arch="$(uname -m)"
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
@@ -60,7 +64,7 @@ ditto "$repo/runtime/LICENSE" "$resources/root/LICENSE-runtime"
 ditto "$repo/runtime/NOTICE" "$resources/root/NOTICE-runtime"
 
 sed -e "s/@BUNDLE_ID@/$bundle_id/" -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build/" \
-    -e "s|@FEED_URL@|$feed_url|" -e "s|@SPARKLE_PUBLIC_KEY@|${SPARKLE_PUBLIC_KEY:-}|" \
+    -e "s|@FEED_URL@|$feed_url|" -e "s|@SPARKLE_PUBLIC_KEY@|$sparkle_public_key|" \
     -e "s|@GOOGLE_CLIENT_ID@|${ROOT_GOOGLE_CLIENT_ID:-}|" -e "s|@GOOGLE_CLIENT_SECRET@|${ROOT_GOOGLE_CLIENT_SECRET:-}|" \
     -e "s|@GITHUB_CLIENT_ID@|${ROOT_GITHUB_CLIENT_ID:-}|" \
     "$repo/macos/Info.plist" > "$app/Contents/Info.plist"

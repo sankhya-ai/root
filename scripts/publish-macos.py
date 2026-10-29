@@ -6,14 +6,21 @@ Uploads to the releases bucket Tura uses (``chotu-bucket``), under
 ``root/releases/<channel>/<version>/``:
 
     root-darwin-<arch>.dmg      what people download
-    root-darwin-<arch>.json     version, size and sha256 — uploaded last, so it never
-                                names a disk image that is not there yet
+    root-darwin-<arch>.json     version, build, size, sha256 and Sparkle's EdDSA
+                                signature — uploaded last, so it never names a disk
+                                image that is not there yet. turalearn.com turns it into
+                                the appcast "Check for Updates…" reads
 
 with Tura's upload key from ``~/.tura-release/r2-upload.env`` (mode 600):
 ``TURA_R2_ACCESS_KEY_ID`` / ``TURA_R2_SECRET_ACCESS_KEY``, an R2 API token with
 Object Read & Write on the bucket. The bucket is private: the website hands out
 short-lived signed links, as it does for Tura. Refuses a disk image that is not
-stapled with a notarization ticket.
+stapled with a notarization ticket, and signs it with root's Sparkle key (the login
+Keychain's "root" account, from ``generate_keys --account root``): an installed root
+takes no update whose signature does not match.
+
+Which release people get, as a download and as an update, is the website's
+``ROOT_R2_RELEASE_PREFIX``; publishing alone changes nothing they see.
 """
 
 from __future__ import annotations
@@ -22,6 +29,8 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
+import re
 import platform
 import subprocess
 import sys
@@ -30,6 +39,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 UPLOAD_ENV = Path(os.environ.get("TURA_R2_UPLOAD_ENV", Path.home() / ".tura-release" / "r2-upload.env"))
+SPARKLE_BIN = REPO / "macos" / ".build" / "artifacts" / "sparkle" / "Sparkle" / "bin"
 DEFAULTS = {"TURA_R2_ACCOUNT_ID": "7bde7e018e7fa9eb5d03b9df2e66387b", "TURA_R2_BUCKET": "chotu-bucket"}
 
 
@@ -49,12 +59,26 @@ def settings() -> dict[str, str]:
     return values
 
 
+def sparkle_signature(dmg: Path) -> str:
+    """Sparkle's EdDSA signature over the disk image, with root's key from the Keychain."""
+    tool = SPARKLE_BIN / "sign_update"
+    if not tool.is_file():
+        sys.exit(f"No {tool}: build the app once (scripts/package-macos.sh) so Swift fetches Sparkle.")
+    out = subprocess.run([str(tool), "--account", "root", str(dmg)], capture_output=True, text=True)
+    found = re.search(r'sparkle:edSignature="([^"]+)"', out.stdout)
+    if out.returncode != 0 or not found:
+        sys.exit(f"sign_update failed: is root's Sparkle key in the login Keychain?\n{out.stdout}{out.stderr}")
+    return found.group(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", required=True)
     parser.add_argument("--channel", default="stable")
     parser.add_argument("--arch", default=platform.machine())
     parser.add_argument("--dmg", help="Default: build/macos/root-<version>-<arch>.dmg")
+    parser.add_argument("--app", help="The root.app the disk image holds. Default: build/macos/root.app")
+    parser.add_argument("--notes", default="", help="What changed, shown in the update window (plain text or HTML)")
     args = parser.parse_args()
 
     dmg = Path(args.dmg) if args.dmg else REPO / "build" / "macos" / f"root-{args.version}-{args.arch}.dmg"
@@ -63,6 +87,11 @@ def main() -> None:
     stapled = subprocess.run(["xcrun", "stapler", "validate", str(dmg)], capture_output=True, text=True)
     if stapled.returncode != 0:
         sys.exit(f"{dmg.name} has no notarization ticket stapled: build with SIGN_IDENTITY and NOTARY_PROFILE.\n{stapled.stdout}{stapled.stderr}")
+
+    info = plistlib.loads((Path(args.app or REPO / "build" / "macos" / "root.app") / "Contents" / "Info.plist").read_bytes())
+    if info.get("CFBundleShortVersionString") != args.version:
+        sys.exit(f"root.app is {info.get('CFBundleShortVersionString')}, not {args.version}: pass --app, or rebuild.")
+    signature = sparkle_signature(dmg)
 
     import boto3
     from botocore.config import Config
@@ -86,8 +115,12 @@ def main() -> None:
         "channel": args.channel,
         "platform": f"darwin-{args.arch}",
         "dmg": f"{prefix}/{name}.dmg",
+        "build": str(info["CFBundleVersion"]),
+        "minimum_system_version": str(info.get("LSMinimumSystemVersion", "13.0")),
         "size": dmg.stat().st_size,
         "sha256": digest,
+        "ed_signature": signature,
+        "notes": args.notes,
         "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     for key, body, content_type in (
