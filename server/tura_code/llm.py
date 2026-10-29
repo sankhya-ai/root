@@ -63,7 +63,7 @@ async def complete(
         return scripted
     if not api_key:
         raise LLMError("no API key is configured")
-    headers = {"Authorization": f"Bearer {api_key}", "HTTP-Referer": "https://github.com/tura-learn/root", "X-Title": "root"}
+    headers = {"Authorization": f"Bearer {api_key}", "HTTP-Referer": "https://github.com/sankhya-ai/root", "X-Title": "root"}
     budget = max_tokens
     structured = json_mode
     text = ""

@@ -5,9 +5,14 @@ Nothing here writes. Edits belong to the agent, behind its approvals.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+from . import hostos
 
 IGNORED_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build",
@@ -16,6 +21,27 @@ IGNORED_DIRS = {
 MAX_FILES = 5_000
 MAX_READ_BYTES = 1_000_000
 MAX_DIFF_BYTES = 400_000
+#: The macOS folder dialog, run by the local host for a browser page, which
+#: cannot learn a folder's path itself. The start folder comes in as an argument.
+PICK_FOLDER = [
+    "osascript",
+    "-e", "on run argv",
+    "-e", "activate",
+    "-e", 'POSIX path of (choose folder with prompt "Choose a workspace folder" default location (POSIX file (item 1 of argv)))',
+    "-e", "end run",
+]
+#: The same on Windows: the WinForms folder dialog, on top of the browser. The
+#: start folder comes in through the environment, never as code.
+PICK_FOLDER_WINDOWS = (
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+    "Add-Type -AssemblyName System.Windows.Forms; "
+    "$owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; "
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+    "$dialog.Description = 'Choose a workspace folder'; "
+    "$dialog.SelectedPath = $env:ROOT_PICK_START; "
+    "if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath } else { exit 1 }"
+)
+PICK_TIMEOUT = 600
 
 
 class WorkspaceError(ValueError):
@@ -59,7 +85,7 @@ def list_files(workspace: Path) -> dict:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS and not d.startswith("."))
         for name in sorted(filenames):
-            files.append(str((Path(dirpath) / name).relative_to(root)))
+            files.append((Path(dirpath) / name).relative_to(root).as_posix())
             if len(files) >= MAX_FILES:
                 return {"files": files, "truncated": True, "git": False}
     return {"files": files, "truncated": False, "git": False}
@@ -140,3 +166,40 @@ def list_dirs(path: str | None, root: Path | None = None) -> dict:
         "git": (base / ".git").exists(),
         "entries": entries[:500],
     }
+
+
+def folder_picker() -> bool:
+    """Whether this machine can show the native folder dialog."""
+    if hostos.WINDOWS:
+        return True
+    return sys.platform == "darwin" and shutil.which(PICK_FOLDER[0]) is not None
+
+
+def picker_command(begin: Path) -> tuple[list[str], dict[str, str] | None]:
+    """The native dialog's argv and environment: osascript on a Mac, WinForms through PowerShell on Windows."""
+    if hostos.WINDOWS:
+        argv = [hostos.powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", PICK_FOLDER_WINDOWS]
+        return argv, {**os.environ, "ROOT_PICK_START": str(begin)}
+    return [*PICK_FOLDER, str(begin)], None
+
+
+async def pick_folder(start: str | None = None) -> str | None:
+    """The folder the owner chooses in the native dialog, or None when they cancel."""
+    begin = Path(start).expanduser() if start else Path.home()
+    if not begin.is_dir():
+        begin = Path.home()
+    argv, env = picker_command(begin)
+    process = await asyncio.create_subprocess_exec(*argv, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), PICK_TIMEOUT)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return None
+    # A cancelled dialog exits non-zero ("User canceled", -128).
+    path = output.decode(errors="replace").strip()
+    if process.returncode != 0 or not path:
+        return None
+    if hostos.WINDOWS:
+        return path if path.endswith(":\\") else path.rstrip("\\")
+    return path.rstrip("/") or "/"

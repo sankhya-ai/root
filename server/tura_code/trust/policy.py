@@ -56,6 +56,8 @@ def decide(
     grants: set[str] | frozenset[str] = frozenset(),
     ask_owner: bool = True,
     workspace: str | None = None,
+    own_roots: tuple[str, ...] = (),
+    roam: bool = False,
 ) -> Decision:
     """Settle an approval request by policy, or say it needs the owner.
 
@@ -64,7 +66,12 @@ def decide(
 
     With ``workspace``, anything that reaches outside it — a command's paths,
     a read or an edit of an outside file — is settled only by a session grant
-    for that folder, in every mode: see ``boundary``.
+    for that folder, or by "Auto-approve all" when ``roam`` (a local install,
+    where the machine is the owner's own): see ``boundary``.
+
+    ``own_roots`` are folders that belong to the session itself (its scratch
+    folder, root's Python toolbox): not outside anything. Reading and writing
+    there is free; a command there is judged like one in the workspace.
     """
     action = str(payload.get("action") or "").strip()
     sender = str(payload.get("sender") or "").strip()
@@ -75,10 +82,14 @@ def decide(
             return Decision(key, "approve", "allowed for this session", False, classification)
         if not ask_owner:
             return Decision(key, "reject", "outside the workspace, and this run is unattended", False, classification)
+        if roam and mode == "yolo":
+            return Decision(key, "approve", "auto-approve all", False, classification)
         return Decision(key, None, reason, False, classification, extra={"outside": path})
 
     if workspace and action in (ACTION_READ_OUTSIDE, ACTION_EDIT_OUTSIDE):
         path = boundary.path_in(str(payload.get("description") or ""))
+        if path and any(boundary.inside(path, root) for root in own_roots):
+            return Decision(boundary.grant_key(path), "approve", "the session's own folder", False)
         if path and action == ACTION_READ_OUTSIDE and boundary.allowed(path):
             return Decision(boundary.grant_key(path), "approve", "system or toolchain location", False)
         if path:
@@ -98,6 +109,7 @@ def decide(
     if action == ACTION_RUN_COMMAND:
         classification = classify_command(command_of(payload))
         reaches = boundary.outside_paths(command_of(payload), workspace) if workspace else []
+        reaches = [p for p in reaches if not any(boundary.inside(p, root) for root in own_roots)]
         ungranted = [p for p in reaches if not boundary.granted(p, grants)]
         if ungranted:
             return fence(ungranted[0], "reaches outside the workspace", classification)

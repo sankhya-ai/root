@@ -3,7 +3,8 @@
 Everything root writes lives under one directory (``TURA_CODE_HOME``,
 default ``~/.tura-code``):
 
-    settings.json        this module (0600: it may hold the OpenRouter key)
+    settings.json        this module (0600: it holds the API keys, unless the
+                         Keychain does: see ``vault``)
     sessions/<id>/       session.json + events.jsonl, see ``sessions``
     runtime/             per-session agent overlays and runtime config files
     kimi/                the runtime's own share dir (context, wire logs)
@@ -20,6 +21,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from . import vault as vaults
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 
@@ -28,7 +31,6 @@ DirectorMode = Literal["on", "shadow", "off"]
 MemoryMode = Literal["local", "openrouter", "off"]
 LearningMode = Literal["review", "auto", "off"]
 PlanningMode = Literal["default", "scaffold", "cost_saver", "off"]
-ContextStrategy = Literal["T0", "T1", "T2", "T3", "T4", "off"]
 ActionSpaceMode = Literal["predefined", "bash_only", "auto"]
 ReasoningEffort = Literal["", "none", "low", "medium", "high", "xhigh"]
 
@@ -51,6 +53,8 @@ class Settings(BaseModel):
     # Cheap and fast; the harness (Jev, Dhee, tolerant edits, argument repair)
     # is built so a model of this class can do real multi-file work.
     model: str = "deepseek/deepseek-v4.1-flash"
+    # Tried in order when the model fails or its providers are down (OpenRouter's `models`).
+    fallback_models: list[str] = Field(default_factory=list, max_length=3)
     max_context_size: int = Field(default=200_000, ge=8_000, le=4_000_000)
     reasoning_effort: ReasoningEffort = ""
     # Which of the model's OpenRouter providers to prefer. Speed and price
@@ -61,7 +65,8 @@ class Settings(BaseModel):
     # Jev (`typesafe/jev-1.13`) decides, before each step, whether the model
     # should reply or which tool it should call. See runtime/.../director.rs.
     director_mode: DirectorMode = "on"
-    memory_mode: MemoryMode = "local"
+    # Real memory once there is a key (local, lexical memory until then): see ``memory.gateway``.
+    memory_mode: MemoryMode = "openrouter"
     memory_llm_model: str = "openai/gpt-4o-mini"
     memory_embedding_model: str = "openai/text-embedding-3-small"
     memory_embedding_dims: int = Field(default=1536, ge=64, le=8192)
@@ -76,11 +81,15 @@ class Settings(BaseModel):
     # proposes skills and memories. `review` queues them for the owner,
     # `auto` promotes what passes the overfit filter, `off` skips the review.
     learning_mode: LearningMode = "review"
+    # The most parallel candidates the agent may give a coding flow. Each one
+    # repeats the whole job (and its tokens); the owner raises this, not the agent.
+    flow_max_candidates: int = Field(default=1, ge=1, le=3)
+    # Plugins the owner switched off (``plugins``): the agent gets none of their tools.
+    disabled_plugins: list[str] = Field(default_factory=list)
     learning_model: str = ""
     default_permission_mode: PermissionMode = "default"
     recent_workspaces: list[str] = Field(default_factory=list)
     planning_mode: PlanningMode = "default"
-    context_strategy: ContextStrategy = "T4"
     action_space_mode: ActionSpaceMode = "predefined"
 
     @field_validator("base_url")
@@ -116,16 +125,31 @@ class SettingsStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or data_dir()
         self.path = self.root / "settings.json"
+        self.vault = vaults.for_root(self.root)
         self._lock = threading.Lock()
+        #: The secrets as last written to the vault, so a save writes only what changed.
+        self._vaulted: dict[str, str] = {}
         self._settings = self._load()
 
     def _load(self) -> Settings:
-        if not self.path.exists():
-            return Settings()
         try:
-            return Settings.model_validate(json.loads(self.path.read_text("utf-8")))
+            data = json.loads(self.path.read_text("utf-8")) if self.path.exists() else {}
+            settings = Settings.model_validate(data)
         except (OSError, ValueError):
-            return Settings()
+            data, settings = {}, Settings()
+        if self.vault.inline:
+            return settings
+        migrated = False
+        for name in SECRET_FIELDS:
+            if data.get(name):
+                self.vault.set(name, str(data[name]))  # a key the file still holds moves to the Keychain
+                migrated = True
+            self._vaulted[name] = self.vault.get(name)
+            setattr(settings, name, self._vaulted[name])
+        if migrated:
+            self._settings = settings
+            self._write()
+        return settings
 
     def get(self) -> Settings:
         with self._lock:
@@ -164,8 +188,19 @@ class SettingsStore:
 
     def _write(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        stored = self._settings
+        if not self.vault.inline:
+            for name in SECRET_FIELDS:
+                value = getattr(self._settings, name)
+                if self._vaulted.get(name, "") != value:
+                    self.vault.set(name, value)
+                    self._vaulted[name] = value
+            stored = self._settings.model_copy(update={name: "" for name in SECRET_FIELDS})
+        data = stored.model_dump()
+        if not self.vault.inline:
+            data[vaults.MARKER] = self.vault.name  # every root on this directory reads the Keychain now
         tmp = self.path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(self._settings.model_dump_json(indent=2))
+            handle.write(json.dumps(data, indent=2))
         os.replace(tmp, self.path)

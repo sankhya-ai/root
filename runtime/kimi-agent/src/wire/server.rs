@@ -674,7 +674,9 @@ async fn request_approval(
         .insert(msg_id.clone(), PendingRequest::Approval(request.clone()));
     let out = build_request_message(msg_id, WireMessage::ApprovalRequest(request.clone()));
     let _ = write_queue.put_nowait(serde_json::to_value(out).unwrap_or(Value::Null));
-    let _ = request.wait().await;
+    // No waiting for the answer here: the caller waits on its own request, and
+    // the answer resolves it from `pending`. Waiting would hold back every later
+    // message — events, a parallel call's approval — for as long as this takes.
 }
 
 async fn request_tool_call(
@@ -689,5 +691,4 @@ async fn request_tool_call(
         .insert(msg_id.clone(), PendingRequest::ToolCall(request.clone()));
     let out = build_request_message(msg_id, WireMessage::ToolCallRequest(request.clone()));
     let _ = write_queue.put_nowait(serde_json::to_value(out).unwrap_or(Value::Null));
-    let _ = request.wait().await;
 }

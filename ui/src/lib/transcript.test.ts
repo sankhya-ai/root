@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { lineDiff, parseUnifiedDiff } from "./diff.ts";
-import { applyEvent, createTranscript, loadHistory, parseArgs } from "./transcript.ts";
+import { applyEvent, createTranscript, loadHistory, parseArgs, producedFiles } from "./transcript.ts";
 import type { WireEvent } from "./types.ts";
 
 let seq = 0;
@@ -107,4 +107,54 @@ test("unified diff parsing", () => {
   assert.equal(files[0].added, 1);
   assert.equal(files[0].removed, 1);
   assert.deepEqual(files[0].rows.map((r) => r.kind), ["gap", "context", "del", "add"]);
+});
+
+test("a turn keeps its checkpoint and a rollback says what it restored", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "edit", attachments: [], memory: [] }));
+  applyEvent(state, ev("Checkpoint", { id: "c0ffee", label: "Before: edit", created_at: 1 }));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: ["a.py"], checkpoint: "c0ffee" }));
+  const end = state.blocks.find((b) => b.kind === "turn_end");
+  assert.ok(end && end.kind === "turn_end");
+  assert.equal(end.checkpoint, "c0ffee");
+  applyEvent(
+    state,
+    ev("Rollback", { checkpoint: { id: "c0ffee", label: "Before: edit" }, undo: { id: "beef", label: "Before restoring" }, restored: ["a.py"], removed: ["b.py"] }, ""),
+  );
+  const rollback = state.blocks[state.blocks.length - 1];
+  assert.ok(rollback.kind === "rollback");
+  assert.deepEqual([rollback.label, rollback.undo, rollback.restored, rollback.removed], ["edit", "beef", ["a.py"], ["b.py"]]);
+});
+
+test("files a run produced are collected per turn, once each", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));
+  applyEvent(state, ev("ToolCall", { id: "p1", function: { name: "run_python", arguments: "{}" } }));
+  const files = [{ path: "report.pdf", scope: "scratch", size: 2048 }];
+  const display = [{ type: "brief", text: "exit 0" }, { type: "files", data: { files } }];
+  applyEvent(state, ev("ToolResult", { tool_call_id: "p1", return_value: { is_error: false, output: "", message: "", display } }));
+  applyEvent(state, ev("ToolCall", { id: "p2", function: { name: "run_python", arguments: "{}" } }));
+  applyEvent(state, ev("ToolResult", { tool_call_id: "p2", return_value: { is_error: false, output: "", message: "", display } }));
+  assert.deepEqual(producedFiles(state.blocks), files);
+});
+
+test("provider retries fold into one notice that counts up", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("UserPrompt", { text: "go", attachments: [], memory: [] }));
+  for (const attempt of [1, 2, 3]) {
+    applyEvent(state, ev("StatusUpdate", { retry: { attempt, max_attempts: 10, delay_seconds: 2 ** attempt, error: "500" } }));
+  }
+  const notices = state.blocks.filter((b) => b.kind === "notice");
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0].kind === "notice" && notices[0].tone === "warn" && notices[0].text.includes("(4 of 10) in 8s"));
+});
+
+test("a turn records the permission mode it ran in", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [], mode: "default" }));
+  applyEvent(state, ev("ModeChanged", { mode: "plan" }));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [], mode: "plan" }, "t2"));
+  applyEvent(state, ev("TurnFinished", { status: "finished", files_touched: [] }, "t3"));
+  const modes = state.blocks.filter((b) => b.kind === "turn_end").map((b) => (b.kind === "turn_end" ? b.mode : null));
+  assert.deepEqual(modes, ["default", "plan", undefined]);
 });

@@ -169,3 +169,34 @@
   font-size: 12px;
   margin-top: 1px;
 }
+.menuOption .desc.path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menuDivider {
+  border-top: 1px solid var(--line);
+  margin: 4px 6px;
+}
+.queued {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.queuedItem {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+}
+.queuedText {
+  flex: 1;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

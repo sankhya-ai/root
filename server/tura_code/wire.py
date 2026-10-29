@@ -23,6 +23,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import hostos
+
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "1.1"
@@ -60,6 +62,7 @@ class WireProcess:
         self.process: asyncio.subprocess.Process | None = None
         self.initialize_result: dict = {}
         self._pending: dict[str, asyncio.Future] = {}
+        #: Answers in flight to the runtime's requests (an approval, a host tool call).
         self._tasks: set[asyncio.Task] = set()
         self._stderr: deque[str] = deque(maxlen=200)
         self._write_lock = asyncio.Lock()
@@ -83,7 +86,7 @@ class WireProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=LINE_LIMIT,
-            start_new_session=True,
+            **hostos.spawn_options(),
         )
         self._reader = asyncio.create_task(self._read_stdout())
         self._stderr_reader = asyncio.create_task(self._read_stderr())
@@ -112,6 +115,10 @@ class WireProcess:
         except WireError as error:
             # "No agent turn is in progress" is a race with the turn ending.
             logger.debug("cancel: %s", error)
+        # The turn is gone: a host tool still working for it (a `process` wait,
+        # `run_python`) stops too, instead of running on for nobody.
+        for task in list(self._tasks):
+            task.cancel()
 
     async def call(self, method: str, params: dict, timeout: float | None = 60) -> dict:
         if not self.alive:
@@ -200,6 +207,13 @@ class WireProcess:
         try:
             result = await self.on_request(request_id, kind, payload)
             await self._send({"jsonrpc": "2.0", "id": request_id, "result": result})
+        except asyncio.CancelledError:
+            # Cancelled with its turn: still answer, so the runtime lets go of it.
+            try:
+                await self._send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "Cancelled with the turn."}})
+            except WireError:
+                pass
+            raise
         except Exception as error:  # noqa: BLE001 - every request gets an answer
             logger.exception("host failed to answer %s", kind)
             try:

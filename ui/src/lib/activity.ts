@@ -37,6 +37,7 @@ export function stepKind(name: string): StepKind {
   switch (name) {
     case "ReadFile":
     case "ReadMediaFile":
+    case "read_document":
       return "read";
     case "Grep":
     case "Glob":
@@ -48,11 +49,14 @@ export function stepKind(name: string): StepKind {
       return "web";
     case "WriteFile":
     case "StrReplaceFile":
+    case "edit_spreadsheet":
+    case "edit_pdf":
       return "edit";
     case "SetTodoList":
       return "plan";
     case "memory_recall":
     case "memory_checkpoint":
+    case "session_search":
       return "memory";
     case "memory_remember":
       return "remember";

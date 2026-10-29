@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import launcher, llm
+from .. import hostos, launcher, llm
 from ..sandbox import Mounts
 from . import judge
 from .git import common_dir, diff_receipt
@@ -57,15 +57,15 @@ async def run_check(service: "FlowService", worktree: Path, command: str) -> dic
     tenant = service.tenant
     git_dir = common_dir(worktree)
     mounts = Mounts(workspace=worktree, writable=(git_dir,) if git_dir else (), home=tenant.home)
-    argv = tenant.sandbox.wrap(["/bin/sh", "-c", command], mounts)
+    argv = tenant.sandbox.wrap(hostos.shell_argv(command), mounts)
     env = tenant.sandbox.environment({**launcher.scrubbed_environment(), "PYTHONDONTWRITEBYTECODE": "1"}, mounts)
     try:
-        process = await asyncio.create_subprocess_exec(*argv, cwd=str(worktree), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        process = await asyncio.create_subprocess_exec(*argv, cwd=str(worktree), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **hostos.spawn_options())
         try:
             out, _ = await asyncio.wait_for(process.communicate(), CHECK_TIMEOUT)
             code, output = process.returncode, out.decode(errors="replace")
         except asyncio.TimeoutError:
-            process.kill()
+            await asyncio.to_thread(hostos.stop_tree, process.pid)
             code, output = None, f"verification timed out after {CHECK_TIMEOUT:.0f}s"
     except OSError as error:
         code, output = None, f"could not run: {error}"

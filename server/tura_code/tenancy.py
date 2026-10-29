@@ -13,6 +13,7 @@ memory scope and (hosted) workspaces. Tenants are built on first use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -25,7 +26,7 @@ from .models import ModelCatalog
 from .pool import RuntimePool
 from .sandbox import Sandbox
 from .sessions import SessionManager
-from .sessions.host_tools import MemoryToolset, ProcessToolset, ContextToolset, Toolset
+from .sessions.host_tools import MemoryToolset, ProcessToolset, Toolset
 from .settings import SettingsStore
 from .trust import TrustLedger
 from .users import UserStore
@@ -53,9 +54,11 @@ class Tenant:
         self.home = home
         self.trust = TrustLedger(root / "trust.json")
         self.memory = MemoryView(server.gateway, owner_scope)
-        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset(), ContextToolset()]
+        self.toolsets: list[Toolset] = [MemoryToolset(), ProcessToolset()]
         #: Awaited when the tenant closes (a service's background work).
-        self.closers: list[Any] = []
+        self.closers: list[Any] = [self._close_digests]
+        #: Turn digests still writing to memory (``_checkpoint``).
+        self._digests: set[asyncio.Task] = set()
         self.sessions = SessionManager(self)
         for extension in server.extensions:
             extension(self)
@@ -115,7 +118,7 @@ class Tenant:
         endpoint = None
         if self.proxy.enabled and not launcher.scripted():
             base = settings.base_url
-            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()))
+            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()), fallbacks=lambda: self.settings.get().fallback_models)
         return launcher.LaunchSpec(
             session_id=runtime.record.id,
             workspace=Path(runtime.record.workspace),
@@ -133,8 +136,8 @@ class Tenant:
             home=self.home,
             extra_writable=self._git_dirs(runtime),
             planning_mode=settings.planning_mode,
-            context_strategy=settings.context_strategy,
-            answering_line=runtime.record.kind == "line",
+            answering=runtime.record.kind if runtime.record.answering else "",
+            toolbox=getattr(getattr(self, "toolbox", None), "root", None),
         )
 
     @staticmethod
@@ -155,8 +158,13 @@ class Tenant:
             return "off"
         return settings.director_mode
 
+    def active_toolsets(self) -> list[Toolset]:
+        """The host toolsets of every plugin that is on."""
+        off = set(self.settings.get().disabled_plugins)
+        return [t for t in self.toolsets if getattr(t, "plugin", None) not in off]
+
     def tool_definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        return [definition for toolset in self.toolsets for definition in toolset.definitions(runtime)]
+        return [definition for toolset in self.active_toolsets() for definition in toolset.definitions(runtime)]
 
     def command_environment(self, runtime: "SessionRuntime") -> dict[str, str]:
         from .sandbox import Mounts
@@ -181,22 +189,32 @@ class Tenant:
                 logger.exception("after-turn hook failed")
 
     async def _checkpoint(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
-        """Checkpoint turns that did real work; a quick answer is not an episode."""
+        """Checkpoint turns that did real work; a quick answer is not an episode.
+
+        The digest is a model call, so it runs beside the session: the next
+        (queued) message never waits for memory.
+        """
         if not self.memory.enabled or turn.prompt.startswith("/") or runtime.record.kind != "session":
             return
         if not turn.files_touched and turn.tool_count < 3:
             return
-        summary = f"Request: {turn.prompt[:400]}\nOutcome ({status}): {turn.reply()[:600] or 'no final reply'}"
+        task = asyncio.create_task(self._digest(runtime, turn, status))
+        self._digests.add(task)
+        task.add_done_callback(self._digests.discard)
+
+    async def _digest(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
+        from .memory.digest import digest_turn
+
         try:
-            await self.memory.checkpoint(
-                Path(runtime.record.workspace),
-                summary=summary,
-                status="completed" if status == "finished" else "paused",
-                files_touched=turn.files_touched,
-            )
-            runtime.emit("MemoryCheckpoint", {"saved": True, "files_touched": turn.files_touched})
+            result = await digest_turn(self.memory, Path(runtime.record.workspace), turn, status, settings=self.settings.get(), api_key=self.api_key())
+            runtime.emit("MemoryCheckpoint", {"saved": True, "files_touched": turn.files_touched, **result})
         except Exception as error:  # noqa: BLE001
             logger.info("turn checkpoint skipped: %s", error)
+
+    async def _close_digests(self) -> None:
+        for task in list(self._digests):
+            task.cancel()
+        await asyncio.gather(*self._digests, return_exceptions=True)
 
     async def close(self) -> None:
         for closer in self.closers:

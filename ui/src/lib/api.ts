@@ -1,20 +1,26 @@
 import type {
-  BusState,
+  Checkpoint,
+  Connections,
+  DeviceFlow,
   Flow,
   FlowReview,
   Health,
-  Issue,
+  KeikiStatus,
   LearnedSkill,
   LearningCandidate,
   Me,
   MemoryItem,
   ModelInfo,
+  McpServerInfo,
+  PluginCatalog,
   ProcessInfo,
+  RollbackResult,
+  Schedule,
+  ScheduleMode,
+  SearchHit,
   Session,
   Settings,
-  Squad,
-  SquadMember,
-  TeamCollaborator,
+  SlackStatus,
   TrustEntry,
   WireEvent,
 } from "./types.ts";
@@ -84,6 +90,8 @@ export const api = {
     request<{ git: boolean; branch: string; files: { path: string; status: string }[]; diff: string }>(`/api/workspace/changes?${q({ path: workspace })}`),
   dirs: (path?: string) =>
     request<{ path: string; parent: string | null; git: boolean; entries: { name: string; path: string; git: boolean }[] }>(`/api/fs/dirs${path ? `?${q({ path })}` : ""}`),
+  /** The host's native folder dialog (local mode on macOS); null when the owner cancels. */
+  pickFolder: (start?: string) => post<{ path: string | null }>("/api/fs/pick", { start: start ?? "" }),
   workspaces: () => request<{ workspaces: { name: string; path: string; scope: "personal" | "shared" }[]; personal: { name: string; path: string; scope: "personal" }[]; shared: { name: string; path: string; scope: "shared" }[] }>("/api/workspaces"),
   createWorkspace: (name: string, gitUrl = "", scope = "personal") => post<{ path: string; scope: string; name: string }>("/api/workspaces", { name, git_url: gitUrl, scope }),
   deleteWorkspace: (path: string) => request<{ ok: boolean }>(`/api/workspaces?${q({ path })}`, { method: "DELETE" }),
@@ -109,85 +117,45 @@ export const api = {
   flowApply: (id: string, sha: string) => post<Flow>(`/api/flows/${id}/apply`, { review_sha256: sha }),
   flowRollback: (id: string, commit: string) => post<Flow>(`/api/flows/${id}/rollback`, { applied_commit: commit }),
 
-  // ── Squads, Issues, and Engram Bus ──
-  squads: () => request<{ squads: Squad[] }>("/api/squads"),
-  squad: (id: string) => request<{ squad: Squad }>(`/api/squads/${id}`),
-  createSquad: (body: { name: string; description?: string; lead_agent_id?: string; members?: SquadMember[] }) =>
-    post<{ squad: Squad }>("/api/squads", body),
-  addSquadMember: (squadId: string, member: { user_name: string; user_id?: string; role?: string }) =>
-    post<{ squad: Squad }>(`/api/squads/${squadId}/members`, member),
-  removeSquadMember: (squadId: string, userId: string) =>
-    request<{ squad: Squad }>(`/api/squads/${squadId}/members/${encodeURIComponent(userId)}`, { method: "DELETE" }),
-  issues: (params?: { squad_id?: string; workspace_scope?: string; status?: string }) => {
-    const clean: Record<string, string> = {};
-    if (params?.squad_id) clean.squad_id = params.squad_id;
-    if (params?.workspace_scope) clean.workspace_scope = params.workspace_scope;
-    if (params?.status) clean.status = params.status;
-    const search = Object.keys(clean).length ? `?${q(clean)}` : "";
-    return request<{ issues: Issue[] }>(`/api/issues${search}`);
-  },
-  issue: (id: string) => request<{ issue: Issue }>(`/api/issues/${id}`),
-  createIssue: (body: Partial<Issue>) => post<{ issue: Issue }>("/api/issues", body),
-  updateIssue: (id: string, changes: Partial<Issue>) =>
-    request<{ issue: Issue }>(`/api/issues/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
-  dispatchIssue: (id: string, target_agent?: string) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/dispatch`, { target_agent }),
-  submitIssueReview: (id: string, body: { diff: string; verification_output?: string; passed?: boolean }) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/review`, body),
-  approveIssue: (id: string) => post<{ issue: Issue }>(`/api/issues/${id}/approve`),
-  rejectIssue: (id: string, feedback: string) => post<{ issue: Issue }>(`/api/issues/${id}/reject`, { feedback }),
-  addIssueComment: (id: string, content: string, author_type: "human" | "agent" = "human", author_id?: string) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/comments`, { content, author_type, author_id }),
-  sendIssueMessage: (
-    id: string,
-    message: {
-      content: string;
-      sender_id: string;
-      sender_name: string;
-      sender_type: "human" | "agent";
-      agent_name: string;
-      recipient: string;
-      action_type?: string;
-      files_mentioned?: string[];
-    }
-  ) => post<{ issue: Issue }>(`/api/issues/${id}/messages`, message),
-  updateIssueCollaborators: (id: string, collaborators: TeamCollaborator[]) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/collaborators`, { collaborators }),
-  claimIssueLease: (id: string, filePath: string, agentName: string) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/leases/claim`, { file_path: filePath, agent_name: agentName }),
-  releaseIssueLease: (id: string, filePath: string) =>
-    post<{ issue: Issue }>(`/api/issues/${id}/leases/release`, { file_path: filePath }),
-  sendAgentPulse: (
-    id: string,
-    pulse: {
-      agent_name: string;
-      user_name: string;
-      activity: string;
-      status?: string;
-      active_file?: string;
-      last_tool?: string;
-      phase?: string;
-      output_snippet?: string;
-    }
-  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/pulse`, pulse),
-  triggerAgentStep: (
-    id: string,
-    payload?: {
-      agent_name?: string;
-      user_name?: string;
-    }
-  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/step`, payload || {}),
-  startAutonomousDiscussion: (
-    id: string,
-    payload: {
-      topic: string;
-      agent_a?: string;
-      user_a?: string;
-      agent_b?: string;
-      user_b?: string;
-    }
-  ) => post<{ issue: Issue }>(`/api/issues/${id}/bridge/discuss`, payload),
-  busState: () => request<BusState>("/api/squads/bus/state"),
+  // ── Checkpoints ──
+  checkpoints: (id: string) => request<{ checkpoints: Checkpoint[]; disabled: string }>(`/api/sessions/${id}/checkpoints`),
+  checkpointChanges: (id: string, checkpoint: string) => request<{ changes: { path: string; status: string }[] }>(`/api/sessions/${id}/checkpoints/${checkpoint}/changes`),
+  rollback: (id: string, checkpoint = "") => post<RollbackResult>(`/api/sessions/${id}/rollback`, { checkpoint }),
+
+  // ── Connections ──
+  connections: () => request<Connections>("/api/connections"),
+  githubToken: (token: string) => request<{ login: string }>("/api/connections/github", { method: "PUT", body: JSON.stringify({ token }) }),
+  githubDevice: () => post<DeviceFlow>("/api/connections/github/device"),
+  githubDevicePoll: (device_code: string) => post<{ pending: boolean; login?: string }>("/api/connections/github/device/poll", { device_code }),
+  githubDisconnect: () => request<{ removed: boolean }>("/api/connections/github", { method: "DELETE" }),
+  googleStart: () => post<{ url: string }>("/api/connections/google/start"),
+  googleDisconnect: () => request<{ removed: boolean }>("/api/connections/google", { method: "DELETE" }),
+  slack: () => request<SlackStatus>("/api/slack"),
+  slackManifest: () => request<Record<string, unknown>>("/api/slack/manifest"),
+  slackConnect: (bot_token: string, app_token: string) => request<SlackStatus>("/api/slack", { method: "PUT", body: JSON.stringify({ bot_token, app_token }) }),
+  slackDisconnect: () => request<SlackStatus>("/api/slack", { method: "DELETE" }),
+  keiki: () => request<KeikiStatus>("/api/keiki"),
+  keikiConnect: (api_key: string) => request<KeikiStatus>("/api/keiki", { method: "PUT", body: JSON.stringify({ api_key }) }),
+  keikiDisconnect: () => request<KeikiStatus>("/api/keiki", { method: "DELETE" }),
+
+  // ── History and schedules ──
+  search: (query: string) => request<{ results: SearchHit[] }>(`/api/search?${q({ q: query })}`),
+  schedules: () => request<{ schedules: Schedule[]; modes: ScheduleMode[] }>("/api/schedules"),
+  createSchedule: (body: { name: string; workspace: string; prompt: string; when: string; mode: ScheduleMode }) => post<Schedule>("/api/schedules", body),
+  updateSchedule: (id: string, changes: Partial<Pick<Schedule, "name" | "prompt" | "when" | "mode" | "enabled" | "workspace">>) =>
+    request<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
+  deleteSchedule: (id: string) => request<{ removed: boolean }>(`/api/schedules/${id}`, { method: "DELETE" }),
+  runSchedule: (id: string) => post<{ session: string }>(`/api/schedules/${id}/run`),
+
+  // ── Plugins and produced files ──
+  plugins: () => request<PluginCatalog>("/api/plugins"),
+  switchPlugin: (id: string, enabled: boolean) => request<{ id: string; enabled: boolean }>(`/api/plugins/${id}`, { method: "PUT", body: JSON.stringify({ enabled }) }),
+  toolboxPackages: () => request<{ packages: { name: string; version: string }[] }>("/api/plugins/toolbox/packages"),
+  saveMcp: (name: string, server: { command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled?: boolean }) =>
+    request<{ mcp: McpServerInfo[] }>(`/api/plugins/mcp/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(server) }),
+  deleteMcp: (name: string) => request<{ mcp: McpServerInfo[] }>(`/api/plugins/mcp/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  fileUrl: (sessionId: string, path: string, scope: "scratch" | "workspace", download = false) =>
+    `/api/sessions/${sessionId}/file?${q({ path, scope, ...(download ? { download: "1" } : {}) })}`,
 };
 
 

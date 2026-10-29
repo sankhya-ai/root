@@ -140,14 +140,16 @@ def _detect_git_facts(root: Path) -> dict[str, Any]:
             cwd=str(root),
             stderr=subprocess.DEVNULL,
             timeout=1.0,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).strip()
         status_out = subprocess.check_output(
             ["git", "status", "--porcelain"],
             cwd=str(root),
             stderr=subprocess.DEVNULL,
             timeout=1.0,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).strip()
         dirty_count = len(status_out.splitlines()) if status_out else 0
         return {"branch": branch, "dirty_count": dirty_count}

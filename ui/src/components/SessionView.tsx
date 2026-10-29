@@ -1,4 +1,4 @@
-import { Brain, Compass, Cpu, FileDiff, FileText, FlaskConical, ListTodo, PanelRight, Shield, ShieldCheck, WifiOff, X } from "lucide-react";
+import { Brain, Compass, Cpu, FileDiff, FileText, FlaskConical, ListTodo, PanelRight, Shield, SquareTerminal, WifiOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api.ts";
@@ -6,8 +6,10 @@ import { useSession } from "../lib/useSession.ts";
 import type { Attachment, Health, PermissionMode, Session, SlashCommand } from "../lib/types.ts";
 import { Composer } from "./Composer.tsx";
 import { Inspector, type InspectorTab } from "./inspector/Inspector.tsx";
+import { TerminalDrawer } from "./TerminalDrawer.tsx";
 import { MODE_ORDER, ModeMenu } from "./ModeMenu.tsx";
 import { Transcript } from "./Transcript.tsx";
+import { shortcut } from "../lib/keys.ts";
 
 const DEFAULT_COMMANDS: SlashCommand[] = [
   { name: "verify", description: "Run automated tests & verification suite", aliases: ["test"] },
@@ -98,9 +100,11 @@ export function SessionView({
   const handle = useSession(sessionId, onSessionChange);
   const { transcript, session, connection, error } = handle;
   const [tab, setTab] = useState<InspectorTab>("changes");
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [files, setFiles] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [injected, setInjected] = useState<{ text: string; n: number } | null>(null);
+  const [restoreError, setRestoreError] = useState("");
   const turnsSeen = useRef(0);
   const sentInitial = useRef(false);
 
@@ -137,6 +141,13 @@ export function SessionView({
   // Esc: reject a waiting approval, else stop the turn. Shift+Tab: cycle modes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setTerminalOpen((open) => !open);
+        return;
+      }
+      // Keys typed in the terminal are the shell's (Esc in vim must not reject an approval).
+      if (e.target instanceof Element && e.target.closest(".terminalPanel")) return;
       if (e.key === "Escape" && !document.querySelector(".backdrop")) {
         const waiting = [...transcript.pending.values()][0];
         if (waiting) {
@@ -156,7 +167,9 @@ export function SessionView({
     return () => window.removeEventListener("keydown", onKey);
   }, [transcript, handle, session, setMode]);
 
-  const send = (text: string, attachments: Attachment[]) => handle.send(text, attachments);
+  // During a turn a message waits its turn, as in Codex; Esc still stops the run.
+  const send = (text: string, attachments: Attachment[]) => (transcript.running ? handle.queue(text, attachments) : handle.send(text, attachments));
+  const queued = session?.queued ?? [];
   const approvePlan = () => {
     setMode("accept_edits");
     handle.send("The plan is approved. Implement it now, then verify the result.", []);
@@ -253,7 +266,10 @@ export function SessionView({
               {Math.round(context * 100)}%
             </span>
           ) : null}
-          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files, plan, memory, processes">
+          <button className={`iconButton${terminalOpen ? " on" : ""}`} onClick={() => setTerminalOpen((open) => !open)} title={`Terminal (${shortcut("J")})`} aria-label="Terminal">
+            <SquareTerminal size={17} />
+          </button>
+          <button className={`iconButton${inspectorOpen ? " on" : ""}`} onClick={onToggleInspector} title="Changes, files and plan">
             <PanelRight size={17} />
           </button>
         </header>
@@ -279,6 +295,14 @@ export function SessionView({
             </button>
           </div>
         ) : null}
+        {restoreError ? (
+          <div className="banner error">
+            <span className="grow">{restoreError}</span>
+            <button className="iconButton" onClick={() => setRestoreError("")} aria-label="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        ) : null}
         <Transcript
           state={transcript}
           workspace={workspace}
@@ -288,46 +312,41 @@ export function SessionView({
           onLoadEarlier={() => void handle.loadEarlier()}
           planMode={session?.permission_mode === "plan"}
           onApprovePlan={approvePlan}
+          fileUrl={(file, download) => api.fileUrl(sessionId, file.path, file.scope, download)}
+          onRestore={(checkpoint) => {
+            api.rollback(sessionId, checkpoint).catch((e: Error) => setRestoreError(e.message));
+          }}
         />
         <div className="composerWrap">
           <div className="column">
-            {turnEnds > 0 && !transcript.running ? (
-              <div className="composerQuickActions">
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "Run verification tests and check results.", n: Date.now() })}
-                  title="Run tests and automated checks"
-                >
-                  <FlaskConical size={12} className="icon-green" /> Run tests
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => {
-                    setTab("changes");
-                    if (!inspectorOpen) onToggleInspector();
-                  }}
-                  title="Inspect changes diff"
-                >
-                  <FileDiff size={12} className="icon-gold" /> Diff
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "/plan ", n: Date.now() })}
-                  title="Propose next plan"
-                >
-                  <ListTodo size={12} className="icon-blue" /> Plan next
-                </button>
-                <button
-                  type="button"
-                  className="quickActionChip"
-                  onClick={() => setInjected({ text: "Review recent changes for edge cases or bugs.", n: Date.now() })}
-                  title="Review for bugs"
-                >
-                  <ShieldCheck size={12} className="icon-red" /> Review
-                </button>
+            {queued.length ? (
+              <div className="queued">
+                {queued.map((item, i) => (
+                  <div key={item.id} className="queuedItem">
+                    <span className="faint small">{i === 0 && !transcript.running ? "Paused" : "Queued"}</span>
+                    <span className="queuedText" title={item.text}>
+                      {item.text || `${item.attachments} file${item.attachments === 1 ? "" : "s"}`}
+                    </span>
+                    {!transcript.running ? (
+                      <button className="pill small" onClick={() => handle.sendQueued(item.id)} title="Send this now">
+                        Send
+                      </button>
+                    ) : null}
+                    <button
+                      className="pill small"
+                      onClick={() => {
+                        handle.unqueue(item.id);
+                        setInjected({ text: item.text, n: Date.now() });
+                      }}
+                      title="Take it back into the composer"
+                    >
+                      Edit
+                    </button>
+                    <button className="iconButton" onClick={() => handle.unqueue(item.id)} title="Remove" aria-label="Remove queued message">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
               </div>
             ) : null}
             <ComposerWithInjection
@@ -335,7 +354,7 @@ export function SessionView({
               injected={injected}
               running={transcript.running}
               disabled={!session || connection !== "open"}
-              placeholder={transcript.running ? "Working… (Esc to stop)" : "Ask root to change, fix, or explain something"}
+              placeholder={transcript.running ? "Working… Enter queues a message for after this turn · Esc stops" : "Ask root to change, fix, or explain something"}
               slashCommands={slashCommands}
               files={files}
               onSend={send}
@@ -354,6 +373,7 @@ export function SessionView({
             />
           </div>
         </div>
+        <TerminalDrawer sessionId={sessionId} open={terminalOpen} onClose={() => setTerminalOpen(false)} />
       </main>
       {inspectorOpen && session ? (
         <Inspector
@@ -363,7 +383,6 @@ export function SessionView({
           workspace={workspace}
           session={session}
           todos={transcript.todos}
-          processes={[...transcript.processes.values()]}
           refreshKey={refreshKey}
           files={files}
           onMention={(path) => setInjected({ text: `@${path} `, n: Date.now() })}

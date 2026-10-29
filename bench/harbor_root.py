@@ -98,7 +98,7 @@ class Root(KimiCli):
                     "base_url": self.options.base_url or "https://openrouter.ai/api/v1",
                     "api_key": "__ROOT_API_KEY__",
                     "prompt_cache": True,
-                    "custom_headers": {"HTTP-Referer": "https://github.com/tura-learn/root", "X-Title": "root"},
+                    "custom_headers": {"HTTP-Referer": "https://github.com/sankhya-ai/root", "X-Title": "root"},
                 }
             },
             "models": {"main": {"provider": "openrouter", "model": model, "max_context_size": 200_000, "capabilities": []}},

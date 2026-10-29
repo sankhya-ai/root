@@ -14,6 +14,7 @@ until the runtime stops.
 
 from __future__ import annotations
 
+import json
 import secrets
 from dataclasses import dataclass
 from typing import Callable
@@ -34,6 +35,45 @@ class Grant:
     #: Returns (upstream base URL such as https://openrouter.ai/api/v1, key).
     resolve: Callable[[], tuple[str, str]]
     requests: int = 0
+    #: Models OpenRouter falls back to, in order, when the chosen one fails or is down.
+    fallbacks: Callable[[], list[str]] | None = None
+
+
+def with_fallbacks(body: bytes, fallbacks: list[str]) -> bytes:
+    """A chat request with OpenRouter's ``models`` failover list, unless it already names one."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(data, dict) or "models" in data or not data.get("model"):
+        return body
+    chain = [data["model"], *[m for m in fallbacks if m and m != data["model"]]]
+    if len(chain) < 2:
+        return body
+    data["models"] = chain
+    return json.dumps(data).encode()
+
+
+def with_reasoning_echo(body: bytes) -> bytes:
+    """A chat request in which every assistant tool call carries ``reasoning_content``.
+
+    DeepSeek in thinking mode rejects the whole history when one lacks it ("The
+    `reasoning_content` in the thinking mode must be passed back"), and a step
+    that reasoned nothing stores none; an empty one is accepted.
+    """
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body
+    messages = data.get("messages") if isinstance(data, dict) else None
+    if not isinstance(messages, list):
+        return body
+    changed = False
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("tool_calls") and not any(k in message for k in ("reasoning_content", "reasoning", "reasoning_details")):
+            message["reasoning_content"] = ""
+            changed = True
+    return json.dumps(data).encode() if changed else body
 
 
 class LLMProxy:
@@ -47,11 +87,11 @@ class LLMProxy:
     def enabled(self) -> bool:
         return self.base is not None
 
-    def issue(self, tenant_id: str, session_id: str, resolve: Callable[[], tuple[str, str]]) -> tuple[str, str]:
+    def issue(self, tenant_id: str, session_id: str, resolve: Callable[[], tuple[str, str]], fallbacks: Callable[[], list[str]] | None = None) -> tuple[str, str]:
         """A (base URL, token) pair for one runtime launch."""
         assert self.base is not None
         token = f"root-{secrets.token_urlsafe(24)}"
-        self._grants[token] = Grant(tenant_id, session_id, resolve)
+        self._grants[token] = Grant(tenant_id, session_id, resolve, fallbacks=fallbacks)
         return f"{self.base}{PREFIX}/v1", token
 
     def revoke(self, token: str) -> None:
@@ -82,12 +122,18 @@ class LLMProxy:
         headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARD_HEADERS}
         headers["authorization"] = f"Bearer {key}"
         grant.requests += 1
+        body = await request.body()
+        if request.method == "POST" and path.endswith("chat/completions"):
+            if "openrouter.ai" not in root:
+                body = with_reasoning_echo(body)
+            elif grant.fallbacks is not None:
+                body = with_fallbacks(body, grant.fallbacks())
         upstream = self._http().build_request(
             request.method,
             f"{root}/{path}",
             params=request.query_params,
             headers=headers,
-            content=await request.body(),
+            content=body,
         )
         response = await self._http().send(upstream, stream=True)
         passthrough = {k: v for k, v in response.headers.items() if k.lower() in ("content-type", "cache-control")}

@@ -8,6 +8,7 @@ use kosong::tooling::error::tool_runtime_error;
 use kosong::tooling::{CallableTool2, DisplayBlock, ShellDisplayBlock, ToolReturnValue};
 
 use crate::soul::approval::Approval;
+use crate::tools::persistent_shell::{Dialect, Outcome, PersistentShell};
 use crate::tools::utils::{ToolResultBuilder, load_desc, tool_rejected_error};
 
 const DEFAULT_TIMEOUT: i64 = 60;
@@ -38,6 +39,8 @@ pub struct Shell {
     shell_path: KaosPath,
     is_powershell: bool,
     work_dir: KaosPath,
+    /// PowerShell (Windows) is kept open between calls: see `persistent_shell`.
+    persistent: Option<PersistentShell>,
 }
 
 impl Shell {
@@ -52,13 +55,36 @@ impl Shell {
         };
         let desc = load_desc(template, &[("SHELL", shell_label)]);
 
+        let work_dir = runtime.builtin_args.KIMI_WORK_DIR.clone();
+        let persistent = is_powershell.then(|| {
+            PersistentShell::new(
+                environment.shell_path.to_string_lossy(),
+                Dialect::PowerShell,
+                std::path::PathBuf::from(work_dir.to_string_lossy()),
+            )
+        });
         Self {
             description: desc,
             approval: runtime.approval.clone(),
             shell_path: environment.shell_path,
             is_powershell,
-            work_dir: runtime.builtin_args.KIMI_WORK_DIR.clone(),
+            work_dir,
+            persistent,
         }
+    }
+
+    /// Run in the agent's PowerShell session, anchored to the work dir like every call.
+    async fn run_persistent(&self, shell: &PersistentShell, command: &str, timeout: i64) -> ToolReturnValue {
+        let anchored = format!(
+            "Set-Location -LiteralPath '{}'\n{}",
+            self.work_dir.to_string_lossy().replace('\'', "''"),
+            command
+        );
+        let outcome = match shell.run(&anchored, Duration::from_secs(timeout as u64)).await {
+            Ok(outcome) => outcome,
+            Err(err) => return tool_runtime_error(&err.to_string()),
+        };
+        persistent_result(outcome, timeout)
     }
 
     async fn read_stream(
@@ -201,6 +227,10 @@ impl CallableTool2 for Shell {
             return tool_rejected_error();
         }
 
+        if let Some(shell) = &self.persistent {
+            return self.run_persistent(shell, &params.command, params.timeout).await;
+        }
+
         let args = self.shell_args(&params.command);
         let mut process = match kaos::exec(&args).await {
             Ok(process) => process,
@@ -258,5 +288,27 @@ impl CallableTool2 for Shell {
                 )
             }
         }
+    }
+}
+
+fn persistent_result(outcome: Outcome, timeout: i64) -> ToolReturnValue {
+    let mut builder = ToolResultBuilder::default();
+    builder.write(&outcome.output);
+    if outcome.timed_out {
+        return builder.error(
+            &format!("Command killed by timeout ({timeout}s). The PowerShell session was reset: variables and functions from earlier commands are gone."),
+            &format!("Killed by timeout ({timeout}s)"),
+        );
+    }
+    match outcome.exit_code {
+        Some(0) => builder.ok("Command executed successfully.", ""),
+        Some(code) => builder.error(
+            &format!("Command failed with exit code: {code}."),
+            &format!("Failed with exit code: {code}"),
+        ),
+        None => builder.ok(
+            "The PowerShell session ended; the next command starts a fresh one.",
+            "Session ended",
+        ),
     }
 }

@@ -7,7 +7,10 @@ import time
 
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
-pytestmark = requires_runtime
+import pytest
+
+# POSIX commands and liveness checks; test_windows.py runs the Windows equivalents.
+pytestmark = [requires_runtime, pytest.mark.skipif(os.name == "nt", reason="POSIX commands; see test_windows.py")]
 
 INTERACTIVE = "echo ready; read line; echo got:$line; sleep 30"
 
@@ -120,3 +123,30 @@ def test_deleting_a_session_kills_its_processes(client, workspace, script):
     assert _alive(pid)
     assert client.delete(f"/api/sessions/{session_id}").json() == {"ok": True}
     assert not _alive(pid)
+
+
+def test_cancelling_a_turn_stops_its_wait_but_not_the_process(client, workspace, script):
+    import time
+
+    script([
+        tool_call("s", "process", {"action": "start", "command": "sleep 120"}),
+        tool_call("w", "process", {"action": "wait", "process_id": "p1", "timeout": 600}),
+        text("unreachable"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    client.patch(f"/api/sessions/{session_id}", json={"permission_mode": "yolo"})
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "prompt", "text": "start it and wait"})
+        while True:
+            message = ws.receive_json()
+            if message["type"] == "event" and message["event"]["type"] == "ToolCall" and message["event"]["payload"]["id"] == "w":
+                time.sleep(0.5)  # the wait is under way
+                started = time.monotonic()
+                ws.send_json({"type": "cancel"})
+            if message["type"] == "event" and message["event"]["type"] == "TurnFinished":
+                break
+    assert time.monotonic() - started < 15, "the cancelled turn sat out its wait"
+    assert client.get(f"/api/sessions/{session_id}").json()["running"] is False
+    processes = client.get(f"/api/sessions/{session_id}/processes").json()["processes"]
+    assert [p["status"] for p in processes] == ["running"]  # a background process outlives the turn by design

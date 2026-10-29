@@ -157,17 +157,16 @@ where
     wire.shutdown();
     wire.join().await;
 
-    let shutdown = tokio::time::timeout(Duration::from_millis(500), async {
-        match ui_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {}
-            Err(_) => {}
-        }
-    })
-    .await;
+    let mut ui_task = ui_task;
+    let shutdown = tokio::time::timeout(Duration::from_millis(500), &mut ui_task).await;
     match shutdown {
         Ok(_) => debug!("UI loop shut down"),
-        Err(_) => warn!("UI loop timed out"),
+        Err(_) => {
+            // Still waiting on a request this run will never read the answer
+            // to (a cancelled turn's approval or host tool call): stop it.
+            warn!("UI loop timed out; aborting it");
+            ui_task.abort();
+        }
     }
 
     result

@@ -39,7 +39,7 @@ use crate::tools::utils::is_tool_rejected;
 use crate::utils::{SlashCommandInfo, parse_slash_command_call};
 use crate::wire::{
     ApprovalRequest, ApprovalResponse, CompactionBegin, CompactionEnd, StatusUpdate, StepBegin,
-    StepInterrupted, TurnBegin, TurnEnd, UserInput, WireMessage,
+    StepInterrupted, StepRetry, TurnBegin, TurnEnd, UserInput, WireMessage,
 };
 
 const SKILL_COMMAND_PREFIX: &str = "skill:";
@@ -399,6 +399,7 @@ impl KimiSoul {
             context_usage: Some(context_usage),
             token_usage: None,
             message_id: None,
+            retry: None,
         };
         wire_send(WireMessage::StatusUpdate(status));
     }
@@ -557,7 +558,7 @@ impl KimiSoul {
                 }
             };
 
-            stop_approval_task(approval_task).await;
+            approval_task.stop().await;
 
             if let Some(err) = step_error {
                 return Err(err);
@@ -683,21 +684,38 @@ impl KimiSoul {
                 }
                 Err(err) => {
                     drop(tool_rx);
-                    if owner_visible
-                        || attempts
-                            >= self.runtime.config.loop_control.max_retries_per_step as usize
-                        || !is_retryable_error(&err)
-                    {
+                    let Some(class) = retry_class(&err) else {
+                        return Err(anyhow::Error::new(err));
+                    };
+                    let max_attempts = match class {
+                        RetryClass::Provider => {
+                            self.runtime.config.loop_control.max_retries_per_step as usize
+                        }
+                        RetryClass::Model => MODEL_RETRY_ATTEMPTS
+                            .min(self.runtime.config.loop_control.max_retries_per_step as usize),
+                    };
+                    if owner_visible || attempts >= max_attempts {
                         return Err(anyhow::Error::new(err));
                     }
                     retry_hint = retry_hint_for_error(&err);
                     exhausted |= matches!(err.kind, ChatProviderErrorKind::EmptyResponse);
-                    let delay = retry_delay(attempts);
+                    let delay = retry_delay(class, attempts);
                     info!(
                         "Retrying step for the {} time. Waiting {} seconds.",
                         attempts,
                         delay.as_secs_f64()
                     );
+                    wire_send(WireMessage::StatusUpdate(StatusUpdate {
+                        context_usage: None,
+                        token_usage: None,
+                        message_id: None,
+                        retry: Some(StepRetry {
+                            attempt: attempts,
+                            max_attempts,
+                            delay_seconds: delay.as_secs_f64(),
+                            error: err.to_string().chars().take(300).collect(),
+                        }),
+                    }));
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -737,6 +755,7 @@ impl KimiSoul {
             context_usage: None,
             token_usage: usage.clone(),
             message_id: result.id.clone(),
+            retry: None,
         };
         if usage.is_some() {
             status.context_usage = Some(self.status().context_usage);
@@ -1062,12 +1081,13 @@ impl KimiSoul {
             match self.compaction.compact(&history, llm).await {
                 Ok(compacted) => break compacted,
                 Err(err) => {
-                    if attempts >= self.runtime.config.loop_control.max_retries_per_step as usize
-                        || !is_retryable_error(&err)
-                    {
+                    let Some(class) = retry_class(&err) else {
+                        return Err(anyhow::Error::new(err));
+                    };
+                    if attempts >= self.runtime.config.loop_control.max_retries_per_step as usize {
                         return Err(anyhow::Error::new(err));
                     }
-                    let delay = retry_delay(attempts);
+                    let delay = retry_delay(class, attempts);
                     info!(
                         "Retrying compaction for the {} time. Waiting {} seconds.",
                         attempts,
@@ -1525,11 +1545,16 @@ fn with_flow_args(mut parts: Vec<ContentPart>, flow_args: Option<&str>) -> Vec<C
     parts
 }
 
-async fn stop_approval_task(task: tokio::task::JoinHandle<()>) {
-    task.abort();
-    match task.await {
-        Ok(_) => {}
-        Err(err) => {
+/// The step's approval piping task, aborted when the step ends by any path.
+/// A cancelled turn drops the step mid-flight; a task left running would keep
+/// taking requests from the shared approval queue into that turn's dead wire,
+/// so a later turn's tool call waits forever on an approval nobody sees.
+struct ApprovalTask(tokio::task::JoinHandle<()>);
+
+impl ApprovalTask {
+    async fn stop(mut self) {
+        self.0.abort();
+        if let Err(err) = (&mut self.0).await {
             if !err.is_cancelled() {
                 error!("Approval piping task failed: {:?}", err);
             }
@@ -1537,8 +1562,14 @@ async fn stop_approval_task(task: tokio::task::JoinHandle<()>) {
     }
 }
 
-fn spawn_approval_task(approval: Arc<Approval>) -> tokio::task::JoinHandle<()> {
-    crate::soul::spawn_with_current_wire(async move {
+impl Drop for ApprovalTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_approval_task(approval: Arc<Approval>) -> ApprovalTask {
+    ApprovalTask(crate::soul::spawn_with_current_wire(async move {
         loop {
             let request = match approval.fetch_request().await {
                 Ok(req) => req,
@@ -1560,7 +1591,7 @@ fn spawn_approval_task(approval: Arc<Approval>) -> tokio::task::JoinHandle<()> {
                 response: resp,
             }));
         }
-    })
+    }))
 }
 
 fn forward_streamed_message_part(part: StreamedMessagePart) {
@@ -1589,11 +1620,43 @@ fn streamed_part_is_owner_visible(part: &StreamedMessagePart) -> bool {
     }
 }
 
-fn retry_delay(attempt: usize) -> Duration {
-    let base = 0.3 * 2f64.powi((attempt as i32).saturating_sub(1));
-    let capped = base.min(5.0);
-    let jitter: f64 = rand::rng().random_range(0.0..0.5);
-    Duration::from_secs_f64(capped + jitter)
+/// (root) Why a failed model call may be tried again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryClass {
+    /// The provider failed (connection, timeout, overload, 5xx): it usually
+    /// recovers, so wait it out with backoff up to `max_retries_per_step`.
+    Provider,
+    /// The model's reply was unusable (empty, malformed tool call): retry
+    /// quickly with a hint, but only a few times — more burns tokens.
+    Model,
+}
+
+/// Attempts for a `RetryClass::Model` failure (the first try included).
+const MODEL_RETRY_ATTEMPTS: usize = 3;
+
+fn retry_class(err: &ChatProviderError) -> Option<RetryClass> {
+    match err.kind {
+        ChatProviderErrorKind::Connection | ChatProviderErrorKind::Timeout => {
+            Some(RetryClass::Provider)
+        }
+        ChatProviderErrorKind::Status(code) => {
+            matches!(code, 408 | 429 | 500 | 502 | 503 | 504 | 529).then_some(RetryClass::Provider)
+        }
+        ChatProviderErrorKind::EmptyResponse | ChatProviderErrorKind::MalformedToolCall => {
+            Some(RetryClass::Model)
+        }
+        ChatProviderErrorKind::Other => None,
+    }
+}
+
+fn retry_delay(class: RetryClass, attempt: usize) -> Duration {
+    let (base, cap) = match class {
+        RetryClass::Provider => (2.0, 30.0),
+        RetryClass::Model => (0.3, 5.0),
+    };
+    let delay = (base * 2f64.powi((attempt as i32).saturating_sub(1))).min(cap);
+    let jitter: f64 = rand::rng().random_range(0.0..0.25);
+    Duration::from_secs_f64(delay * (1.0 + jitter))
 }
 
 fn retry_hint_for_error(err: &ChatProviderError) -> Option<Message> {
@@ -1609,20 +1672,50 @@ fn retry_hint_for_error(err: &ChatProviderError) -> Option<Message> {
     Some(Message::new(Role::User, vec![system(hint)]))
 }
 
-fn is_retryable_error(err: &ChatProviderError) -> bool {
-    match err.kind {
-        ChatProviderErrorKind::Connection
-        | ChatProviderErrorKind::Timeout
-        | ChatProviderErrorKind::EmptyResponse
-        | ChatProviderErrorKind::MalformedToolCall => true,
-        ChatProviderErrorKind::Status(code) => matches!(code, 429 | 500 | 502 | 503),
-        ChatProviderErrorKind::Other => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::Wire;
+
+    #[tokio::test]
+    async fn a_cancelled_step_leaves_no_task_taking_the_next_turns_approvals() {
+        let approval = Arc::new(Approval::new(false));
+
+        // A turn cancelled mid-step drops the step, approval task handle and all.
+        let dead = Arc::new(Wire::new(None));
+        let task = crate::soul::with_current_wire(Arc::clone(&dead), async {
+            spawn_approval_task(Arc::clone(&approval))
+        })
+        .await;
+        tokio::task::yield_now().await;
+        drop(task);
+        dead.shutdown();
+
+        // The next turn's approval request reaches that turn's own wire.
+        let live = Arc::new(Wire::new(None));
+        let ui = live.ui_side(false);
+        let _task = crate::soul::with_current_wire(Arc::clone(&live), async {
+            spawn_approval_task(Arc::clone(&approval))
+        })
+        .await;
+        let requester = Arc::clone(&approval);
+        tokio::spawn(crate::soul::toolset::with_current_tool_call(
+            kosong::message::ToolCall::new("call_1", "Shell"),
+            async move { requester.request("Shell", "run command", "git push", None).await },
+        ));
+
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let WireMessage::ApprovalRequest(request) = ui.receive().await.unwrap() {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the approval request reached the live turn");
+        assert_eq!(seen.tool_call_id, "call_1");
+    }
 
 
     #[test]
@@ -1652,6 +1745,25 @@ mod tests {
         assert!(text.contains("final visible answer"));
         assert!(text.contains("Do not end with private reasoning only"));
         assert!(!text.contains("Your previous generation returned reasoning only"));
+    }
+
+    #[test]
+    fn provider_failures_wait_out_an_outage_and_model_failures_stay_quick() {
+        let status = |code| ChatProviderError::new(ChatProviderErrorKind::Status(code), "x");
+        for code in [408, 429, 500, 502, 503, 504, 529] {
+            assert_eq!(retry_class(&status(code)), Some(RetryClass::Provider), "{code}");
+        }
+        for code in [400, 401, 402, 403, 404] {
+            assert_eq!(retry_class(&status(code)), None, "{code}");
+        }
+        let empty = ChatProviderError::new(ChatProviderErrorKind::EmptyResponse, "x");
+        assert_eq!(retry_class(&empty), Some(RetryClass::Model));
+
+        let secs = |class, attempt| retry_delay(class, attempt).as_secs_f64();
+        assert!((2.0..2.5).contains(&secs(RetryClass::Provider, 1)));
+        assert!((16.0..20.0).contains(&secs(RetryClass::Provider, 4)));
+        assert!((30.0..37.5).contains(&secs(RetryClass::Provider, 9)));
+        assert!(secs(RetryClass::Model, 2) < 1.0);
     }
 
     #[test]

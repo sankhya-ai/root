@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from .. import __version__, launcher
+from .. import __version__, launcher, workspace
 from ..tenancy import Tenant
 from ..trust import PROMOTE_AFTER, classify_command
 from .security import COOKIE
@@ -21,7 +21,8 @@ def router(app_state) -> APIRouter:
 
     @api.post("/auth/bootstrap")
     async def bootstrap(response: Response) -> dict:
-        if server.mode != "local":
+        # A root in the cloud (TURA_CODE_BOOTSTRAP=0) hands its token to no one: sign in with TURA_CODE_TOKEN.
+        if server.mode != "local" or os.environ.get("TURA_CODE_BOOTSTRAP", "1") == "0":
             raise HTTPException(403, "Sign in with your token.")
         response.set_cookie(COOKIE, auth.local_token, httponly=True, samesite="strict", path="/")
         return {"ok": True}
@@ -62,6 +63,10 @@ def router(app_state) -> APIRouter:
             "memory": server.gateway.status(),
             "api_key_set": key_set,
             "scripted": launcher.scripted(),
+            # Where root keeps everything (local only: a hosted server's layout is the operator's).
+            "data_dir": str(server.home) if server.mode == "local" and user else "",
+            # The host can show the native folder dialog (local mode on macOS).
+            "folder_picker": server.mode == "local" and workspace.folder_picker(),
         }
 
     @api.get("/settings")

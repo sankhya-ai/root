@@ -324,11 +324,12 @@
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
 }
+/* Left, at the tool lines' label column (their 16px icon + 8px gap). */
 .notice {
   color: var(--ink-faint);
   font-size: 12.5px;
-  margin: 10px 0;
-  text-align: center;
+  margin: 6px 0;
+  padding-left: 24px;
 }
 .notice.error {
   color: var(--err);

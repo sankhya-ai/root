@@ -34,7 +34,8 @@ def test_config_uses_the_openrouter_protocol_and_keeps_the_key_out_of_env(tmp_pa
     spec = _spec(tmp_path, capabilities=["image_in"])
     path = launcher.write_runtime_config(spec, tmp_path / "rt")
     config = json.loads(path.read_text())
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # no mode bits on Windows: the profile folder's ACL keeps it private
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
     provider = config["providers"]["openrouter"]
     assert provider["api_key"] == "sk-or-env"  # the environment wins
     assert config["models"]["main"]["provider"] == "openrouter"
@@ -60,7 +61,7 @@ def test_director_off_switches_decisions_off(tmp_path):
 def test_overlay_for_plan_mode_with_memory(tmp_path):
     spec = _spec(tmp_path, permission_mode="plan")
     overlay = launcher.write_agent_overlay(spec, tmp_path / "rt").read_text()
-    assert f'extend: "{launcher.base_agent_file()}"' in overlay
+    assert f"extend: {json.dumps(str(launcher.base_agent_file()))}" in overlay
     assert "context_continuity_tool: memory_checkpoint" in overlay
     assert "PLAN MODE" in overlay and "memory_recall" in overlay
     assert '"kimi_cli.tools.file:WriteFile"' in overlay
@@ -91,7 +92,8 @@ def test_settings_never_expose_the_key_and_blank_means_unchanged(tmp_path, monke
     assert settings.openrouter_api_key == "sk-or-v1-abcdefgh" and settings.model == "a/b"
     public = settings.public()
     assert public["openrouter_api_key"] == "" and public["api_key_set"] and public["api_key_hint"] == "…efgh"
-    assert oct((tmp_path / "settings.json").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct((tmp_path / "settings.json").stat().st_mode & 0o777) == "0o600"
     store.update({"clear_api_key": True})
     assert store.get().openrouter_api_key == ""
 
@@ -278,3 +280,75 @@ def test_user_mcp_config_is_passed_and_restarts_on_change(tmp_path):
 
     _os.utime(config, (1, 1))
     assert spec.fingerprint() != before
+
+
+def test_fallback_models_join_a_chat_request_once():
+    import json
+
+    from tura_code.llm_proxy import with_fallbacks
+
+    body = json.dumps({"model": "a/one", "messages": []}).encode()
+    assert json.loads(with_fallbacks(body, ["b/two", "a/one", "c/three"]))["models"] == ["a/one", "b/two", "c/three"]
+    assert with_fallbacks(body, []) == body
+    explicit = json.dumps({"model": "a/one", "models": ["x/y"]}).encode()
+    assert with_fallbacks(explicit, ["b/two"]) == explicit
+    assert with_fallbacks(b"not json", ["b/two"]) == b"not json"
+
+
+def test_every_assistant_tool_call_carries_reasoning_back():
+    import json
+
+    from tura_code.llm_proxy import with_reasoning_echo
+
+    call = [{"id": "c1", "type": "function", "function": {"name": "Shell", "arguments": "{}"}}]
+    body = json.dumps({"messages": [
+        {"role": "user", "content": "push it"},
+        {"role": "assistant", "content": "", "tool_calls": call},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        {"role": "assistant", "content": "", "tool_calls": call, "reasoning_content": "thought"},
+        {"role": "assistant", "content": "done"},
+    ]}).encode()
+    messages = json.loads(with_reasoning_echo(body))["messages"]
+    assert messages[1]["reasoning_content"] == ""
+    assert messages[3]["reasoning_content"] == "thought"
+    assert "reasoning_content" not in messages[4] and "reasoning_content" not in messages[0]
+    complete = json.dumps({"messages": [messages[3]]}).encode()
+    assert with_reasoning_echo(complete) == complete
+    assert with_reasoning_echo(b"not json") == b"not json"
+
+
+def test_one_root_per_data_directory(tmp_path):
+    import subprocess
+    import sys
+
+    from tura_code.instance import AlreadyRunning, claim
+
+    held = claim(tmp_path, "http://localhost:1111")
+    # A second process on the same folder is refused and told where the first one is.
+    probe = "import sys, pathlib; from tura_code.instance import claim\ntry:\n    claim(pathlib.Path(sys.argv[1]), 'x')\nexcept Exception as e:\n    print(e)"
+    out = subprocess.run([sys.executable, "-c", probe, str(tmp_path)], capture_output=True, text=True).stdout
+    assert "already running" in out and "http://localhost:1111" in out
+    held.close()
+    claim(tmp_path, "http://localhost:2222").close()  # released when its holder goes
+    assert AlreadyRunning
+
+
+def test_folder_dialog_returns_the_choice_or_none(client, tmp_path, monkeypatch):
+    from tura_code import workspace
+
+    import sys
+
+    chosen = tmp_path / "picked"
+    chosen.mkdir()
+    # A stand-in for the dialog: prints the choice, or exits 1 as a cancelled dialog does.
+    fake = "import os, sys\npick = os.environ.get('PICK')\nprint(pick + os.sep) if pick else sys.exit(1)\n"
+    monkeypatch.setattr(workspace, "picker_command", lambda begin: ([sys.executable, "-c", fake], None))
+    monkeypatch.setattr(workspace, "folder_picker", lambda: True)
+    assert client.get("/api/health").json()["folder_picker"] is True
+    monkeypatch.setenv("PICK", str(chosen))
+    assert client.post("/api/fs/pick", json={"start": str(tmp_path)}).json() == {"path": str(chosen)}
+    monkeypatch.delenv("PICK")
+    assert client.post("/api/fs/pick", json={}).json() == {"path": None}
+    monkeypatch.setattr(workspace, "folder_picker", lambda: False)
+    assert client.post("/api/fs/pick", json={}).status_code == 404
+    assert client.get("/api/health").json()["folder_picker"] is False

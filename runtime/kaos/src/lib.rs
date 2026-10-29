@@ -168,3 +168,14 @@ pub async fn mkdir(path: &KaosPath, parents: bool, exist_ok: bool) -> Result<()>
 pub async fn exec(args: &[String]) -> Result<Box<dyn KaosProcess>> {
     get_current_kaos().exec(args).await
 }
+
+/// Windows: start a console program without a console window of its own.
+/// The host starts the runtime hidden, without a console, so every console
+/// child (PowerShell, git, ripgrep, an MCP server) would otherwise open a
+/// window. A no-op elsewhere.
+pub fn no_window(command: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    #[cfg(not(windows))]
+    let _ = command;
+}

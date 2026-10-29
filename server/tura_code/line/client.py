@@ -194,7 +194,7 @@ class LineClient:
 
     def _load_cursor(self) -> int:
         try:
-            return int(json.loads(self.state_path.read_text())["cursor"]) if self.state_path else 0
+            return int(json.loads(self.state_path.read_text("utf-8"))["cursor"]) if self.state_path else 0
         except (OSError, ValueError, KeyError, TypeError):
             return 0
 
@@ -204,7 +204,7 @@ class LineClient:
         self.cursor = seq
         if self.state_path is not None:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps({"cursor": seq}))
+            self.state_path.write_text(json.dumps({"cursor": seq}), "utf-8")
 
     # ----- sending -------------------------------------------------------------------
 

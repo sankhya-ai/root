@@ -12,6 +12,9 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import hostos
+
+    hostos.configure_console()
     parser = argparse.ArgumentParser(prog="tura-code", description="root — a coding agent in your browser.")
     sub = parser.add_subparsers(dest="command")
     serve = sub.add_parser("serve", help="Run the server (default).")
@@ -70,6 +73,14 @@ def serve_command(args) -> int:
     import uvicorn
 
     from .app import create_app
+    from .instance import AlreadyRunning, claim
+    from .settings import data_dir
+
+    try:
+        lock = claim(data_dir(), f"http://{'localhost' if args.host in LOCAL_HOSTS else args.host}:{args.port}")  # noqa: F841 - held until exit
+    except AlreadyRunning as error:
+        print(str(error), file=sys.stderr)
+        return 3
 
     # Runtimes reach the LLM proxy on the loopback interface, whatever the public address.
     loopback = "[::1]" if args.host == "::1" else "127.0.0.1"

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
 from tura_code import trust
+
+# POSIX paths and commands; test_windows.py checks the same rules with Windows ones.
+posix_paths = pytest.mark.skipif(os.name == "nt", reason="POSIX paths; see test_windows.py")
 
 
 @pytest.mark.parametrize(
@@ -222,26 +227,31 @@ def _command(command: str) -> dict:
     return {"id": "r", "tool_call_id": "c", "sender": "Shell", "action": "run command", "description": command, "display": [{"type": "shell", "command": command}]}
 
 
-def test_reaching_outside_the_workspace_asks_in_every_mode(tmp_path):
+@posix_paths
+def test_reaching_outside_the_workspace_asks_unless_auto_approve_on_a_local_install(tmp_path):
     from tura_code.trust import TrustLedger, decide
 
     ws = tmp_path / "ws"
     ws.mkdir()
     ledger = TrustLedger(tmp_path / "trust.json")
     outside = f"cat {tmp_path}/other/notes.txt"
-    for mode in ("default", "accept_edits", "yolo"):
-        decision = decide(_command(outside), mode=mode, ledger=ledger, workspace=str(ws))
+    for mode, roam in (("default", True), ("accept_edits", True), ("yolo", False)):
+        decision = decide(_command(outside), mode=mode, ledger=ledger, workspace=str(ws), roam=roam)
         assert decision.response is None and decision.trust_info(ledger)["outside"].endswith("other/notes.txt"), mode
+    # Auto-approve all on the owner's own machine means it: no question, and no ledger promotion.
+    auto = decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), roam=True)
+    assert auto.response == "approve" and auto.promotable is False
     # Inside the workspace, and toolchain locations, nothing changes.
     assert decide(_command("pytest -q"), mode="yolo", ledger=ledger, workspace=str(ws)).response == "approve"
     assert decide(_command("cat /usr/include/stdio.h"), mode="default", ledger=ledger, workspace=str(ws)).response == "approve"
-    # "Allow for this session" covers that folder; an unattended run is refused.
+    # "Allow for this session" covers that folder; an unattended run is refused, roaming or not.
     grant = decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws)).key
     assert decide(_command(f"ls {tmp_path}/other"), mode="yolo", ledger=ledger, grants={grant}, workspace=str(ws)).response == "approve"
-    assert decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), ask_owner=False).response == "reject"
+    assert decide(_command(outside), mode="yolo", ledger=ledger, workspace=str(ws), ask_owner=False, roam=True).response == "reject"
 
 
-def test_reading_or_editing_an_outside_file_asks_even_in_auto_approve(tmp_path):
+@posix_paths
+def test_reading_or_editing_an_outside_file_asks_unless_auto_approve_on_a_local_install(tmp_path):
     from tura_code.trust import ACTION_EDIT_OUTSIDE, ACTION_READ_OUTSIDE, TrustLedger, decide
 
     ws = tmp_path / "ws"
@@ -251,10 +261,14 @@ def test_reading_or_editing_an_outside_file_asks_even_in_auto_approve(tmp_path):
     edit = {"id": "e", "sender": "WriteFile", "action": ACTION_EDIT_OUTSIDE, "description": f"Write file `{tmp_path}/x.py`"}
     assert decide(read, mode="yolo", ledger=ledger, workspace=str(ws)).response is None
     assert decide(edit, mode="yolo", ledger=ledger, workspace=str(ws)).response is None
+    assert decide(edit, mode="default", ledger=ledger, workspace=str(ws), roam=True).response is None
+    assert decide(read, mode="yolo", ledger=ledger, workspace=str(ws), roam=True).response == "approve"
+    assert decide(edit, mode="yolo", ledger=ledger, workspace=str(ws), roam=True).response == "approve"
     system = {**read, "description": "Read `/usr/include/stdio.h`"}
     assert decide(system, mode="default", ledger=ledger, workspace=str(ws)).response == "approve"
 
 
+@posix_paths
 def test_commands_are_read_for_the_paths_they_reach(tmp_path):
     from tura_code.trust.boundary import outside_paths
 
@@ -268,29 +282,26 @@ def test_commands_are_read_for_the_paths_they_reach(tmp_path):
         assert reach(fine) == [], fine
 
 
+@posix_paths
 @requires_runtime
-def test_auto_approve_still_asks_before_leaving_the_workspace(client, workspace, script, tmp_path):
+def test_auto_approve_on_a_local_install_reaches_outside_without_asking(client, workspace, script, tmp_path):
     secret = tmp_path / "elsewhere" / "notes.txt"
     secret.parent.mkdir()
-    secret.write_text("not this project's business\n")
+    secret.write_text("next door's notes\n")
     script([
         tool_call("r", "ReadFile", {"path": str(secret)}),
         tool_call("s", "Shell", {"command": f"cat {secret}"}),
-        tool_call("i", "ReadFile", {"path": "README.md"}),
         text("Done."),
     ])
     session = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
     client.patch(f"/api/sessions/{session}", json={"permission_mode": "yolo"})
-    events = []
     with client.websocket_connect(f"/api/sessions/{session}/ws") as ws:
         ws.receive_json()
-        # A refused call ends its turn, so each reach is its own turn.
-        for prompt in ("read the notes next door", "cat them then", "read the README"):
-            events += run_turn(ws, prompt, approve="reject")
-    asked = [e["payload"] for e in of_type(events, "ApprovalRequest")]
-    assert [a["sender"] for a in asked] == ["ReadFile", "Shell"]
-    assert all(a["trust"]["outside"].endswith("elsewhere/notes.txt") for a in asked)
+        events = run_turn(ws, "read the notes next door", approve=None)
+    assert of_type(events, "ApprovalRequest") == []
+    resolved = [e["payload"] for e in of_type(events, "ApprovalResolved")]
+    assert resolved and all(r["auto"] and r["response"] == "approve" for r in resolved)
     results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(events, "ToolResult")}
-    assert results["r"]["is_error"] and results["s"]["is_error"]
-    assert "not this project" not in str(results["r"]["output"]) + str(results["s"]["output"])
-    assert not results["i"]["is_error"]  # inside the workspace: no question asked
+    assert "next door's notes" in str(results["r"]["output"]) and "next door's notes" in str(results["s"]["output"])
+    # Nothing outside is promoted: a later session in a stricter mode asks again.
+    assert client.get("/api/sessions/" + session).json()["grants"] == []

@@ -549,6 +549,7 @@ async fn connect_mcp_client(config: &McpServerConfig) -> Result<McpClientHandle,
     let service = match config {
         McpServerConfig::Stdio(server) => {
             let command = Command::new(&server.command).configure(|cmd| {
+                kaos::no_window(cmd);
                 cmd.args(&server.args);
                 if let Some(env) = &server.env {
                     cmd.envs(env);

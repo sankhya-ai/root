@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .. import __version__, extensions, launcher
+from .. import __version__, extensions, launcher, maritime, terminal
 from ..pool import RuntimePool
 from ..sandbox import Sandbox
 from ..settings import data_dir
@@ -25,7 +25,6 @@ from . import routes_core, routes_sessions, routes_workspace
 from .security import COOKIE, PUBLIC_PATHS, Auth, host_ok, is_public_path
 
 logger = logging.getLogger(__name__)
-UI_DIST = launcher.REPO_ROOT / "ui" / "dist"
 
 
 class AppState:
@@ -68,6 +67,8 @@ def create_app(
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
+        if maritime.enabled() and request.url.path in maritime.ROUTES:
+            return await call_next(request)  # Maritime's front door: the VM is not reachable otherwise
         if not host_ok(request.headers.get("host")):
             return JSONResponse({"detail": "Host not allowed."}, status_code=403)
         path = request.url.path
@@ -79,9 +80,12 @@ def create_app(
             request.state.user = user
         return await call_next(request)
 
+    if maritime.enabled():
+        app.include_router(maritime.router(server))
     app.include_router(routes_core.router(state))
     app.include_router(routes_sessions.router(state))
     app.include_router(routes_workspace.router(state))
+    app.include_router(terminal.router(state))
     for router in extensions.routers(state):
         app.include_router(router)
 
@@ -93,14 +97,14 @@ def create_app(
     async def ui(rest: str):
         if rest.startswith("api/"):
             raise HTTPException(404)
-        if not UI_DIST.is_dir():
+        if not launcher.ui_dist().is_dir():
             return JSONResponse(
                 {"detail": "The UI is not built. Run `npm install && npm run build` in ui/, or use `npm run dev` there."},
                 status_code=404,
             )
-        candidate = (UI_DIST / rest).resolve()
-        if rest and candidate.is_file() and candidate.is_relative_to(UI_DIST.resolve()):
+        candidate = (launcher.ui_dist() / rest).resolve()
+        if rest and candidate.is_file() and candidate.is_relative_to(launcher.ui_dist().resolve()):
             return FileResponse(candidate)
-        return FileResponse(UI_DIST / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(launcher.ui_dist() / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
