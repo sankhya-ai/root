@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 def install(server: "Server") -> None:
     """Register every service's tenant extension and after-turn hook."""
-    from . import connections, documents, flows, history, keiki, learning, line, schedules, slack, toolbox
+    from . import connections, documents, driver, flows, history, keiki, learning, line, schedules, slack, toolbox
 
     learning.install(server)
     documents.install(server)
@@ -26,6 +26,7 @@ def install(server: "Server") -> None:
     line.install(server)
     slack.install(server)
     keiki.install(server)
+    driver.install(server)
 
 
 def routers(state) -> list:

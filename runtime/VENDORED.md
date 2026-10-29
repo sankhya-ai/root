@@ -121,6 +121,10 @@ Keep local changes small and listed here so upstream updates stay mergeable.
     the runtime starts on Windows (shells, ripgrep, MCP servers) gets
     `CREATE_NO_WINDOW`: the host runs it without a console, so each used to
     open a window. The tool description says the session persists.
+27. **A `mac-apps` built-in skill** (`kimi-agent/src/skills/mac-apps/`): how
+    to use the host's `mac_*` tools (root-driver) — look, act on an element
+    token, check — and what never to do unasked. Only a skill file; the tools
+    themselves are the host's (`server/tura_code/driver`).
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were

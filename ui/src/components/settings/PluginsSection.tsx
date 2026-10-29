@@ -3,7 +3,7 @@
 // its connection state. A row opens to show what it gives the agent and, for a
 // connection, how to connect it. The owner's MCP servers come last.
 
-import { AlarmClock, Brain, ChevronDown, ChevronRight, FileText, GitMerge, Github, Globe, Mail, MessageCircle, Plus, Search, Server, Slack, Terminal, Trash2 } from "lucide-react";
+import { AlarmClock, Brain, ChevronDown, ChevronRight, FileText, GitMerge, Github, Globe, Mail, MessageCircle, Monitor, Plus, Search, Server, Slack, Terminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api } from "../../lib/api.ts";
@@ -22,6 +22,7 @@ const ICONS: Record<string, ReactNode> = {
   brain: <Brain size={16} />,
   slack: <Slack size={16} />,
   message: <MessageCircle size={16} />,
+  monitor: <Monitor size={16} />,
 };
 
 function PluginRow({ icon, name, summary, right, children }: { icon: ReactNode; name: string; summary: string; right: ReactNode; children?: ReactNode }) {
