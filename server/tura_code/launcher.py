@@ -316,7 +316,7 @@ def runtime_config(spec: LaunchSpec) -> dict:
                 "base_url": base_url,
                 "api_key": key,
                 "prompt_cache": True,
-                "custom_headers": {"HTTP-Referer": "https://github.com/tura-learn/root", "X-Title": "root"},
+                "custom_headers": {"HTTP-Referer": "https://github.com/sankhya-ai/root", "X-Title": "root"},
             }
         }
         config["models"] = {

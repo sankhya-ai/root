@@ -1,6 +1,6 @@
 # Vendored runtime
 
-This is `subsystems/sankhya/third_party/kimi-agent-rs` from `tura-learn/tura`
+This is `subsystems/sankhya/third_party/kimi-agent-rs` from `sankhya-ai/tura`
 at commit `9bca303bb0d02f3189582ef72e17f488dacc984d`, copied without its
 `target/`, `.github/`, `_/` planning notes, and the `kimi-cli` submodule
 reference.

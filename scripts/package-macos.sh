@@ -27,7 +27,7 @@ version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/server/pyproject.toml")"
 build="${BUILD:-$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 1)}"
 bundle_id="${BUNDLE_ID:-ai.tura.root}"
 # One feed per architecture: these are separate builds, not a universal one.
-feed_url="${FEED_URL:-https://github.com/tura-learn/root/releases/latest/download/appcast-$(uname -m).xml}"
+feed_url="${FEED_URL:-https://github.com/sankhya-ai/root/releases/latest/download/appcast-$(uname -m).xml}"
 arch="$(uname -m)"
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 

@@ -91,9 +91,8 @@ Releases: a `v*` tag runs `.github/workflows/release.yml` — Apple silicon and 
 
 ### 1. Build
 ```bash
-git clone https://github.com/tura-learn/root.git
+git clone https://github.com/sankhya-ai/root.git
 cd root
-git checkout root-agentrouter    # or the branch you were given
 
 make build                       # if `python3` is 3.14 or older than 3.11: make build PYTHON=python3.12
 ```
@@ -136,8 +135,7 @@ To keep such a setup apart from your normal root, give it its own folder and por
 root runs natively on Windows 10 and 11 in your browser (there is no Windows app yet). You need [Git for Windows](https://git-scm.com/download/win), [Rust](https://rustup.rs) with the Visual Studio C++ build tools it asks for, Python 3.11–3.13 and Node.js 22+. In PowerShell:
 
 ```powershell
-git clone https://github.com/tura-learn/root.git; cd root
-git checkout root-agentrouter
+git clone https://github.com/sankhya-ai/root.git; cd root
 
 cargo build --release --manifest-path runtime/Cargo.toml --bin kimi-agent
 py -3.12 -m venv server\.venv
@@ -167,7 +165,7 @@ root answers in a chat when it is called — an @mention, a reply to it, or a di
 
 ```bash
 npm install -g maritime-cli && maritime login
-maritime create root --repo https://github.com/tura-learn/root      # private agent; never --public
+maritime create root --repo https://github.com/sankhya-ai/root      # private agent; never --public
 maritime env set root OPENROUTER_API_KEY=sk-or-… TURA_CODE_TOKEN=<a long random string> --reload
 maritime env set root KEIKI_API_KEY=… --reload                       # and/or SLACK_BOT_TOKEN=xoxb-… SLACK_APP_TOKEN=xapp-…
 maritime chat root "what can you do?"

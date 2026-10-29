@@ -78,7 +78,10 @@ def test_the_relay_can_route_but_not_read_alter_or_forge():
     invite = Invite.new("https://relay.example")
     assert Invite.parse(str(invite)) == invite and invite.line_id == Invite.parse(str(invite)).line_id
     body = invite.seal({"text": "hi"}, sender="a/x", to="@b", message_id="m1", reply_to=None)
-    assert "hi" not in body
+    # A sealed body is ciphertext: the plaintext survives only through the key.
+    # (The literal words can turn up by chance in random bytes; the whole
+    # message being in there cannot.)
+    assert json.dumps({"text": "hi"}) not in body
     assert invite.open(body, sender="a/x", to="@b", message_id="m1", reply_to=None) == {"text": "hi"}
     for changed in ({"sender": "c/x"}, {"to": "@c"}, {"message_id": "m2"}, {"reply_to": "m0"}):
         with pytest.raises(LineError):
