@@ -500,6 +500,11 @@ impl KimiSoul {
                 .council_budget
                 .check_token_budget()
                 .map_err(|reason| anyhow::Error::new(CouncilBudgetExceeded::new(reason)))?;
+            // The cost cap used to gate only subagent tasks and compaction; the main loop never stopped on it.
+            self.runtime
+                .council_budget
+                .check_cost_budget()
+                .map_err(|reason| anyhow::Error::new(CouncilBudgetExceeded::new(reason)))?;
             self.runtime
                 .council_budget
                 .check_wall_clock()
@@ -1790,4 +1795,4 @@ mod tests {
             }),
         ));
     }
-}
+        }
