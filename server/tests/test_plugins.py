@@ -11,7 +11,7 @@ from conftest import of_type, requires_runtime, run_turn, text, tool_call
 def test_the_catalog_lists_what_root_can_do(client):
     data = client.get("/api/plugins").json()
     ids = [p["id"] for p in data["plugins"]]
-    assert {"documents", "toolbox", "github", "gmail", "slack", "keiki", "driver", "history", "schedules", "flows", "web", "memory"} == set(ids)
+    assert {"documents", "toolbox", "github", "gmail", "slack", "keiki", "driver", "inspect", "history", "schedules", "flows", "web", "memory"} == set(ids)
     assert all(p["enabled"] for p in data["plugins"])
     assert data["mcp"] == []
 
