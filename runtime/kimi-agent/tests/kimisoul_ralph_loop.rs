@@ -854,6 +854,35 @@ async fn native_loop_keeps_final_answer_that_crosses_turn_cost_budget() {
 }
 
 #[tokio::test]
+async fn native_loop_stops_before_a_step_once_the_cost_budget_is_spent() {
+    // Regression: the cost cap was recorded but only gated subagent tasks and compaction, so the main loop kept
+    // calling the model after a turn had already spent its dollars.
+    let fixture = RuntimeFixture::new();
+    let mut runtime = fixture.runtime.clone();
+    let budget = CouncilBudget::with_cost_limit(8, 4, 1_000, std::time::Duration::from_secs(5), 0.05);
+    budget.record_cost_usd(0.06);
+    runtime.council_budget = Arc::new(budget);
+    let provider = SequenceChatProvider::new(vec![vec![
+        ContentPart::Text(TextPart::new("must never be generated")).into(),
+    ]]);
+    let llm = make_llm_with_provider(provider, HashSet::new());
+    let tmp = TempDir::new().expect("temp dir");
+    let soul = make_soul(runtime, llm, KimiToolset::new(), tmp.path());
+
+    let result = run_soul(
+        &soul,
+        UserInput::Text("do it".to_string()),
+        |_wire| async { Ok(()) },
+        CancellationToken::new(),
+        None,
+    )
+    .await;
+
+    let error = result.expect_err("a spent cost budget must stop the loop before the model step");
+    assert!(format!("{error:#}").contains(COST_BUDGET_EXHAUSTED), "unexpected error: {error:#}");
+}
+
+#[tokio::test]
 async fn native_loop_interrupts_model_step_at_shared_wall_clock_deadline() {
     let fixture = RuntimeFixture::new();
     let mut runtime = fixture.runtime.clone();
