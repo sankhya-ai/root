@@ -86,6 +86,11 @@ class Settings(BaseModel):
     flow_max_candidates: int = Field(default=1, ge=1, le=3)
     # Plugins the owner switched off (``plugins``): the agent gets none of their tools.
     disabled_plugins: list[str] = Field(default_factory=list)
+    # Dynamic tool catalogue (``catalogue``): documents, GitHub, Gmail, schedules, history and Mac-app
+    # tools are found on demand instead of listed at start. Off by default; savings are unmeasured.
+    dynamic_tools: bool = False
+    # Host-set allow-list of tool name patterns (fnmatch) for every call, listed or discovered. Empty = no limit.
+    tool_scope: list[str] = Field(default_factory=list)
     learning_model: str = ""
     default_permission_mode: PermissionMode = "default"
     recent_workspaces: list[str] = Field(default_factory=list)
