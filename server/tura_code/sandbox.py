@@ -14,6 +14,20 @@ coding-flow check — runs under `bubblewrap <https://github.com/containers/bubb
   the host's LLM proxy — the real API key never enters the jail, see
   ``llm_proxy``) and the web.
 
+Two network modes (``Bubblewrap(network=...)``):
+
+* shared (default, and what hosted mode uses): the jail sees the host's network, so any service on the host's loopback
+  (the owner API, whose bootstrap hands out the owner token, a database admin page) is reachable from code in the jail.
+  Files are isolated; the network is not.
+* model-only (``network=False`` with a ``bridge``, job ``isolation: "bwrap-model-only"``): the jail gets its own empty
+  network namespace. The only way out is a unix socket bind-mounted in, relayed onto the jail's own loopback port
+  (``netrelay``) and forwarded by the host (``netbridge``) to the LLM proxy. No internet, no host loopback. Package
+  installs and web access from jailed code therefore fail by design.
+
+What neither mode is: a kernel boundary. It is one shared kernel with no seccomp profile of our own; the workspace is
+writable and shared with the host, so a job can plant files (hooks, scripts, symlinks) that later host-side use may run.
+Requested but unavailable isolation is an error (see ``jobs``), never a silent fallback.
+
 The wire protocol is stdio, so a wrapped runtime is indistinguishable from a
 direct one to the host.
 """
@@ -26,6 +40,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+RELAY_PYTHON = "/usr/bin/python3"
 SYSTEM_PATHS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/nix", "/snap")
 
 
@@ -52,12 +67,41 @@ class Sandbox:
         return env
 
 
+def git_control_paths(roots: "list[Path]") -> "list[Path]":
+    found: list[Path] = []
+    for root in roots:
+        dot = root / ".git"
+        gitdirs: list[Path] = []
+        try:
+            if dot.is_dir():
+                gitdirs.append(dot)
+            elif dot.is_file() and dot.read_text(errors="replace").startswith("gitdir:"):
+                gitdir = (root / dot.read_text(errors="replace")[7:].strip()).resolve()
+                gitdirs.append(gitdir)
+                common = gitdir / "commondir"
+                if common.is_file():
+                    gitdirs.append((gitdir / common.read_text().strip()).resolve())
+        except OSError:
+            continue
+        for gitdir in gitdirs:
+            for name in ("hooks", "config"):
+                path = gitdir / name
+                if path.exists() and not path.is_symlink() and path not in found:
+                    found.append(path)
+    return found
+
+
 class Bubblewrap(Sandbox):
     name = "bwrap"
 
-    def __init__(self, binary: str | None = None, network: bool = True) -> None:
+    def __init__(self, binary: str | None = None, network: bool = True, bridge: "tuple[Path, int] | None" = None) -> None:
         self.binary = binary or shutil.which("bwrap") or "bwrap"
+        #: True: the host's network (so the host's loopback services, the owner API included, are reachable from the jail).
+        #: False: the jail's own empty network; the only way out is ``bridge`` (unix socket, loopback port) to the LLM proxy.
         self.network = network
+        self.bridge = bridge
+        if not network:
+            self.name = "bwrap-model-only"
 
     def problem(self) -> str:
         if not shutil.which(self.binary):
@@ -72,6 +116,12 @@ class Bubblewrap(Sandbox):
             return f"bubblewrap cannot run: {error}"
         if probe.returncode != 0:
             return f"bubblewrap cannot create namespaces here: {probe.stderr.decode(errors='replace').strip()[:300]}"
+        if not self.network:
+            net = subprocess.run([self.binary, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-net", "--die-with-parent", "true"], capture_output=True, timeout=10)
+            if net.returncode != 0:
+                return f"bubblewrap cannot create a network namespace here: {net.stderr.decode(errors='replace').strip()[:300]}"
+            if self.bridge is not None and not os.path.exists(RELAY_PYTHON):
+                return f"a network-isolated jail needs {RELAY_PYTHON} to relay the model connection."
         return ""
 
     def wrap(self, argv: list[str], mounts: Mounts) -> list[str]:
@@ -99,13 +149,25 @@ class Bubblewrap(Sandbox):
         for path in writable:
             path.mkdir(parents=True, exist_ok=True)
             args += ["--bind", str(path), str(path)]
+        # Hooks and config run or redirect host-side git later, so jailed code gets them read-only. This does NOT make a
+        # writable workspace safe: package scripts, Makefiles, CI files and `.githooks` are still plantable.
+        for control in git_control_paths(writable):
+            args += ["--ro-bind", str(control), str(control)]
         args += ["--chdir", str(mounts.workspace)]
+        if not self.network and self.bridge is not None:
+            from .netrelay import __file__ as relay_file
+
+            sock, port = self.bridge
+            args += ["--ro-bind", relay_file, "/run/root-netrelay.py", "--bind", str(sock), "/run/root-llm.sock"]
+            return [*args, "--", RELAY_PYTHON, "/run/root-netrelay.py", str(port), "/run/root-llm.sock", "--", *argv]
         return [*args, "--", *argv]
 
     def environment(self, env: dict[str, str], mounts: Mounts) -> dict[str, str]:
         env = dict(env)
         if mounts.home is not None:
             env["HOME"] = str(mounts.home)
+        else:
+            env["HOME"] = "/tmp"  # the host's real home is not in the jail
         env["TMPDIR"] = "/tmp"
         return env
 
