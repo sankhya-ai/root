@@ -91,12 +91,37 @@ pub fn shorten_home(path: &KaosPath) -> KaosPath {
     path.clone()
 }
 
+/// Whether `path` is inside `directory`, by name AND by where it really points. A symlink inside the directory that
+/// leads out of it is outside (ROOT local change; see VENDORED.md): the name check alone let a file tool read or write
+/// through such a link without the host ever being asked. Non-existent tails are resolved through their nearest existing
+/// parent; a path that cannot be resolved at all falls back to the name check.
 pub fn is_within_directory(path: &KaosPath, directory: &KaosPath) -> bool {
     let path_str = path.to_string_lossy();
     let dir_str = directory.to_string_lossy();
-    Path::new(&path_str)
-        .strip_prefix(Path::new(&dir_str))
-        .is_ok()
+    if Path::new(&path_str).strip_prefix(Path::new(&dir_str)).is_err() {
+        return false;
+    }
+    match (real_path(Path::new(&path_str)), real_path(Path::new(&dir_str))) {
+        (Some(real), Some(base)) => real.starts_with(base),
+        _ => true,
+    }
+}
+
+fn real_path(path: &Path) -> Option<std::path::PathBuf> {
+    let mut tail = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&current) {
+            Ok(real) => {
+                return Some(tail.iter().rev().fold(real, |acc, part| acc.join(part)));
+            }
+            Err(_) => {
+                let name = current.file_name()?.to_os_string();
+                tail.push(name);
+                current = current.parent()?.to_path_buf();
+            }
+        }
+    }
 }
 
 fn parse_rotation_suffix(name: &str, base_name: &str, suffix: &str) -> Option<u64> {
@@ -121,4 +146,28 @@ fn format_mode(mode: u32) -> String {
     out.push(if mode & 0o002 != 0 { 'w' } else { '-' });
     out.push(if mode & 0o001 != 0 { 'x' } else { '-' });
     out
+}
+
+#[cfg(test)]
+mod symlink_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn a_symlink_leading_out_of_the_directory_is_outside_it() {
+        let base = std::env::temp_dir().join(format!("root-symlink-{}", std::process::id()));
+        let (ws, out) = (base.join("ws"), base.join("out"));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("secret.txt"), "s").unwrap();
+        std::fs::write(ws.join("inside.txt"), "i").unwrap();
+        std::os::unix::fs::symlink(out.join("secret.txt"), ws.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&out, ws.join("dirlink")).unwrap();
+        let dir = KaosPath::from(ws.clone());
+        assert!(is_within_directory(&KaosPath::from(ws.join("inside.txt")), &dir));
+        assert!(is_within_directory(&KaosPath::from(ws.join("new/file.txt")), &dir), "a path that does not exist yet stays inside");
+        assert!(!is_within_directory(&KaosPath::from(ws.join("link.txt")), &dir));
+        assert!(!is_within_directory(&KaosPath::from(ws.join("dirlink/secret.txt")), &dir));
+        assert!(!is_within_directory(&KaosPath::from(ws.join("dirlink/new.txt")), &dir), "writing a new file through a linked directory");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
