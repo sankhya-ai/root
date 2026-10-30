@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class CreateSession(BaseModel):
     workspace: str
     title: str | None = None
+    #: Tool-name patterns this session is limited to (see catalogue.guarantee for what that does and does not bound).
+    tool_scope: list[str] = []
 
 
 class UpdateSession(BaseModel):
@@ -52,7 +54,7 @@ def router(app_state) -> APIRouter:
     @api.post("/sessions")
     async def create_session(body: CreateSession, tenant: Tenant = Depends(tenant_of)) -> dict:
         try:
-            return tenant.sessions.create(body.workspace, body.title).public()
+            return tenant.sessions.create(body.workspace, body.title, tool_scope=body.tool_scope).public()
         except WorkspaceError as error:
             raise HTTPException(400, str(error)) from error
 
