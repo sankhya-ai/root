@@ -46,6 +46,21 @@ RESOURCES_ENV = "TURA_CODE_RESOURCES"
 #: ("main", "candidate_1", …) to its own list. Used by tests and offline demos.
 SCRIPTED_ECHO_ENV = "TURA_CODE_SCRIPTED_ECHO"
 
+#: The runtime's own tools in the base agent (``agent/agent.yaml``), by full name.
+BASE_NATIVE_TOOLS = (
+    "kimi_cli.tools.multiagent:Task",
+    "kimi_cli.tools.todo:SetTodoList",
+    "kimi_cli.tools.shell:Shell",
+    "kimi_cli.tools.file:ReadFile",
+    "kimi_cli.tools.file:ReadMediaFile",
+    "kimi_cli.tools.file:Glob",
+    "kimi_cli.tools.file:Grep",
+    "kimi_cli.tools.file:WriteFile",
+    "kimi_cli.tools.file:StrReplaceFile",
+    "kimi_cli.tools.web:SearchWeb",
+    "kimi_cli.tools.web:FetchURL",
+)
+
 MUTATING_FILE_TOOLS = (
     "kimi_cli.tools.file:WriteFile",
     "kimi_cli.tools.file:StrReplaceFile",
@@ -171,6 +186,14 @@ class LaunchSpec:
     answering: str = ""
     #: Root's Python toolbox (``toolbox``): its ``bin`` goes last on the agent's PATH.
     toolbox: Path | None = None
+    #: Session-bound tool scope (``catalogue``): native tools outside it are excluded from the agent.
+    tool_scope: tuple[str, ...] = ()
+    #: Per-job step cap; 0 = the settings' ``max_steps_per_turn``.
+    max_steps: int = 0
+    #: The runtime's own per-turn budget (``CHOTU_MAX_TURN_*``); 0 = none.
+    max_tokens: int = 0
+    max_wall_seconds: int = 0
+    max_cost_usd: float = 0.0
 
     def key(self) -> str:
         return self.api_key or self.settings.api_key()
@@ -196,6 +219,11 @@ class LaunchSpec:
             os.environ.get(SCRIPTED_ECHO_ENV, ""),
             skills_signature(self.skills_dirs),
             self.sandbox.name,
+            self.tool_scope,
+            self.max_steps,
+            self.max_tokens,
+            self.max_wall_seconds,
+            self.max_cost_usd,
         )
 
     def mounts(self, binary: Path) -> Mounts:
@@ -274,6 +302,10 @@ def write_agent_overlay(spec: LaunchSpec, runtime_dir: Path) -> Path:
             "kimi_cli.tools.web:SearchWeb",
             "kimi_cli.tools.web:FetchURL",
         ])
+    if spec.tool_scope:
+        from .catalogue import native_exclusions
+
+        exclude.extend(native_exclusions(spec.tool_scope, BASE_NATIVE_TOOLS))
     if exclude:
         lines += ["  exclude_tools:"]
         seen_exclude: set[str] = set()
@@ -293,7 +325,7 @@ def runtime_config(spec: LaunchSpec) -> dict:
         "default_model": "main",
         "default_thinking": settings.reasoning_effort not in ("", "none"),
         "loop_control": {
-            "max_steps_per_turn": settings.max_steps_per_turn,
+            "max_steps_per_turn": min(settings.max_steps_per_turn, spec.max_steps) if spec.max_steps else settings.max_steps_per_turn,
             # Attempts per model call. A provider failure (5xx, 429, a dropped
             # connection) backs off 2s→30s, so ten ride out a few minutes of
             # outage; a malformed or empty reply still gets three at most.
@@ -392,9 +424,17 @@ def child_environment(spec: LaunchSpec, share_dir: Path, binary: Path | None = N
     share_dir.mkdir(parents=True, exist_ok=True)
     env["KIMI_SHARE_DIR"] = str(share_dir)
     settings = spec.settings
+    # The runtime's council budget: checked before each model step from provider-reported usage.
+    if spec.max_tokens:
+        env["CHOTU_MAX_TURN_TOKENS"] = str(spec.max_tokens)
+    if spec.max_wall_seconds:
+        env["CHOTU_MAX_TURN_WALL_SECONDS"] = str(spec.max_wall_seconds)
+    if spec.max_cost_usd:
+        env["CHOTU_MAX_TURN_COST_USD"] = str(spec.max_cost_usd)
     director = settings.director_mode
     env["CHOTU_DIRECTOR"] = director
-    env["CHOTU_DECISIONS_ENABLED"] = "0" if director == "off" else "1"
+    # A jail's model route is chat completions only; the decisions endpoint is another route, so the jailed runtime does not ask.
+    env["CHOTU_DECISIONS_ENABLED"] = "0" if director == "off" or spec.sandbox.name == "bwrap-model-only" else "1"
     # Edits must be exercised before a turn ends (runtime `verify_gate`). Off
     # for scripted runs, whose replies are fixed, unless a test asks for it.
     env["ROOT_VERIFY_GATE"] = os.environ.get("TURA_CODE_VERIFY_GATE", "0" if scripted() else "1")
@@ -436,6 +476,7 @@ def runtime_argv(binary: Path, spec: LaunchSpec, config_file: Path, agent_file: 
         str(config_file),
         "--agent-file",
         str(agent_file),
-        *(["--mcp-config-file", str(spec.mcp_config)] if spec.mcp_config else []),
+        # A scoped session loads no MCP servers: their tools are outside the host's names and could not be scoped.
+        *(["--mcp-config-file", str(spec.mcp_config)] if spec.mcp_config and not spec.tool_scope else []),
     ]
     return spec.sandbox.wrap(argv, spec.mounts(binary))
