@@ -14,8 +14,12 @@ if TYPE_CHECKING:
 
 def install(server: "Server") -> None:
     """Register every service's tenant extension and after-turn hook."""
-    from . import connections, documents, driver, flows, history, keiki, learning, line, schedules, slack, toolbox
+    from . import broker, catalogue, connections, jobs, visual, documents, driver, flows, history, keiki, learning, line, schedules, slack, toolbox
 
+    catalogue.install(server)
+    jobs.install(server)
+    visual.install(server)
+    broker.install(server)
     learning.install(server)
     documents.install(server)
     toolbox.install(server)
@@ -35,10 +39,12 @@ def routers(state) -> list:
     from .history import router as history_router
     from .keiki.routes import router as keiki_router
     from .learning.routes import router as learning_router
+    from .jobs import router as jobs_router
+    from .broker import router as broker_router
     from .line.routes import router as line_router
     from .plugins import router as plugins_router
     from .schedules import router as schedules_router
     from .slack.routes import router as slack_router
     from .toolbox import router as toolbox_router
 
-    return [learning_router(state), flows_router(state), line_router(state), connections_router(state), history_router(state), schedules_router(state), slack_router(state), keiki_router(state), toolbox_router(state), plugins_router(state)]
+    return [jobs_router(state), broker_router(state), learning_router(state), flows_router(state), line_router(state), connections_router(state), history_router(state), schedules_router(state), slack_router(state), keiki_router(state), toolbox_router(state), plugins_router(state)]
