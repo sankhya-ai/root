@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import launcher
-from .llm_proxy import LLMProxy
+from .llm_proxy import Restriction, LLMProxy
 from .memory import OWNER_SCOPE, MemoryGateway, MemoryView
 from .models import ModelCatalog
 from .pool import RuntimePool
@@ -77,6 +77,19 @@ class Tenant:
     def sandbox(self) -> Sandbox:
         return self.server.sandbox
 
+    def sandbox_for(self, record) -> Sandbox:
+        """The jail a session runs in: its own ``isolation`` if the host set one, else the server's sandbox."""
+        mode = getattr(record, "isolation", "")
+        if not mode:
+            return self.server.sandbox
+        from .sandbox import Bubblewrap
+
+        if mode == "bwrap":
+            return Bubblewrap()
+        if mode == "bwrap-model-only":
+            return Bubblewrap(network=False, bridge=self.server.llm_bridge())
+        raise ValueError(f"Unknown isolation {mode!r}.")
+
     def api_key(self) -> str:
         """This person's key, else the server's (hosted: the operator's)."""
         own = self.settings.get().openrouter_api_key.strip()
@@ -118,7 +131,15 @@ class Tenant:
         endpoint = None
         if self.proxy.enabled and not launcher.scripted():
             base = settings.base_url
-            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()), fallbacks=lambda: self.settings.get().fallback_models)
+            rule = None
+            if runtime.record.isolation:
+                steps = runtime.record.max_steps
+                rule = Restriction(
+                    models=lambda: {self.settings.get().model, *self.settings.get().fallback_models},
+                    max_requests=max(60, 3 * steps) if steps else 300,
+                )
+                self.proxy.budget(runtime.record.id, runtime.record.max_tokens)
+            endpoint = self.proxy.issue(self.id, runtime.record.id, lambda: (base, self.api_key()), fallbacks=lambda: self.settings.get().fallback_models, restrict=rule)
         return launcher.LaunchSpec(
             session_id=runtime.record.id,
             workspace=Path(runtime.record.workspace),
@@ -131,13 +152,18 @@ class Tenant:
             endpoint=endpoint,
             skills_dirs=(self.skills_dir,) if self.skills_dir.is_dir() else (),
             script_role=runtime.record.role or "main",
-            sandbox=self.sandbox,
+            sandbox=self.sandbox_for(runtime.record),
             session_dir=runtime.dir,
             home=self.home,
             extra_writable=self._git_dirs(runtime),
             planning_mode=settings.planning_mode,
             answering=runtime.record.kind if runtime.record.answering else "",
             toolbox=getattr(getattr(self, "toolbox", None), "root", None),
+            tool_scope=tuple(runtime.record.tool_scope),
+            max_steps=runtime.record.max_steps,
+            max_tokens=runtime.record.max_tokens,
+            max_wall_seconds=runtime.record.max_wall_seconds,
+            max_cost_usd=runtime.record.max_cost_usd,
         )
 
     @staticmethod
@@ -164,19 +190,21 @@ class Tenant:
         return [t for t in self.toolsets if getattr(t, "plugin", None) not in off]
 
     def tool_definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        return [definition for toolset in self.active_toolsets() for definition in toolset.definitions(runtime)]
+        from . import catalogue
+
+        return catalogue.listed_definitions(self, runtime)
 
     def command_environment(self, runtime: "SessionRuntime") -> dict[str, str]:
         from .sandbox import Mounts
 
         env = launcher.scrubbed_environment()
-        return self.sandbox.environment(env, Mounts(workspace=Path(runtime.record.workspace), home=self.home))
+        return self.sandbox_for(runtime.record).environment(env, Mounts(workspace=Path(runtime.record.workspace), home=self.home))
 
     def wrap_command(self, runtime: "SessionRuntime", argv: list[str]) -> list[str]:
         from .sandbox import Mounts
 
         mounts = Mounts(workspace=Path(runtime.record.workspace), writable=(runtime.dir, *self._git_dirs(runtime)), home=self.home)
-        return self.sandbox.wrap(argv, mounts)
+        return self.sandbox_for(runtime.record).wrap(argv, mounts)
 
     # ----- after a turn --------------------------------------------------------
 
@@ -236,6 +264,8 @@ class Server:
         self.proxy = LLMProxy()
         self.pool = pool or RuntimePool()
         self.sandbox = sandbox or Sandbox()
+        self._bridge = None
+
         self.users = UserStore(home / "users.json")
         self.shared_workspaces = home / "shared_workspaces"
         self.shared_workspaces.mkdir(parents=True, exist_ok=True)
@@ -247,6 +277,19 @@ class Server:
         #: Server-wide services with ``start()`` and ``async close()`` (the line).
         self.background: list[Any] = []
         self.tenants: dict[str, Tenant] = {}
+
+    def llm_bridge(self):
+        """(socket path, loopback port) of the unix-socket bridge to the LLM proxy, started on first use; None without a proxy."""
+        if not self.proxy.enabled:
+            return None
+        from urllib.parse import urlparse
+
+        from .netbridge import Bridge
+
+        target = urlparse(self.proxy.base or "")
+        if self._bridge is None:
+            self._bridge = Bridge(self.home / "run" / "llm.sock", target.hostname or "127.0.0.1", target.port or 80).start()
+        return (self._bridge.path, self._bridge.port)
 
     def tenant(self, tenant_id: str = LOCAL) -> Tenant:
         tenant = self.tenants.get(tenant_id)
@@ -290,4 +333,6 @@ class Server:
             await tenant.close()
         await self.pool.close()
         await self.proxy.close()
+        if self._bridge is not None:
+            self._bridge.stop()
         await self.gateway.close()

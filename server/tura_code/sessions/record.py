@@ -38,6 +38,23 @@ class SessionRecord:
     unattended: bool = False
     #: The schedule that started this session, if any.
     schedule: str = ""
+    #: Host-set tool-name patterns (fnmatch) this session may use, on top of the tenant's ``tool_scope``.
+    #: Set when the session is created, never by the model. Empty: no session limit. See ``catalogue.guarantee``.
+    tool_scope: list[str] = field(default_factory=list)
+    #: Per-job cap on model steps in a turn (``jobs``); 0 = the settings' limit.
+    max_steps: int = 0
+    #: Per-turn caps the runtime enforces itself (``jobs``); 0 = none. Tokens/cost are provider-reported.
+    max_tokens: int = 0
+    max_wall_seconds: int = 0
+    max_cost_usd: float = 0.0
+    #: Names of broker credentials this session's job may use (``broker``); set by the host, never by the model.
+    credentials: list[str] = field(default_factory=list)
+    #: Per-session jail chosen by the host: "" (the server's own sandbox), "bwrap" (files only) or "bwrap-model-only" (files and network). See ``sandbox``.
+    isolation: str = ""
+    #: The job role (``jobs``) when the session is a job: selects the review guides it may load. Set by the host.
+    job_role: str = ""
+    #: What the owner authorized this job to do on pages (``visual.act``): {"interact": {origin, allow_writes}, "deployed": {urls}}. Host-set only.
+    visual: dict = field(default_factory=dict)
 
     @property
     def answering(self) -> bool:

@@ -74,6 +74,11 @@ class SessionRuntime(Approvals, Rollback, Queue):
         self._buffer_flush_task: asyncio.Task | None = None
         #: Set while the host itself stops the process (a restart, eviction, close).
         self._stopping = False
+        #: What the last finished turn answered and touched (``jobs`` reads it).
+        self.last_reply = ""
+        self.last_error = ""
+        self.last_budget: dict[str, Any] = {}
+        self.last_files: list[str] = []
 
     # ----- persistence and fan-out ----------------------------------------
 
@@ -134,6 +139,9 @@ class SessionRuntime(Approvals, Rollback, Queue):
         data["queued"] = self.queued_public()
         data["runtime_state"] = self.runtime_state
         data["runtime"] = self.runtime_info
+        from .. import catalogue
+
+        data["scope_guarantee"] = catalogue.guarantee(self.tenant, self.record)
         return data
 
     @property
@@ -285,8 +293,14 @@ class SessionRuntime(Approvals, Rollback, Queue):
                 raise ValueError("arguments must be a JSON object")
         except (json.JSONDecodeError, ValueError) as error:
             return {"tool_call_id": call_id, "return_value": tool_error(f"Invalid arguments: {error}", "Invalid arguments")}
+        from .. import catalogue
+
         toolset = next((t for t in self.tenant.active_toolsets() if t.handles(name)), None)
-        if toolset is None:
+        if toolset is not None and not catalogue.allowed(self.tenant, name, self):
+            result = tool_error(f"`{name}` is outside this session's tool scope.", "Out of scope")
+        elif toolset is not None and catalogue.enabled(self.tenant) and catalogue.is_deferred(toolset):
+            result = tool_error(f"`{name}` is found with `{catalogue.FIND_TOOL}` and run with `{catalogue.USE_TOOL}`.", "Use the gateway")
+        elif toolset is None:
             result = tool_error(f"Unknown host tool `{name}`.", "Unknown tool")
         else:
             try:
@@ -370,6 +384,10 @@ class SessionRuntime(Approvals, Rollback, Queue):
             self.log.flush()
             duration = round(time.time() - turn.started_at, 2)
             self.emit("TurnFinished", {"status": status, "duration": duration, "files_touched": turn.files_touched, "verified": turn.verified, "checks": turn.checks, "checkpoint": turn.checkpoint, "mode": turn.mode, **extra})
+            self.last_reply = turn.reply()
+            self.last_error = str(extra.get("error") or "")
+            self.last_budget = extra.get("budget") if isinstance(extra.get("budget"), dict) else {}
+            self.last_files = list(turn.files_touched)
             self.record.last_status = status
             self.record.updated_at = time.time()
             self.save_record()

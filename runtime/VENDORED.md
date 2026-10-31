@@ -125,6 +125,11 @@ Keep local changes small and listed here so upstream updates stay mergeable.
     to use the host's `mac_*` tools (root-driver) — look, act on an element
     token, check — and what never to do unasked. Only a skill file; the tools
     themselves are the host's (`server/tura_code/driver`).
+28. **The cost budget stops the main loop** (`soul/kimisoul.rs`, the step's
+    budget checks): `check_cost_budget` now runs before each model step next to
+    the token and wall-clock checks. It previously gated only subagent tasks and
+    compaction, so `CHOTU_MAX_TURN_COST_USD` recorded cost but never ended a
+    turn. Covered by the host's `test_jobs.py` (cost cap, real runtime).
 
 Tests: `search/tests.rs` (backends and fallback against a mock server) and
 `tests/load_agents_md.rs` for 1–2; the tool schema and description tests were
@@ -132,6 +137,11 @@ updated for 3 and 9; `tests/extra_skills_dirs.rs` for 5; unit tests in
 `args_repair.rs`, `tolerant.rs`, `repeat_guard.rs` and `walk.rs`, and
 `tests/tool_glob.rs` (rewritten for the pruned walk) for 6–9; unit tests in
 `verify_gate.rs`, `director.rs`, `tools/file/mod.rs`, `args_repair.rs`, `leaked_calls.rs` and `web/fetch.rs` for 10–17; a unit test in `kimi.rs` for 22; a unit test in `kimisoul.rs` for 23; the host's `test_processes.py` covers 24; a unit test in `kimisoul.rs` for 25; unit tests in `persistent_shell.rs` (the bash twin everywhere, PowerShell on Windows) and the host's `test_windows.py` for 26.
+
+29. **A symlink out of the workspace is outside it** (`utils/path.rs` `is_within_directory`): the name check let
+    ReadFile/Grep/Glob and the edit tools reach a file through a symlink inside the workspace (a cloned repo can ship one)
+    without the host's outside-path approval ever firing. It now also requires the resolved real path to be inside the real
+    directory (a not-yet-existing tail resolves through its nearest existing parent). Unix test in the same file.
 
 ## Updating from Tura
 
