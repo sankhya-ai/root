@@ -110,11 +110,28 @@ systemd user session, macOS) therefore cannot run generated plugins at all: comp
 unaffected. RLIMIT_NPROC is per-uid defense-in-depth only. Shared host kernel; a microVM tier is the step up if
 generated code ever runs without per-hash owner activation.
 
-### Role selection, bounded within existing grants
+### Role selection, grounded in the session's own authority ceiling
 
-Root has no automatic role selection for interactive sessions. The bounded mechanism that fits the existing grants:
-a session may RECOMMEND a job (role + goal + workspace) to the owner; the owner starts it with POST /api/jobs. The
-recommendation surface is the durable role catalogue (GET /api/jobs/roles - promoted roles only) plus roles the
-session itself created, named with source_session. Selection never starts anything: POST /api/jobs stays
-owner-authenticated, and a private role requires the explicit source_session reference. This is a description of
-the supported path, not a claim that the model picks roles autonomously.
+"Selecting a role" and "starting a job" are different effects and must not be conflated:
+
+* STARTING a job creates a new unattended session with its own tool scope. That is owner-authenticated
+  (POST /api/jobs) and stays so: a session can never widen the system by spawning work.
+* SELECTING a role for oneself is a BEHAVIOR choice: which guides load (guides.guides_for / script_role in
+  tenancy.py) and which subset of ALREADY-ALLOWED tools are in play. A session's authority ceiling is its tool
+  scope, fixed at creation; choosing among capabilities it already holds grants nothing.
+
+Bounded design (not yet implemented): an `adopt_role` host tool lets a session take on an existing role -
+built-in or registry - when, and only when, the role's tool scope is a SUBSET of the session's own current scope
+(checked with the same catalogue.allowed universe, durable roles plus the session's own session-lifetime roles via
+its own session id - never another session's). The effect is: record.role is set (guides and review contract
+follow) and the session's effective tool list NARROWS to the role's scope for the rest of the session or until the
+next adoption. Adoption that would WIDEN the session refuses and tells the model to ask the owner to start a job
+with that role instead - that is the owner API's effect, not the session's. Adoption is session-lifetime only,
+recorded as a RegistryChanged-style notice so the owner sees it.
+
+Missing authority questions for Ashish (not assumed):
+1. Should adopting a role be freely reversible within a session, or one-way narrowing until the owner resets it?
+2. May a session REQUEST that the owner start a job (a surfaced approval), or is POST /api/jobs strictly
+   owner-typed with no agent-initiated approval flow?
+3. When a job's role is chosen, may the RECOMMENDING session pick among durable roles, or should recommendations be
+   limited to roles the owner has flagged as job-selectable?

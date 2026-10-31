@@ -16,6 +16,7 @@ import os
 import resource
 import sys
 import traceback
+from pathlib import Path
 
 # Hard resource ceilings, set by the host before any candidate code loads. The namespace jail is the boundary for
 # what the candidate can REACH; these bound what it can CONSUME. The wall-clock timeout on the host is the backstop.
@@ -38,8 +39,31 @@ def _reply(payload) -> None:
     sys.stdout.flush()
 
 
+def check_cgroup(expected_memory_max: str, expected_pids_max: str) -> None:
+    """Per-exec ground truth: THIS process must already be inside a cgroup with the exact memory and pids limits.
+    Reads its own /proc/self/cgroup and the (read-only) /sys/fs/cgroup mount. Refuses before any candidate code is
+    imported, so a probe-then-degrade race cannot run anything unbounded."""
+    try:
+        lines = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError as error:
+        raise RuntimeError(f"cannot read my own cgroup membership: {error}")
+    v2 = next((line.split("::", 1)[1] for line in lines if line.startswith("0::")), None)
+    if not v2:
+        raise RuntimeError("this process is not in a cgroup v2 scope; refusing to run candidate code")
+    base = Path("/sys/fs/cgroup") / v2.lstrip("/")
+    try:
+        memory_max = (base / "memory.max").read_text().strip()
+        pids_max = (base / "pids.max").read_text().strip()
+    except OSError as error:
+        raise RuntimeError(f"cgroup limits unreadable at {base}: {error}")
+    if memory_max != expected_memory_max or pids_max != expected_pids_max:
+        raise RuntimeError(f"cgroup limits are memory.max={memory_max} pids.max={pids_max}, "
+                           f"expected {expected_memory_max}/{expected_pids_max}; refusing to run candidate code")
+
+
 def main() -> None:
     plugin_dir = sys.argv[1]
+    check_cgroup(sys.argv[2], sys.argv[3])
     # ``import plugin`` inside tests.py must resolve to the candidate (mounted read-only); the jail bounds the rest.
     sys.path.insert(0, plugin_dir)
     request = json.loads(sys.stdin.read())

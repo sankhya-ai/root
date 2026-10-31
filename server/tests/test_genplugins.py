@@ -68,7 +68,6 @@ MANIFEST = [{"name": "stats_summary", "description": "Mean and spread of a numbe
              "parameters": {"type": "object", "properties": {"numbers": {"type": "array", "items": {"type": "number"}}},
                             "required": ["numbers"], "additionalProperties": False}}]
 
-genplugins._POLICY_CACHE = None
 _, _POLICY_REASON = genplugins.execution_policy()
 needs_bwrap = pytest.mark.skipif(
     bool(genplugins.sandbox_problem()) or bool(_POLICY_REASON),
@@ -325,13 +324,12 @@ def test_oversized_output_is_capped(tmp_path):
 
 def test_policy_probe_outcomes(monkeypatch):
     """Policy selection is mocked here: binary presence must never be enough, a failed probe or an unapplied limit
-    refuses, and only a probe that reads back the exact applied MemoryMax yields the cgroup prefix."""
-    genplugins._POLICY_CACHE = None
+    refuses, and only a probe that reads back the exact applied memory.max AND pids.max yields the cgroup prefix.
+    There is no policy cache: every execution probes again, and the runner re-checks its own limits per exec."""
     monkeypatch.setattr(genplugins.shutil, "which", lambda name: None)
     prefix, reason = genplugins.execution_policy()
     assert prefix is None and "systemd-run" in reason
 
-    genplugins._POLICY_CACHE = None
     monkeypatch.setattr(genplugins.shutil, "which", lambda name: "/usr/bin/systemd-run")
 
     class Fake:
@@ -342,16 +340,17 @@ def test_policy_probe_outcomes(monkeypatch):
     prefix, reason = genplugins.execution_policy()
     assert prefix is None and "could not start" in reason
 
-    genplugins._POLICY_CACHE = None
-    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout="max\n"))  # limit silently not applied
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout="max max\n"))  # limits silently not applied
     prefix, reason = genplugins.execution_policy()
     assert prefix is None and "not applied" in reason
 
-    genplugins._POLICY_CACHE = None
-    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout=str(genplugins.MEMORY_MAX_BYTES)))
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout=f"{genplugins.MEMORY_MAX_BYTES} max\n"))  # pids unbounded!
     prefix, reason = genplugins.execution_policy()
-    assert reason == "" and prefix and "MemoryMax=268435456" in " ".join(prefix)
-    genplugins._POLICY_CACHE = None
+    assert prefix is None and "not applied" in reason
+
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout=f"{genplugins.MEMORY_MAX_BYTES} {genplugins.TASKS_MAX}\n"))
+    prefix, reason = genplugins.execution_policy()
+    assert reason == "" and prefix and "MemoryMax=268435456" in " ".join(prefix) and "TasksMax=64" in " ".join(prefix)
 
 
 def test_propose_and_invoke_refuse_without_proven_limits(tmp_path, monkeypatch):

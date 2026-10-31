@@ -403,43 +403,37 @@ JAIL_SYSTEM_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbi
 
 
 MEMORY_MAX_BYTES = 256 * 1024 * 1024
-
-_POLICY_CACHE: "tuple[float, list[str] | None, str] | None" = None
-_POLICY_TTL = 300.0
+TASKS_MAX = 64
 
 
 def execution_policy() -> "tuple[list[str] | None, str]":
-    """The ONLY execution mode for generated code: a user-scope cgroup whose memory and task limits are PROBED to be
-    applied. Returns (argv_prefix, "") or (None, reason). No fallback and no override: without proven limits,
-    candidate verification, owner activation and invocation all refuse. Binary presence is not evidence; the probe
-    starts a limited scope and reads back the applied memory.max."""
-    global _POLICY_CACHE
-    now = time.monotonic()
-    if _POLICY_CACHE and now - _POLICY_CACHE[0] < _POLICY_TTL:
-        return _POLICY_CACHE[1], _POLICY_CACHE[2]
-    prefix, reason = _probe_cgroup()
-    _POLICY_CACHE = (now, prefix, reason)
-    return prefix, reason
+    """The ONLY execution mode for generated code: a user-scope cgroup whose memory AND pids limits are PROBED to be
+    applied. Returns (argv_prefix, "") or (None, reason). No cache and no fallback: every verification, activation
+    and invocation probes again, and the in-jail runner independently re-reads its OWN cgroup limits before any
+    candidate code is imported (see genplugin_runner.check_cgroup), so a probe-then-degrade race cannot run anything
+    unbounded. Binary presence is not evidence at either layer."""
+    return _probe_cgroup()
 
 
 def _probe_cgroup() -> "tuple[list[str] | None, str]":
     if not shutil.which("systemd-run"):
         return None, "no user-scope cgroup runner (systemd-run --user) on this host"
     prefix = ["systemd-run", "--user", "--scope", "--quiet",
-              "-p", f"MemoryMax={MEMORY_MAX_BYTES}", "-p", "MemoryHigh=192M", "-p", "TasksMax=64", "--"]
+              "-p", f"MemoryMax={MEMORY_MAX_BYTES}", "-p", "MemoryHigh=192M", "-p", f"TasksMax={TASKS_MAX}", "--"]
     try:
         probe = subprocess.run(
-            [*prefix, "/bin/sh", "-c", "cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"],
+            [*prefix, "/bin/sh", "-c",
+             "cg=$(cut -d: -f3 /proc/self/cgroup); echo $(cat /sys/fs/cgroup$cg/memory.max) $(cat /sys/fs/cgroup$cg/pids.max)"],
             capture_output=True, timeout=15, text=True,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return None, f"the cgroup probe itself failed: {error}"
     if probe.returncode != 0:
         return None, f"could not start a resource-limited scope: {probe.stderr.strip()[:200] or 'no detail'}"
-    applied = probe.stdout.strip()
-    if applied != str(MEMORY_MAX_BYTES):
-        return None, (f"the cgroup memory limit was not applied (memory.max reads {applied or 'nothing'!r}, "
-                      f"expected {MEMORY_MAX_BYTES}); refusing to run generated code without a proven bound")
+    applied = probe.stdout.split()
+    if applied != [str(MEMORY_MAX_BYTES), str(TASKS_MAX)]:
+        return None, (f"the cgroup limits were not applied (read back memory.max/pids.max = {applied or 'nothing'}, "
+                      f"expected {[str(MEMORY_MAX_BYTES), str(TASKS_MAX)]}); refusing to run generated code without a proven bound")
     return prefix, ""
 
 
@@ -452,10 +446,12 @@ def _jail_argv(python: str, runner: Path, snapshot: Path) -> list[str]:
         elif os.path.isdir(path):
             args += ["--ro-bind", path, path]
     args += ["--dev", "/dev", "--tmpfs", "/tmp"]
+    # The runner verifies its own cgroup limits before loading candidate code; it needs both, read-only.
+    args += ["--ro-bind", "/sys/fs/cgroup", "/sys/fs/cgroup"]
     args += ["--ro-bind", str(runner), str(runner), "--ro-bind", str(snapshot), str(snapshot)]
     # The scratch workspace is a jail-PRIVATE tmpfs: it dies with the namespace and no host path is ever writable.
     args += ["--tmpfs", "/scratch", "--chdir", "/scratch"]
-    return [*args, "--", python, str(runner), str(snapshot)]
+    return [*args, "--", python, str(runner), str(snapshot), str(MEMORY_MAX_BYTES), str(TASKS_MAX)]
 
 
 async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[str, Any], *, timeout: float,
@@ -505,7 +501,7 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
             why = "it hit a resource limit and was killed" if killed else f"exit {proc.returncode}"
             return {"ok": False, "error": f"the candidate produced no protocol reply ({why}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
         if isinstance(reply, dict):
-            reply["isolation"] = "cgroup-bounded (MemoryMax 256M, TasksMax 64) + namespace jail"
+            reply["isolation"] = f"cgroup-bounded (memory.max {MEMORY_MAX_BYTES}, pids.max {TASKS_MAX}, re-verified in-jail per execution) + namespace jail"
         return reply
     finally:
         shutil.rmtree(snapshot, ignore_errors=True)
