@@ -46,6 +46,17 @@ CONTEXT_TIMEOUT_SECONDS = 6.0
 #: EmbeddingGemma 2's cosine below which a memory is not about the request.
 #: Measured: answers score 0.64-0.8, unrelated memories 0.55-0.62.
 GEMMA_SIMILARITY_FLOOR = 0.63
+#: Dhee's vector stores do not report the same scale. zvec and the in-memory store return the raw cosine;
+#: the sqlite_vec store (Dhee's fallback when zvec is missing, e.g. Python < 3.11) returns 1 - distance/2,
+#: which is (1 + cosine) / 2. The floor above is a raw cosine, so that scale is mapped back first.
+HALVED_COSINE_STORES = frozenset({"SqliteVecStore"})
+#: Stores whose vectors do not survive a restart: memories written to one cannot be recalled afterwards.
+VOLATILE_STORES = frozenset({"InMemoryVectorStore"})
+
+
+def raw_cosine(score: float, store: str) -> float:
+    """The embedder's cosine from the score Dhee's active vector store reported."""
+    return 2.0 * score - 1.0 if store in HALVED_COSINE_STORES else score
 
 
 class MemoryGateway:
@@ -62,6 +73,7 @@ class MemoryGateway:
         #: Local memory's vectors: EmbeddingGemma 2 once it is on disk, hashing until then.
         self.local = LocalEmbedder()
         self._embedder = "none"
+        self._store = ""
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -95,7 +107,16 @@ class MemoryGateway:
             "error": self._error,
             "embedder": self._embedder,
             "local_embedder": self.local.state(),
+            "vector_store": self._store,
+            "warning": self._warning(),
         }
+
+    def _warning(self) -> str:
+        if self._store in VOLATILE_STORES:
+            return "Memory vectors are held in RAM only (zvec and sqlite-vec are missing): memories will not be recalled after a restart. Install `dhee[zvec]` on Python 3.11+ or `sqlite-vec`."
+        if self._store in HALVED_COSINE_STORES:
+            return "Dhee fell back to sqlite-vec because zvec is not installed (needs Python 3.11+); relevance scores are converted, but install zvec for the supported setup."
+        return ""
 
     def _ensure(self) -> Any:
         """Build (or rebuild after a settings change) the Dhee instance. Worker thread only."""
@@ -137,9 +158,19 @@ class MemoryGateway:
             except Exception as error:  # noqa: BLE001 - fall back to local memory, loudly
                 logger.warning("Dhee OpenRouter lane unavailable; using local memory", exc_info=True)
                 self._error = f"OpenRouter memory unavailable, using local memory: {error}"
+        self._store = self._vector_store_name(dhee)
+        if self._store in VOLATILE_STORES or self._store in HALVED_COSINE_STORES:
+            logger.warning("%s", self._warning())
         self._dhee = dhee
         self._built_for = wanted
         return dhee
+
+    @staticmethod
+    def _vector_store_name(dhee: Any) -> str:
+        try:
+            return type(dhee._engram.memory.vector_store).__name__
+        except Exception:  # noqa: BLE001 - an unfamiliar Dhee: the floor then assumes a raw cosine
+            return ""
 
     def _close_current(self) -> None:
         if self._dhee is not None:
@@ -191,7 +222,7 @@ class MemoryGateway:
                 overlap = len(query_words & words(text))
                 if self._embedder == LOCAL_MODEL:
                     # EmbeddingGemma ranks by meaning: a floor on its cosine, not on shared words.
-                    if float(row.get("similarity", row.get("score") or 0.0)) < GEMMA_SIMILARITY_FLOOR:
+                    if raw_cosine(float(row.get("similarity", row.get("score") or 0.0)), self._store) < GEMMA_SIMILARITY_FLOOR:
                         continue
                 elif self._active_mode == "local" and query_words and overlap == 0:
                     # Hashed vectors rank unrelated facts highly: shared words are the honest floor.
