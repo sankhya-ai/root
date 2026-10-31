@@ -99,16 +99,16 @@ tmp-file writes; parallel creators lose no versions (tested with 6 OS processes)
 
 ### Resource limits, stated exactly
 
-Set and tested: 10s CPU (RLIMIT_CPU), 512MB address space (RLIMIT_AS), 16MB per file (RLIMIT_FSIZE), 256 fds, a
-wall-clock timeout with SIGKILL backstop, and a no-network namespace. Set but NOT jail-scoped: RLIMIT_NPROC counts
-per-uid across the host user (defense-in-depth only; the fork path is also refused by the import screen). Total
-memory INCLUDING tmpfs writes, and task count, are bounded when the host offers a user-scope cgroup runner
-(`systemd-run --user`, no root or host change needed): the jail is then wrapped with MemoryMax=256M / TasksMax=64 and
-every run's reply says so. Where no such runner exists, aggregate RAM-backed tmpfs pressure is NOT bounded and every
-run's reply carries `namespace jail only ... (experimental)` - the CPU limit is NOT claimed to bound memory. In that
-mode generated plugins are review-time tooling, not production-safe execution; activation is never automatic in
-either mode. Next bounded fix: require the cgroup wrapper (fail closed) or a size-limited scratch mount before
-declaring the path production-safe.
+Set and tested: in-jail rlimits (CPU 10s, address space 512MB, 16MB per file, 256 fds), a wall-clock kill, a
+no-network namespace, minimal read-only mounts (no /etc, /opt, home, tenant root), and hash-pinned snapshot
+execution. The GATE is aggregate enforcement: generated code runs only inside a user-scope cgroup whose MemoryMax
+(256MB, covering tmpfs scratch writes) and TasksMax (64) are PROBED to be applied - the probe starts a limited scope
+and reads back the applied memory.max, and binary presence alone is not accepted. Where that probe fails, candidate
+verification, owner activation and invocation all refuse and nothing is stored; there is no unbounded or
+experimental execution mode and no override. Hosts without user-scope cgroup support (a plain Linux box without a
+systemd user session, macOS) therefore cannot run generated plugins at all: composition tools and roles are
+unaffected. RLIMIT_NPROC is per-uid defense-in-depth only. Shared host kernel; a microVM tier is the step up if
+generated code ever runs without per-hash owner activation.
 
 ### Role selection, bounded within existing grants
 

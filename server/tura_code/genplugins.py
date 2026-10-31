@@ -19,14 +19,16 @@ may PROPOSE a generated plugin: a small Python module it writes itself. The gove
   made with the diff, the screen result and the test report in front of them.
 * Activation is SESSION-LOCAL: the owner activates an exact hash for the creating session; making the plugin callable
   by future sessions is the owner's separate promotion. Revocation ends it everywhere on the next call.
-* Resource limits, stated exactly: CPU 10s, address space 512MB, 16MB per file, 256 fds, wall-clock kill, no network.
-  RLIMIT_NPROC is per-uid (host-wide) defense-in-depth, not a jail-scoped cap. Aggregate disk/inode pressure inside
-  the RAM-backed scratch tmpfs is NOT bounded in v1; the CPU budget bounds write rate in practice. Shared host
-  kernel; a microVM tier is the step up if generated code ever runs without per-hash owner activation.
+* Resource limits, stated exactly: aggregate memory 256MB and 64 tasks via a PROBED user-scope cgroup (this is the
+  gate - no proven cgroup, no execution), plus in-jail rlimits (CPU 10s, address space 512MB, 16MB per file, 256
+  fds), a wall-clock kill, and no network. RLIMIT_NPROC is per-uid defense-in-depth only. Shared host kernel; a
+  microVM tier is the step up if generated code ever runs without per-hash owner activation.
 
-EXPERIMENTAL: aggregate memory pressure through the RAM-backed scratch tmpfs is NOT bounded on hosts where no
-user-scope cgroup runner is available (see _cgroup_wrap). Until that gap closes, treat generated plugins as
-review-time tooling, not production-safe execution. Nothing ever activates without the owner's explicit hash call.
+FAIL CLOSED: generated code runs only inside the namespace jail AND a user-scope cgroup whose memory/task limits
+are probed to be applied (aggregate memory - including tmpfs scratch writes - and task count are bounded; rlimits
+inside bound CPU, address space, file size and fds). Where that enforcement is unavailable, verification, owner
+activation and invocation all refuse. There is no unbounded or "experimental" execution mode, and nothing ever
+activates without the owner's explicit hash call.
 * Identity is content: a version is the SHA-256 of its files. Activation names the hash and re-verifies in the jail
   before flipping the switch, so a tampered file or a stale review cannot activate. Revocation takes effect on the
   next call; each call re-resolves the active version and re-checks the hash before spending a process on it.
@@ -400,19 +402,45 @@ def sandbox_problem() -> str:
 JAIL_SYSTEM_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin")
 
 
-def _cgroup_wrap(argv: list[str]) -> list[str]:
-    """Bound TOTAL memory (which includes tmpfs writes) and tasks with a user-scope cgroup when the host offers one.
-    systemd-run --user needs no host change and no root; absent here means the documented residual stands, not a
-    silent downgrade - run_jailed reports which mode executed."""
-    if shutil.which("systemd-run"):
+MEMORY_MAX_BYTES = 256 * 1024 * 1024
+
+_POLICY_CACHE: "tuple[float, list[str] | None, str] | None" = None
+_POLICY_TTL = 300.0
+
+
+def execution_policy() -> "tuple[list[str] | None, str]":
+    """The ONLY execution mode for generated code: a user-scope cgroup whose memory and task limits are PROBED to be
+    applied. Returns (argv_prefix, "") or (None, reason). No fallback and no override: without proven limits,
+    candidate verification, owner activation and invocation all refuse. Binary presence is not evidence; the probe
+    starts a limited scope and reads back the applied memory.max."""
+    global _POLICY_CACHE
+    now = time.monotonic()
+    if _POLICY_CACHE and now - _POLICY_CACHE[0] < _POLICY_TTL:
+        return _POLICY_CACHE[1], _POLICY_CACHE[2]
+    prefix, reason = _probe_cgroup()
+    _POLICY_CACHE = (now, prefix, reason)
+    return prefix, reason
+
+
+def _probe_cgroup() -> "tuple[list[str] | None, str]":
+    if not shutil.which("systemd-run"):
+        return None, "no user-scope cgroup runner (systemd-run --user) on this host"
+    prefix = ["systemd-run", "--user", "--scope", "--quiet",
+              "-p", f"MemoryMax={MEMORY_MAX_BYTES}", "-p", "MemoryHigh=192M", "-p", "TasksMax=64", "--"]
+    try:
         probe = subprocess.run(
-            ["systemd-run", "--user", "--scope", "--quiet", "/bin/true"],
-            capture_output=True, timeout=10,
+            [*prefix, "/bin/sh", "-c", "cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"],
+            capture_output=True, timeout=15, text=True,
         )
-        if probe.returncode == 0:
-            return ["systemd-run", "--user", "--scope", "--quiet",
-                    "-p", "MemoryMax=256M", "-p", "MemoryHigh=192M", "-p", "TasksMax=64", "--", *argv]
-    return argv
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"the cgroup probe itself failed: {error}"
+    if probe.returncode != 0:
+        return None, f"could not start a resource-limited scope: {probe.stderr.strip()[:200] or 'no detail'}"
+    applied = probe.stdout.strip()
+    if applied != str(MEMORY_MAX_BYTES):
+        return None, (f"the cgroup memory limit was not applied (memory.max reads {applied or 'nothing'!r}, "
+                      f"expected {MEMORY_MAX_BYTES}); refusing to run generated code without a proven bound")
+    return prefix, ""
 
 
 def _jail_argv(python: str, runner: Path, snapshot: Path) -> list[str]:
@@ -439,6 +467,9 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
     problem = sandbox_problem()
     if problem:
         return {"ok": False, "error": f"generated plugins need bubblewrap isolation, which is unavailable here, so nothing ran: {problem}"}
+    prefix, reason = execution_policy()
+    if prefix is None:
+        return {"ok": False, "error": f"generated code runs only under proven aggregate resource limits, so nothing ran: {reason}"}
     runner = Path(__file__).with_name("genplugin_runner.py")
     python = shutil.which("python3")
     if not python:
@@ -453,12 +484,10 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
         for filename, content in files.items():
             if content:
                 (snapshot / filename).write_text(content, "utf-8")
-        argv = _jail_argv(python, runner, snapshot)
-        wrapped = _cgroup_wrap(argv)
-        cgrouped = wrapped is not argv
+        argv = [*prefix, *_jail_argv(python, runner, snapshot)]
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"}
         proc = await asyncio.create_subprocess_exec(
-            *wrapped, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), timeout=timeout)
@@ -476,8 +505,7 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
             why = "it hit a resource limit and was killed" if killed else f"exit {proc.returncode}"
             return {"ok": False, "error": f"the candidate produced no protocol reply ({why}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
         if isinstance(reply, dict):
-            reply["isolation"] = ("cgroup-bounded (MemoryMax 256M, TasksMax 64)" if cgrouped else
-                                  "namespace jail only: aggregate tmpfs memory NOT bounded (experimental)")
+            reply["isolation"] = "cgroup-bounded (MemoryMax 256M, TasksMax 64) + namespace jail"
         return reply
     finally:
         shutil.rmtree(snapshot, ignore_errors=True)
@@ -529,6 +557,10 @@ class GeneratedToolset:
         if record is None:
             return tool_error(f"`{name}` is not available to this session (unknown, not yet owner-activated, revoked, or session-lifetime in its creating session only).",
                               "Unavailable")
+        _, reason = execution_policy()
+        if reason:
+            return tool_error(f"`{name}` did not run: generated code executes only under proven aggregate resource limits: {reason}",
+                              "Execution policy unmet")
         # TOCTOU, closed: run_jailed snapshots the files, re-hashes the snapshot against the activated hash, and
         # only then mounts the snapshot into the jail. A swapped file never executes.
         reply = await run_jailed(self.store, record["name"], record["version"], {"mode": "call", "tool": name, "arguments": arguments},
@@ -589,6 +621,11 @@ class ProposeToolset:
         problems = validate_manifest(manifest, existing_names=existing)
         if problems:
             return tool_error("Candidate refused by manifest validation:\n- " + "\n- ".join(problems), "Invalid candidate")
+        _, reason = execution_policy()
+        if reason:
+            return tool_error(
+                "Generated code runs only under proven aggregate resource limits, so this candidate was not even stored: "
+                + reason, "Execution policy unmet")
         if len(self.store.state) >= MAX_PLUGINS and plugin_name not in self.store.state:
             return tool_error(f"The generated-plugin store is full ({MAX_PLUGINS}); the owner must revoke one first.", "Store full")
         files = {"plugin.py": str(arguments.get("source") or ""), "plugin.json": json.dumps(manifest, indent=2), "tests.py": str(arguments.get("tests") or "")}
@@ -651,6 +688,9 @@ def router(app_state):
         problem = sandbox_problem()
         if problem:
             raise HTTPException(409, f"generated plugins need bubblewrap isolation, which is unavailable here, so nothing was activated: {problem}")
+        _, reason = execution_policy()
+        if reason:
+            raise HTTPException(409, f"generated code runs only under proven aggregate resource limits, so nothing was activated: {reason}")
         store = tenant.plugin_store
         # Re-verify the exact candidate in the jail at activation time: review plus a fresh pass, never a stale one.
         report = await run_jailed(store, name, version, {"mode": "test"}, timeout=VERIFY_TIMEOUT)

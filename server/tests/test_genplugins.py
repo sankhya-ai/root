@@ -68,7 +68,13 @@ MANIFEST = [{"name": "stats_summary", "description": "Mean and spread of a numbe
              "parameters": {"type": "object", "properties": {"numbers": {"type": "array", "items": {"type": "number"}}},
                             "required": ["numbers"], "additionalProperties": False}}]
 
-needs_bwrap = pytest.mark.skipif(bool(genplugins.sandbox_problem()), reason=genplugins.sandbox_problem() or "bwrap available")
+genplugins._POLICY_CACHE = None
+_, _POLICY_REASON = genplugins.execution_policy()
+needs_bwrap = pytest.mark.skipif(
+    bool(genplugins.sandbox_problem()) or bool(_POLICY_REASON),
+    reason=(genplugins.sandbox_problem() or _POLICY_REASON or "ok")
+    + " - cgroup-bounded execution is UNTESTED on this host; only refusal paths are proven here",
+)
 
 
 def propose(runtime, source=MATH_SOURCE, tests=MATH_TESTS, tools=MANIFEST, name="numstats"):
@@ -111,7 +117,8 @@ def test_screen_is_not_claimed_as_safety():
 # ----- proposal and lifecycle ------------------------------------------------------------------------------------
 
 
-def test_refused_candidate_leaves_nothing_behind(tmp_path):
+def test_refused_candidate_leaves_nothing_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (["true"], ""))  # the screen, not the policy, is on test
     tenant, runtime, store = make(tmp_path)
     result = propose(runtime, source="import os\n" + MATH_SOURCE)
     assert result["is_error"]
@@ -120,7 +127,8 @@ def test_refused_candidate_leaves_nothing_behind(tmp_path):
     assert not (store.dir / "numstats").exists()
 
 
-def test_manifest_collisions_and_schema_errors_refused(tmp_path):
+def test_manifest_collisions_and_schema_errors_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (["true"], ""))
     tenant, runtime, store = make(tmp_path)
     result = propose(runtime, tools=[{"name": "create_tool", "description": "shadow", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}])
     assert result["is_error"] and "collides" in result["output"] + result["message"]
@@ -237,10 +245,9 @@ def test_activation_is_session_local_until_promoted(tmp_path):
     assert generated.definitions(runtime) == [] and generated.definitions(other) == []
 
 
+@needs_bwrap
 def test_promotion_requires_activation_first(tmp_path):
     tenant, runtime, store = make(tmp_path)
-    if genplugins.sandbox_problem():
-        pytest.skip("bwrap unavailable")
     payload = json.loads(propose(runtime)["output"])
     with pytest.raises(genplugins.PluginError, match="no active"):
         store.promote("numstats")  # verified-but-never-activated cannot be promoted
@@ -316,17 +323,53 @@ def test_oversized_output_is_capped(tmp_path):
 # ----- fail closed -----------------------------------------------------------------------------------------------
 
 
-@needs_bwrap
-def test_every_jail_run_reports_its_true_isolation_mode(tmp_path):
-    """The reply must say which boundary actually ran: cgroup-bounded, or the experimental namespace-only mode.
-    On hosts without a user-scope cgroup runner the second mode must be visible, never silently upgraded."""
+def test_policy_probe_outcomes(monkeypatch):
+    """Policy selection is mocked here: binary presence must never be enough, a failed probe or an unapplied limit
+    refuses, and only a probe that reads back the exact applied MemoryMax yields the cgroup prefix."""
+    genplugins._POLICY_CACHE = None
+    monkeypatch.setattr(genplugins.shutil, "which", lambda name: None)
+    prefix, reason = genplugins.execution_policy()
+    assert prefix is None and "systemd-run" in reason
+
+    genplugins._POLICY_CACHE = None
+    monkeypatch.setattr(genplugins.shutil, "which", lambda name: "/usr/bin/systemd-run")
+
+    class Fake:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(1, stderr="dbus gone"))
+    prefix, reason = genplugins.execution_policy()
+    assert prefix is None and "could not start" in reason
+
+    genplugins._POLICY_CACHE = None
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout="max\n"))  # limit silently not applied
+    prefix, reason = genplugins.execution_policy()
+    assert prefix is None and "not applied" in reason
+
+    genplugins._POLICY_CACHE = None
+    monkeypatch.setattr(genplugins.subprocess, "run", lambda *a, **k: Fake(0, stdout=str(genplugins.MEMORY_MAX_BYTES)))
+    prefix, reason = genplugins.execution_policy()
+    assert reason == "" and prefix and "MemoryMax=268435456" in " ".join(prefix)
+    genplugins._POLICY_CACHE = None
+
+
+def test_propose_and_invoke_refuse_without_proven_limits(tmp_path, monkeypatch):
+    """On a host where bounded execution is unavailable (THIS host included), the whole path refuses:
+    nothing is stored, nothing verifies, nothing activates, nothing invokes. Composition tools are unaffected."""
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (None, "no cgroup here (test double)"))
     tenant, runtime, store = make(tmp_path)
-    payload = json.loads(propose(runtime, tests="def test_ok():\n    pass\n")["output"])
-    mode = payload["verification"].get("isolation", "")
-    assert mode in ("cgroup-bounded (MemoryMax 256M, TasksMax 64)", "namespace jail only: aggregate tmpfs memory NOT bounded (experimental)"), mode
-    if "NOT bounded" in mode:
-        # this host has no user-scope cgroup runner; the experimental label is the honest state
-        assert genplugins._cgroup_wrap(["true"]) == ["true"]
+    result = propose(runtime)
+    assert result["is_error"] and "no cgroup here" in result["output"] + result["message"]
+    assert store.state == {} and not store.dir.exists()  # refused before anything was stored
+    # An already-active plugin (activated when enforcement existed) refuses to invoke once it is gone.
+    store.state["numstats"] = {"active_version": 1, "versions": [{
+        "version": 1, "status": "active", "lifetime": "durable", "session": "s1", "sha256": "ab" * 32,
+        "manifest": {"tools": MANIFEST}, "created_by": "t", "created_at": "", "verified": None}]}
+    store._save()  # tool_owner re-reads from disk
+    generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
+    call = run(generated.call(runtime, "c20", "stats_summary", {"numbers": [1.0]}))
+    assert call["is_error"] and "proven aggregate resource limits" in call["message"]
 
 
 def test_no_bwrap_means_no_verification_no_activation(tmp_path, monkeypatch):
@@ -336,10 +379,9 @@ def test_no_bwrap_means_no_verification_no_activation(tmp_path, monkeypatch):
     assert reply["ok"] is False and "unavailable" in reply["error"]
 
 
+@needs_bwrap
 def test_listing_reports_status_and_hashes(tmp_path):
     tenant, runtime, store = make(tmp_path)
-    if genplugins.sandbox_problem():
-        pytest.skip("bwrap unavailable")
     propose(runtime)
     listing = store.listing()
     assert listing["numstats"]["versions"][0]["status"] == "verified"
