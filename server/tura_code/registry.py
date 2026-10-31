@@ -51,7 +51,8 @@ if TYPE_CHECKING:
 CREATE_TOOL = "create_tool"
 CREATE_ROLE = "create_role"
 LIST_TOOL = "registry_list"
-MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, "propose_tool")  # propose_tool lives in genplugins.py
+ADOPT_ROLE = "adopt_role"
+MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, "propose_tool", ADOPT_ROLE)  # propose_tool lives in genplugins.py
 
 MAX_TOOLS = 64
 MAX_ROLES = 32
@@ -629,6 +630,43 @@ def role_creator_ceiling(tenant: "Tenant", runtime: "SessionRuntime | None", reg
     return set(allowed) | set(catalogue.GATEWAY_NAMES)
 
 
+def adoptable_role(tenant: "Tenant", runtime: "SessionRuntime", registry: Registry, name: str, version: int = 0) -> tuple[dict[str, Any] | None, str]:
+    """Resolve a role this session may ADOPT, and check the adoption grants nothing.
+
+    Adoptable: built-in presets, durable registry roles, and session-lifetime roles THIS session created (never
+    another session's). The role's actual tools - including every step of any composite it names - must each be
+    inside the session's CURRENT effective ceiling (tenant scope AND session scope, via ``catalogue.allowed``), so
+    adopting can only ever narrow what the session can do. Returns (resolved, problem)."""
+    from .jobs import ROLES  # local import: jobs imports this module
+
+    if name in ROLES:
+        scope = list(ROLES[name])
+        resolved = {"name": name, "version": None, "tools": scope, "description": "built-in preset", "guides": []}
+    else:
+        record = registry.active_role(name, version=version or None)
+        if record is None:
+            return None, f"unknown or inactive role `{name}`"
+        if record.get("lifetime") != "durable" and record.get("session") != getattr(runtime.record, "id", None):
+            return None, (f"role `{name}` v{record['version']} is private to the session that created it; this session can only adopt "
+                          "durable roles or its own. The owner can start a job with a private role (source_session) instead.")
+        resolved = record
+    outside = [t for t in resolved["tools"] if t not in catalogue.GATEWAY_NAMES and not catalogue.allowed(tenant, t, runtime)]
+    if outside:
+        return None, (f"adopting `{name}` would give this session tool(s) outside its current ceiling: {', '.join(sorted(outside))}. "
+                      "Adoption only narrows. To use that role, the owner can start a job with it (POST /api/jobs).")
+    # Composite expansion: naming a composite is not permission for its steps. Pre-check them against the same
+    # ceiling so an adopted role fails HERE, not mid-run (execution re-checks them per step regardless).
+    session = getattr(runtime.record, "id", None)
+    for tool in resolved["tools"]:
+        composite = registry.active_tool(tool, session) if tool in registry.tool_names() else None
+        if composite:
+            bad_steps = [st["tool"] for st in composite["steps"] if not catalogue.allowed(tenant, st["tool"], runtime)]
+            if bad_steps:
+                return None, (f"role `{name}` names composite `{tool}`, whose step tool(s) {', '.join(sorted(set(bad_steps)))} are outside "
+                              "this session's ceiling; adopting it would not grant them (steps are re-checked at execution), so the role is refused here.")
+    return resolved, ""
+
+
 def existing_tool_names(tenant: "Tenant", runtime: "SessionRuntime | None", registry: Registry) -> set[str]:
     """Names a new tool must not collide with: native, host, gateway, registry management and registered composites."""
     return NATIVE_TOOLS | host_tool_names(tenant, runtime, registry) | set(catalogue.GATEWAY_NAMES) | set(MANAGEMENT_TOOLS) | registry.tool_names()
@@ -777,6 +815,25 @@ class RegistryToolset:
                 },
             },
             {
+                "name": ADOPT_ROLE,
+                "description": (
+                    "Take on an existing role for the rest of this session: its guides load and your tools NARROW to its scope. "
+                    "One-way - the session cannot widen back, and only roles whose tools are all inside your current scope can be adopted "
+                    "(durable roles, built-in presets, or roles this session itself created). The role version is pinned. "
+                    "Output contracts are advisory in a chat session; they are enforced only for jobs. "
+                    "To RUN work under a role outside your scope, ask the owner to start a job instead."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "A built-in role, a durable registry role, or one this session created"},
+                        "version": {"type": "integer", "description": "Pin a registry role version (0 = the active version)"},
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": LIST_TOOL,
                 "description": "List registered tools and roles with their status (draft/active/revoked), versions, requirements and test results.",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -785,8 +842,8 @@ class RegistryToolset:
 
     def handles(self, name: str) -> bool:
         # MANAGEMENT_TOOLS is also the name-reservation list (it contains genplugins' propose_tool); this toolset
-        # only ANSWERS its own three.
-        return name in (CREATE_TOOL, CREATE_ROLE, LIST_TOOL)
+        # only ANSWERS its own four.
+        return name in (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, ADOPT_ROLE)
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tenant = runtime.tenant
@@ -819,6 +876,29 @@ class RegistryToolset:
                 payload["available_from"] = "your next turn (the runtime registers new host tools when its tool list refreshes); this session only, unless the owner promotes it"
                 payload["tell_the_owner"] = f"Say what you created (`{arguments['name']}`: {record['description']}) and that joining the durable catalogue is their choice."
             return _ok(payload, f"Tool `{arguments['name']}` v{record['version']} ({record['status']})")
+        if name == ADOPT_ROLE:
+            resolved, problem = adoptable_role(tenant, runtime, registry, str(arguments.get("name") or ""), int(arguments.get("version") or 0))
+            if problem:
+                return tool_error(problem, "Cannot adopt role")
+            record = runtime.record
+            record.role = resolved["name"]
+            record.role_version = resolved["version"] or 0
+            record.tool_scope = list(resolved["tools"])  # one-way narrowing; the fingerprint change re-inits the runtime next turn
+            save = getattr(runtime, "save_record", None)
+            if callable(save):
+                save()
+            from .guides import guides_for
+
+            loaded = guides_for(resolved["name"], tenant)
+            if callable(emit):
+                emit("RoleAdopted", {"role": resolved["name"], "version": resolved["version"], "tools": len(resolved["tools"]),
+                                     "guides": loaded, "pinned": True, "reversible": False})
+            payload = {"role": resolved["name"], "version": resolved["version"], "tools_now_in_scope": list(resolved["tools"]),
+                       "guides_loaded": loaded, "pinned": True, "one_way": True,
+                       "honest_limits": ("tools narrow at once for host tools and from the next turn for native runtime tools; "
+                                         "guides follow the role now; any output contract is advisory in a chat session (enforced for jobs only); "
+                                         "if this role is revoked later, your narrowed tools stay narrowed and its guides stop loading.")}
+            return _ok(payload, f"Adopted role `{resolved['name']}`" + (f" v{resolved['version']}" if resolved["version"] else ""))
         if name == CREATE_ROLE:
             from .guides import GUIDES  # local import: guides imports nothing from here
             from .jobs import ROLES

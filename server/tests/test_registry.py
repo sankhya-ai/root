@@ -762,3 +762,191 @@ def test_concurrent_promotion_and_revocation_stay_consistent(tmp_path):
     final = registry.Registry(tmp_path)  # parses, so no torn write
     entry = final.tools["raced_tool"]
     assert entry["active_version"] in {v["version"] for v in entry["versions"]}
+
+
+# --- adopt_role: one-way narrowing role adoption inside a session ------------------------------------------
+
+
+def adoptable_runtime(tenant, scope=(), session="s1"):
+    """A fake runtime whose record is mutable like the real SessionRecord, with an emit collector."""
+    events = []
+    runtime = SimpleNamespace(
+        tenant=tenant,
+        record=SimpleNamespace(job_role="", id=session, tool_scope=list(scope), role="", role_version=0),
+        emit=lambda kind, payload, persist=True: events.append((kind, payload)),
+    )
+    return runtime, events
+
+
+def make_role(reg, name="docs_reviewer", tools=("find_tools", "use_tool", "read_pdf"), description="Review docs only.", session="s1"):
+    record, problems = reg.create_role(
+        {"name": name, "description": description, "tools": list(tools), "guides": []},
+        universe={"find_tools", "use_tool", "read_pdf", "process", "github_comment", "pdf_digest"},
+        guide_names=set(), builtin_roles=set(jobs.ROLES), created_by="model", session=session,
+    )
+    assert not problems, problems
+    return record
+
+
+def test_adopt_durable_role_narrows_and_pins(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    make_role(reg)
+    reg.promote_role("docs_reviewer")
+    runtime, events = adoptable_runtime(tenant)
+    result = run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "docs_reviewer"}))
+    assert result["is_error"] is False
+    record = runtime.record
+    assert record.role == "docs_reviewer" and record.role_version == 1
+    assert sorted(record.tool_scope) == ["find_tools", "read_pdf", "use_tool"]
+    payload = json.loads(result["output"])
+    assert payload["one_way"] is True and payload["pinned"] is True
+    assert any(kind == "RoleAdopted" and body["role"] == "docs_reviewer" for kind, body in events)
+
+
+def test_adopt_own_session_role_but_not_another_sessions(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    make_role(reg, name="mine")  # created by session s1, session-lifetime
+    runtime, _ = adoptable_runtime(tenant, session="s1")
+    assert run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "mine"}))["is_error"] is False
+
+    other, _ = adoptable_runtime(tenant, session="s2")  # a different session cannot adopt s1's private role
+    refused = run(registry.RegistryToolset().call(other, "c2", "adopt_role", {"name": "mine"}))
+    assert refused["is_error"] is True and "private to the session" in refused["message"]
+
+
+def test_adopt_never_widens_past_the_session_ceiling(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    make_role(reg, tools=["find_tools", "use_tool", "read_pdf"])
+    reg.promote_role("docs_reviewer")
+    scoped, _ = adoptable_runtime(tenant, scope=["find_tools", "use_tool"])  # read_pdf is outside this ceiling
+    refused = run(registry.RegistryToolset().call(scoped, "c1", "adopt_role", {"name": "docs_reviewer"}))
+    assert refused["is_error"] is True and "outside its current ceiling" in refused["message"]
+    assert scoped.record.role == "" and scoped.record.tool_scope == ["find_tools", "use_tool"]  # unchanged
+
+    fits, _ = adoptable_runtime(tenant, scope=["read_pdf", "find*"])  # fnmatch ceiling that DOES cover it
+    assert run(registry.RegistryToolset().call(fits, "c2", "adopt_role", {"name": "docs_reviewer"}))["is_error"] is False
+
+
+def test_adopt_refuses_a_role_whose_composite_steps_are_outside_the_ceiling(tmp_path):
+    """Naming a composite is not permission for its steps: a role that leans on an un-runnable composite is refused up front."""
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    run(registry.RegistryToolset().call(runtime, "c1", "create_tool", spec()))  # composite pdf_digest -> read_pdf + github_comment
+    reg.promote_tool("pdf_digest")
+    record, problems = reg.create_role(
+        {"name": "digest_writer", "description": "Write digests.", "tools": ["find_tools", "use_tool", "pdf_digest"], "guides": []},
+        universe={"find_tools", "use_tool", "pdf_digest"}, guide_names=set(), builtin_roles=set(jobs.ROLES), created_by="model", session="s1",
+    )
+    assert not problems
+    reg.promote_role("digest_writer")
+    scoped, _ = adoptable_runtime(tenant, scope=["pdf_digest", "read_pdf", "find_tools", "use_tool"])  # github_comment missing
+    refused = run(registry.RegistryToolset().call(scoped, "c2", "adopt_role", {"name": "digest_writer"}))
+    assert refused["is_error"] is True and "github_comment" in refused["message"]
+
+
+def test_adopt_builtin_role_and_unknown_role(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    runtime, _ = adoptable_runtime(tenant)
+    unknown = run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "nope"}))
+    assert unknown["is_error"] is True and "unknown or inactive" in unknown["message"]
+    builtin = run(registry.RegistryToolset().call(runtime, "c2", "adopt_role", {"name": "developer"}))
+    assert builtin["is_error"] is False and runtime.record.role == "developer" and runtime.record.role_version == 0
+
+
+def test_adopt_pins_the_version_and_refuses_a_wrong_pin(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    make_role(reg)
+    reg.promote_role("docs_reviewer")
+    make_role(reg, tools=["find_tools", "use_tool"])  # v2, narrower
+    reg.promote_role("docs_reviewer")
+    runtime, _ = adoptable_runtime(tenant)
+    wrong = run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "docs_reviewer", "version": 9}))
+    assert wrong["is_error"] is True and "unknown or inactive" in wrong["message"]
+    ok = run(registry.RegistryToolset().call(runtime, "c2", "adopt_role", {"name": "docs_reviewer", "version": 1}))
+    assert ok["is_error"] is False and runtime.record.role_version == 1
+
+
+def test_gateway_honors_the_narrowed_scope_in_the_same_turn(tmp_path):
+    """Adoption rewrites the session record the gateway reads per call: no restart needed for host/gateway tools."""
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    make_role(reg)
+    reg.promote_role("docs_reviewer")
+    runtime, _ = adoptable_runtime(tenant)
+    gateway = next(t for t in tenant.toolsets if isinstance(t, catalogue.GatewayToolset))
+    # The gateway dispatches deferred-plugin tools ("documents", "github") and registry composites.
+    before = run(gateway.call(runtime, "g1", "use_tool", {"name": "github_comment", "arguments": {}}))
+    assert before["is_error"] is False
+    run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "docs_reviewer"}))
+    after = run(gateway.call(runtime, "g2", "use_tool", {"name": "github_comment", "arguments": {}}))
+    assert after["is_error"] is True and "not an available tool" in after["message"]
+    kept = run(gateway.call(runtime, "g3", "use_tool", {"name": "read_pdf", "arguments": {}}))
+    assert kept["is_error"] is False
+
+
+def test_revocation_after_adoption_keeps_the_narrowed_scope(tmp_path):
+    """The adopted scope is a snapshot: revoking the registry role does not widen the session back; its guides just stop."""
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    make_role(reg)
+    reg.promote_role("docs_reviewer")
+    runtime, events = adoptable_runtime(tenant)
+    run(registry.RegistryToolset().call(runtime, "c1", "adopt_role", {"name": "docs_reviewer"}))
+    reg.set_role_status("docs_reviewer", "revoked")
+    assert sorted(runtime.record.tool_scope) == ["find_tools", "read_pdf", "use_tool"]  # still narrowed
+    gateway = next(t for t in tenant.toolsets if isinstance(t, catalogue.GatewayToolset))
+    still = run(gateway.call(runtime, "g1", "use_tool", {"name": "github_comment", "arguments": {}}))
+    assert still["is_error"] is True
+
+
+@requires_runtime
+def test_adopt_role_in_a_real_session(client, workspace, script):
+    """End to end with the real runtime: create + owner-promote a role, adopt it in another session, and the
+    session record and the live gateway both reflect the narrowing in the same turn."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    first = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["find_tools", "use_tool", "ReadFile"]}), text("done")])
+    with client.websocket_connect(f"/api/sessions/{first}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "make a role")
+    assert client.post("/api/registry/roles/reader/promote").status_code == 200
+
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([
+        tool_call("a", "adopt_role", {"name": "reader"}),
+        tool_call("u", "use_tool", {"name": "github_comment", "arguments": {"body": "x"}}),  # outside the adopted scope, same turn
+        text("done"),
+    ])
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "adopt the reader role")
+    results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(events, "ToolResult")}
+    assert results["a"]["is_error"] is False
+    adopted = json.loads(results["a"]["output"])
+    assert adopted["one_way"] is True and adopted["version"] == 1
+    # The same-turn gateway dispatch already honors the narrowing - no restart, no cached scope.
+    assert results["u"]["is_error"] is True and "not an available tool" in results["u"]["message"]
+    notice = next(e for e in of_type(events, "RoleAdopted"))
+    assert notice["payload"]["role"] == "reader" and notice["payload"]["reversible"] is False
+    record = client.get(f"/api/sessions/{session_id}").json()
+    assert record["role"] == "reader" and record["role_version"] == 1
+    assert sorted(record["tool_scope"]) == ["ReadFile", "find_tools", "use_tool"]
+
+
+@requires_runtime
+def test_adopt_role_that_widens_is_refused_in_a_scoped_session(client, workspace, script):
+    """A scoped session cannot use adoption to escape its ceiling; the refusal leaves the record untouched."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    first = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([tool_call("r", "create_role", {"name": "heavy", "description": "Runs processes.", "tools": ["find_tools", "use_tool", "process"]}), text("done")])
+    with client.websocket_connect(f"/api/sessions/{first}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "make a role")
+    assert client.post("/api/registry/roles/heavy/promote").status_code == 200
+
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace), "tool_scope": ["find_tools", "use_tool", "adopt_role"]}).json()["id"]
+    script([tool_call("a", "adopt_role", {"name": "heavy"}), text("done")])
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "adopt heavy")
+    results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(events, "ToolResult")}
+    assert results["a"]["is_error"] is True and "outside its current ceiling" in results["a"]["message"]
+    record = client.get(f"/api/sessions/{session_id}").json()
+    assert record["role"] == "" and record["tool_scope"] == ["find_tools", "use_tool", "adopt_role"]

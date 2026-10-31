@@ -406,6 +406,20 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       });
       break;
     }
+    case "RoleAdopted": {
+      // The session took on a role: one-way narrowing, pinned version. The owner must SEE the narrowing, not infer it.
+      const entry = p as { role?: string; version?: number | null; tools?: number; guides?: string[]; reversible?: boolean };
+      const version = entry.version ? ` v${entry.version}` : "";
+      const guides = (entry.guides ?? []).length ? (entry.guides ?? []).join(", ") : "none";
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: `Adopted role \`${entry.role ?? "?"}\`${version} for the rest of this session: tools narrowed to ${entry.tools ?? "?"}, guides: ${guides}. One-way - the session cannot widen back; output contracts are advisory here (enforced for jobs).`,
+      });
+      break;
+    }
     default:
       break;
   }

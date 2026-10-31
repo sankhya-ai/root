@@ -140,6 +140,17 @@ test("a registry creation becomes a visible notice, not a silent event", () => {
   assert.match(roleNotice.text, /durable catalogue/);
 });
 
+test("adopting a role shows the narrowing, the pin and the one-way rule", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("RoleAdopted", { role: "docs_reviewer", version: 2, tools: 5, guides: ["evidence"], reversible: false }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /Adopted role `docs_reviewer` v2/);
+  assert.match(notice.text, /narrowed to 5/);
+  assert.match(notice.text, /One-way/);
+  assert.match(notice.text, /advisory/);
+});
+
 test("files a run produced are collected per turn, once each", () => {
   const state = createTranscript();
   applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));

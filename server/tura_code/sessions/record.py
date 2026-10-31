@@ -34,12 +34,16 @@ class SessionRecord:
     #: For a candidate: the session that owns its flow, and which candidate it is.
     parent: str = ""
     role: str = ""
+    #: The registry role version ``role`` was adopted at (0 = built-in or none). Set by ``adopt_role``; pinned, so a
+    #: newer role version never silently changes a session that adopted the old one.
+    role_version: int = 0
     #: Nobody is watching (a scheduled run): what would ask the owner is declined instead.
     unattended: bool = False
     #: The schedule that started this session, if any.
     schedule: str = ""
     #: Host-set tool-name patterns (fnmatch) this session may use, on top of the tenant's ``tool_scope``.
-    #: Set when the session is created, never by the model. Empty: no session limit. See ``catalogue.guarantee``.
+    #: Set when the session is created; the model can only NARROW it, one-way, by ``adopt_role`` (registry.py).
+    #: Empty: no session limit. See ``catalogue.guarantee``.
     tool_scope: list[str] = field(default_factory=list)
     #: Per-job cap on model steps in a turn (``jobs``); 0 = the settings' limit.
     max_steps: int = 0
