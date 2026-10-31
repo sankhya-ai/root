@@ -126,6 +126,20 @@ test("a turn keeps its checkpoint and a rollback says what it restored", () => {
   assert.deepEqual([rollback.label, rollback.undo, rollback.restored, rollback.removed], ["edit", "beef", ["a.py"], ["b.py"]]);
 });
 
+test("a registry creation becomes a visible notice, not a silent event", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("RegistryChanged", { kind: "tool", name: "pdf_digest", version: 1, status: "active", lifetime: "session", description: "Read a PDF and file a digest comment." }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /pdf_digest/);
+  assert.match(notice.text, /this session only/);
+  applyEvent(state, ev("RegistryChanged", { kind: "role", name: "docs_reviewer", version: 2, status: "active", lifetime: "durable", description: "Reviews docs." }));
+  const roleNotice = state.blocks[state.blocks.length - 1];
+  assert.ok(roleNotice.kind === "notice");
+  assert.match(roleNotice.text, /role `docs_reviewer` v2/);
+  assert.match(roleNotice.text, /durable catalogue/);
+});
+
 test("files a run produced are collected per turn, once each", () => {
   const state = createTranscript();
   applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));

@@ -566,3 +566,83 @@ def test_gateway_reaches_a_tool_created_this_turn_real_runtime(client, workspace
         results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "make and immediately use a tool"), "ToolResult")}
     assert results["c"]["is_error"] is False
     assert results["u"]["is_error"] is False and "step 0" in results["u"]["output"]  # same-turn use through the gateway
+
+
+# ----- concurrency / TOCTOU / version semantics ------------------------------------------------------------------
+
+
+def test_two_sessions_can_own_same_named_tools_without_shadowing(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    reg.create_tool(spec(), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+    v2, _ = reg.create_tool(spec(description="s2's version"), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s2")
+    assert v2["version"] == 2
+    assert reg.active_tool("pdf_digest", "s1")["description"] == "Read a PDF and file a digest comment."  # s1 keeps its own
+    assert reg.active_tool("pdf_digest", "s2")["description"] == "s2's version"
+    assert reg.active_tool("pdf_digest", "s3") is None  # neither is durable
+    reg.promote_tool("pdf_digest", version=1)
+    assert reg.active_tool("pdf_digest", "s3")["description"] == "Read a PDF and file a digest comment."  # everyone else gets the durable one
+
+
+def test_duplicate_creation_versions_and_double_promotion_is_stable(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    v1, _ = reg.create_tool(spec(), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+    v2, _ = reg.create_tool(spec(), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+    assert (v1["version"], v2["version"]) == (1, 2)  # never two live drafts of the same version
+    reg.promote_tool("pdf_digest")
+    again = reg.promote_tool("pdf_digest")  # a second promotion is a no-op, not a new state
+    assert again["lifetime"] == "durable" and again["version"] == 2
+    with pytest.raises(registry.RegistryError):
+        reg.promote_tool("pdf_digest", version=99)
+
+
+def test_revocation_mid_pipeline_stops_before_the_next_step(tmp_path):
+    tenant, runtime, reg, toolsets = make(tmp_path)
+    composite = registry.CompositeToolset(reg)
+
+    class Revoking(FakeToolset):
+        async def call(self, runtime, call_id, name, arguments):
+            reg.set_tool_status("pdf_digest", "revoked")  # lands between step 0 and step 1
+            return await super().call(runtime, call_id, name, arguments)
+
+    toolsets[1] = Revoking("documents", ["read_pdf"])
+    reg.create_tool(spec(), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+    result = run(composite.call(runtime, "c1", "pdf_digest", {"path": "a", "pr": 1}))
+    assert result["is_error"] and "revoked or superseded" in result["message"]
+    assert json.loads(result["output"])["failed_at_step"] == 1  # step 0 ran, step 1 never did
+    assert toolsets[2].calls == []
+
+
+def test_superseded_mid_pipeline_stops_instead_of_running_a_stale_version(tmp_path):
+    tenant, runtime, reg, toolsets = make(tmp_path)
+    composite = registry.CompositeToolset(reg)
+
+    class Superseding(FakeToolset):
+        async def call(self, runtime, call_id, name, arguments):
+            reg.create_tool(spec(description="v2"), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+            return await super().call(runtime, call_id, name, arguments)
+
+    toolsets[1] = Superseding("documents", ["read_pdf"])
+    reg.create_tool(spec(), existing_names=set(), host_tool_names={"read_pdf", "github_comment"}, created_by="t", session="s1")
+    result = run(composite.call(runtime, "c1", "pdf_digest", {"path": "a", "pr": 1}))
+    assert result["is_error"] and "revoked or superseded" in result["message"]  # v1's remaining steps did not run under v2's existence
+
+
+def test_role_version_is_pinned_at_job_creation_and_latest_wins(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    universe = registry.role_universe(tenant, runtime, reg)
+    reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
+    assert jobs.resolve_role(tenant, "docs_reviewer")["version"] == 1
+    reg.create_role(role_spec(tools=["ReadFile"]), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
+    resolved = jobs.resolve_role(tenant, "docs_reviewer")
+    assert resolved["version"] == 2 and resolved["scope"] == ["ReadFile"]  # a job start binds the version active at that moment
+    # Cross-session: roles resolve at owner level (POST /api/jobs is owner-authenticated); no session context is needed or used.
+    assert jobs.resolve_role(SimpleNamespace(registry=reg), "docs_reviewer")["version"] == 2
+
+
+def test_event_payloads_and_outputs_carry_no_hidden_data(tmp_path):
+    # RegistryChanged payloads are the entry's public metadata only (no steps, no arguments, no test output).
+    tenant, runtime, reg, _ = make(tmp_path)
+    events = []
+    runtime.emit = lambda kind, payload, persist=True: events.append(payload)
+    run(registry.RegistryToolset().call(runtime, "c1", "create_tool", spec()))
+    assert set(events[0]) == {"kind", "name", "version", "status", "lifetime", "description"}

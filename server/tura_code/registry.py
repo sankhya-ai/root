@@ -237,12 +237,17 @@ class Registry:
         entry = self.tools.get(name)
         if not entry:
             return None
+        # 1) The caller's OWN latest session version: another session creating the same name must never shadow it.
+        if session is not None:
+            own = [v for v in entry["versions"] if v["status"] == "active" and v.get("lifetime") == "session" and v.get("session") == session]
+            if own:
+                return own[-1]
+        # 2) The pinned version, if this caller may use it.
         version = entry.get("active_version")
         record = next((v for v in entry["versions"] if v["version"] == version and v["status"] == "active"), None)
         if record is not None and (record.get("lifetime") == "durable" or (session is not None and record.get("session") == session)):
             return record
-        # The pinned version is not for this session (or is a draft): fall back to the newest durable active version,
-        # so one session's fresh draft never takes a promoted tool away from everyone else.
+        # 3) The newest durable version, so one session's fresh draft never takes a promoted tool away from everyone else.
         durable = [v for v in entry["versions"] if v["status"] == "active" and v.get("lifetime") == "durable"]
         return durable[-1] if durable else None
 
@@ -596,6 +601,12 @@ async def run_composite(tenant: "Tenant", runtime: "SessionRuntime", call_id: st
         return tool_error("Invalid arguments: " + "; ".join(problems), "Invalid arguments")
     outputs: list[dict[str, Any]] = []
     for i, step in enumerate(record["steps"]):
+        # TOCTOU: the version this call resolved must still be the active one before EACH step. A revocation or a
+        # newer version landing mid-pipeline stops the run instead of silently executing a stale or replaced tool.
+        current = registry.active_tool(record.get("name", ""), getattr(runtime.record, "id", None))
+        if current is None or current["version"] != record["version"]:
+            return _composite_result(record, outputs, "this tool was revoked or superseded while the pipeline was running; the pipeline stopped before step "
+                                     f"{i}. Re-run to use the current version.", step=i)
         tool = step["tool"]
         if not catalogue.allowed(tenant, tool, runtime):
             return _composite_result(record, outputs, f"step {i} (`{tool}`) is outside this session's tool scope, so the pipeline stopped here. "
