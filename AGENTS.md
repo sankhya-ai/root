@@ -101,10 +101,14 @@ tmp-file writes; parallel creators lose no versions (tested with 6 OS processes)
 
 Set and tested: 10s CPU (RLIMIT_CPU), 512MB address space (RLIMIT_AS), 16MB per file (RLIMIT_FSIZE), 256 fds, a
 wall-clock timeout with SIGKILL backstop, and a no-network namespace. Set but NOT jail-scoped: RLIMIT_NPROC counts
-per-uid across the host user (defense-in-depth only; the fork path is also refused by the import screen). NOT bounded
-in v1: aggregate disk/inode exhaustion - the scratch workspace is a jail-private tmpfs (RAM-backed) with no size
-option in the installed bubblewrap; the CPU limit bounds write rate in practice but a determined candidate can
-pressure host RAM within its 10s CPU budget. That residual is documented, not hidden.
+per-uid across the host user (defense-in-depth only; the fork path is also refused by the import screen). Total
+memory INCLUDING tmpfs writes, and task count, are bounded when the host offers a user-scope cgroup runner
+(`systemd-run --user`, no root or host change needed): the jail is then wrapped with MemoryMax=256M / TasksMax=64 and
+every run's reply says so. Where no such runner exists, aggregate RAM-backed tmpfs pressure is NOT bounded and every
+run's reply carries `namespace jail only ... (experimental)` - the CPU limit is NOT claimed to bound memory. In that
+mode generated plugins are review-time tooling, not production-safe execution; activation is never automatic in
+either mode. Next bounded fix: require the cgroup wrapper (fail closed) or a size-limited scratch mount before
+declaring the path production-safe.
 
 ### Role selection, bounded within existing grants
 

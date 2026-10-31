@@ -23,6 +23,10 @@ may PROPOSE a generated plugin: a small Python module it writes itself. The gove
   RLIMIT_NPROC is per-uid (host-wide) defense-in-depth, not a jail-scoped cap. Aggregate disk/inode pressure inside
   the RAM-backed scratch tmpfs is NOT bounded in v1; the CPU budget bounds write rate in practice. Shared host
   kernel; a microVM tier is the step up if generated code ever runs without per-hash owner activation.
+
+EXPERIMENTAL: aggregate memory pressure through the RAM-backed scratch tmpfs is NOT bounded on hosts where no
+user-scope cgroup runner is available (see _cgroup_wrap). Until that gap closes, treat generated plugins as
+review-time tooling, not production-safe execution. Nothing ever activates without the owner's explicit hash call.
 * Identity is content: a version is the SHA-256 of its files. Activation names the hash and re-verifies in the jail
   before flipping the switch, so a tampered file or a stale review cannot activate. Revocation takes effect on the
   next call; each call re-resolves the active version and re-checks the hash before spending a process on it.
@@ -39,6 +43,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -395,6 +400,21 @@ def sandbox_problem() -> str:
 JAIL_SYSTEM_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin")
 
 
+def _cgroup_wrap(argv: list[str]) -> list[str]:
+    """Bound TOTAL memory (which includes tmpfs writes) and tasks with a user-scope cgroup when the host offers one.
+    systemd-run --user needs no host change and no root; absent here means the documented residual stands, not a
+    silent downgrade - run_jailed reports which mode executed."""
+    if shutil.which("systemd-run"):
+        probe = subprocess.run(
+            ["systemd-run", "--user", "--scope", "--quiet", "/bin/true"],
+            capture_output=True, timeout=10,
+        )
+        if probe.returncode == 0:
+            return ["systemd-run", "--user", "--scope", "--quiet",
+                    "-p", "MemoryMax=256M", "-p", "MemoryHigh=192M", "-p", "TasksMax=64", "--", *argv]
+    return argv
+
+
 def _jail_argv(python: str, runner: Path, snapshot: Path) -> list[str]:
     args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
             "--unshare-cgroup-try", "--unshare-net"]
@@ -434,9 +454,11 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
             if content:
                 (snapshot / filename).write_text(content, "utf-8")
         argv = _jail_argv(python, runner, snapshot)
+        wrapped = _cgroup_wrap(argv)
+        cgrouped = wrapped is not argv
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"}
         proc = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            *wrapped, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), timeout=timeout)
@@ -453,6 +475,9 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
             killed = proc.returncode in (-9, -11, -6, -24, -25, 137)  # SIGKILL/SIGSEGV/SIGABRT/SIGXCPU/SIGXFSZ
             why = "it hit a resource limit and was killed" if killed else f"exit {proc.returncode}"
             return {"ok": False, "error": f"the candidate produced no protocol reply ({why}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
+        if isinstance(reply, dict):
+            reply["isolation"] = ("cgroup-bounded (MemoryMax 256M, TasksMax 64)" if cgrouped else
+                                  "namespace jail only: aggregate tmpfs memory NOT bounded (experimental)")
         return reply
     finally:
         shutil.rmtree(snapshot, ignore_errors=True)

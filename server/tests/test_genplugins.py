@@ -316,6 +316,19 @@ def test_oversized_output_is_capped(tmp_path):
 # ----- fail closed -----------------------------------------------------------------------------------------------
 
 
+@needs_bwrap
+def test_every_jail_run_reports_its_true_isolation_mode(tmp_path):
+    """The reply must say which boundary actually ran: cgroup-bounded, or the experimental namespace-only mode.
+    On hosts without a user-scope cgroup runner the second mode must be visible, never silently upgraded."""
+    tenant, runtime, store = make(tmp_path)
+    payload = json.loads(propose(runtime, tests="def test_ok():\n    pass\n")["output"])
+    mode = payload["verification"].get("isolation", "")
+    assert mode in ("cgroup-bounded (MemoryMax 256M, TasksMax 64)", "namespace jail only: aggregate tmpfs memory NOT bounded (experimental)"), mode
+    if "NOT bounded" in mode:
+        # this host has no user-scope cgroup runner; the experimental label is the honest state
+        assert genplugins._cgroup_wrap(["true"]) == ["true"]
+
+
 def test_no_bwrap_means_no_verification_no_activation(tmp_path, monkeypatch):
     monkeypatch.setattr(genplugins, "sandbox_problem", lambda: "bubblewrap (`bwrap`) is not installed.")
     tenant, runtime, store = make(tmp_path)
