@@ -207,6 +207,9 @@ def render(result: dict[str, Any], shot: Path, size: tuple[int, int], target: st
 
 def install(server) -> None:
     def extend(tenant) -> None:
+        from .act import ActToolset
+
         tenant.toolsets.append(InspectToolset())
+        tenant.toolsets.append(ActToolset())
 
     server.extensions.append(extend)
