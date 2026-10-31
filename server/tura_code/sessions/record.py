@@ -51,6 +51,10 @@ class SessionRecord:
     credentials: list[str] = field(default_factory=list)
     #: Per-session jail chosen by the host: "" (the server's own sandbox), "bwrap" (files only) or "bwrap-model-only" (files and network). See ``sandbox``.
     isolation: str = ""
+    #: The job role (``jobs``) when the session is a job: selects the review guides it may load. Set by the host.
+    job_role: str = ""
+    #: What the owner authorized this job to do on pages (``visual.act``): {"interact": {origin, allow_writes}, "deployed": {urls}}. Host-set only.
+    visual: dict = field(default_factory=dict)
 
     @property
     def answering(self) -> bool:
