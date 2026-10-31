@@ -375,8 +375,7 @@ def test_e2e_propose_activate_invoke_through_the_real_app(client, workspace, scr
     """The whole governed path through the real HTTP API and runtime, not direct calls: a session proposes
     model-written code (verified in the jail, INERT), the owner activates the exact hash over the owner API, and only
     then can a session invoke it - every invocation a fresh networkless jail."""
-    from tests.conftest import of_type, run_turn, text
-    from tests.test_registry import tool_call
+    from conftest import of_type, run_turn, text, tool_call
 
     script([tool_call("p", "propose_tool", {
         "name": "numstats",
