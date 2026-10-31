@@ -23,13 +23,14 @@ import json
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -156,6 +157,76 @@ class Invite:
 
 def _x25519_public(raw: bytes) -> X25519PublicKey:
     return X25519PublicKey.from_public_bytes(raw)
+
+
+def wrap_epoch_key(enc_pub: str, *, line: str, epoch: int, owner: str, key: bytes) -> dict[str, str]:
+    """Mirrors chamber's wrapEpochKey: ECIES to the member's certified X25519 public key."""
+    ephemeral = X25519PrivateKey.generate()
+    shared = ephemeral.exchange(_x25519_public(_unb64(enc_pub)))
+    wrap = HKDF(algorithm=hashes.SHA256(), length=32, salt=line.encode(), info=b"chamber/epoch-wrap/v3").derive(shared)
+    nonce = os.urandom(12)
+    sealed = nonce + AESGCM(wrap).encrypt(nonce, key, f"{line}|epoch|{epoch}|{owner}".encode())
+    raw_pub = ephemeral.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return {"eph": _b64(raw_pub), "sealed": _b64(sealed)}
+
+
+# ----- the admin side (mirrors chamber's admin.mjs; tests and future admin tooling) --------------
+#
+# An admin-signed body is b64url(JSON) + "." + b64url(Ed25519 signature over the body TEXT), with
+# the claims serialized exactly like JSON.stringify({ v: 1, iat, ...claims }): v first, iat
+# second, insertion order after, no spaces.
+
+
+def new_admin_key() -> tuple[str, str]:
+    """A fresh admin key: (public, private), the public half is the raw 32-byte key everyone may see."""
+    private = Ed25519PrivateKey.generate()
+    return (
+        _b64(private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)),
+        _b64(private.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())),
+    )
+
+
+def new_member_keypair() -> dict[str, str]:
+    """A fresh member key in chamber's key-file shape: Ed25519 signing + separate X25519 encryption."""
+    signing = Ed25519PrivateKey.generate()
+    enc = X25519PrivateKey.generate()
+    der = serialization.Encoding.DER
+    pkcs8 = serialization.PrivateFormat.PKCS8
+    raw = serialization.PublicFormat.Raw
+    return {
+        "public": _b64(signing.public_key().public_bytes(serialization.Encoding.Raw, raw)),
+        "private": _b64(signing.private_bytes(der, pkcs8, serialization.NoEncryption())),
+        "encPublic": _b64(enc.public_key().public_bytes(serialization.Encoding.Raw, raw)),
+        "encPrivate": _b64(enc.private_bytes(der, pkcs8, serialization.NoEncryption())),
+    }
+
+
+def signed_order(admin_private_der_b64: str, claims: dict[str, Any]) -> str:
+    """An admin-signed body: ``b64url(JSON).b64url(sig)``, byte-compatible with chamber's signed()."""
+    body = _b64(json.dumps({"v": 1, "iat": int(time.time()), **claims}, separators=(",", ":")).encode())
+    private = serialization.load_der_private_key(_unb64(admin_private_der_b64), password=None)
+    return f"{body}.{_b64(private.sign(body.encode()))}"
+
+
+def issue_certificate(admin_private_der_b64: str, *, line: str, owner: str, pubkey: str, enc: str | None = None) -> str:
+    """A v2/v3 member certificate (v3 when the encryption key rides along), chamber-compatible."""
+    import secrets as _secrets
+
+    claims: dict[str, Any] = {"line": line, "member": _b64(_secrets.token_bytes(9)), "owner": owner.lower(), "pubkey": pubkey}
+    return _v_cert(admin_private_der_b64, 3 if enc else 2, claims, enc)
+
+
+def _v_cert(admin_private_der_b64: str, v: int, claims: dict[str, Any], enc: str | None) -> str:
+    body_claims = {"v": v, "iat": int(time.time()), **claims, **({"enc": enc} if enc else {})}
+    body = _b64(json.dumps(body_claims, separators=(",", ":")).encode())
+    private = serialization.load_der_private_key(_unb64(admin_private_der_b64), password=None)
+    return f"{body}.{_b64(private.sign(body.encode()))}"
+
+
+def sign_distribution(admin_private_der_b64: str, *, line: str, epoch: int, wraps: dict[str, dict[str, str]]) -> str:
+    """The admin's signature over a distribution (rotation authority), chamber-compatible."""
+    private = serialization.load_der_private_key(_unb64(admin_private_der_b64), password=None)
+    return _b64(private.sign(distribution_payload(line=line, epoch=epoch, wraps=wraps).encode()))
 
 
 def unwrap_epoch_key(enc_private_der: bytes, wrap: dict[str, str], *, line: str, epoch: int, owner: str) -> bytes | None:
