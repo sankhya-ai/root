@@ -554,3 +554,91 @@ def test_pinned_role_version_content_is_what_runs(client, workspace, script):
     assert accepted.status_code == 200, accepted.text
     item = client.get(f"/api/jobs/{accepted.json()['job']['id']}").json()
     assert item["role_version"] == 1  # the REVIEWED version ran, not v2
+
+
+# ----- Layer 1: governed recursive proposals (jobs asking for help) ----------------------------------------------
+
+
+@requires_runtime
+def test_scenario_g_job_proposes_sub_job_with_lineage(client, workspace, script):
+    """Recursive help, governed: a job whose role names recommend_job proposes a sub-job; the request carries parent
+    lineage, depth and an escalation flag; the owner's accept stamps the child item with the same lineage."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([tool_call("r", "create_role", {"name": "builder", "description": "Builds and may ask for help.", "tools": ["ReadFile", "Grep", "recommend_job"]}), text("done")])
+    _, results = _turn_results(client, workspace, script, session_id, "make a role")
+    assert results["r"]["is_error"] is False
+    script([tool_call("j", "recommend_job", {"goal": "check the utils", "role": "explorer", "reason": "parallel look"}), text("proposed")])
+    parent = client.post("/api/jobs", json={"goal": "build the thing", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    parent_item = _wait_job(client, parent["id"])
+    assert parent_item["status"] != "running"
+    requests = client.get("/api/job-requests").json()["requests"]
+    assert len(requests) == 1
+    req = requests[0]
+    assert req["parent_job_id"] == parent["id"] and req["depth"] == 1
+    assert req["escalation"] is True  # explorer's Glob is outside the builder role's tools: the owner must see that
+    script([text("Checked.")])
+    accepted = client.post(f"/api/job-requests/{req['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    child = accepted.json()["job"]
+    assert child.get("parent_job_id") == parent["id"] and child.get("depth") == 1
+    _wait_job(client, child["id"])
+
+
+@requires_runtime
+def test_role_may_name_recommend_job_but_not_other_management_tools(client, workspace, script):
+    """The widening is deliberate and narrow: recommend_job is nameable (proposing executes nothing); create_tool
+    and the other management tools stay unnameable in roles."""
+    script([
+        tool_call("r1", "create_role", {"name": "helper", "description": "May ask for help.", "tools": ["ReadFile", "recommend_job"]}),
+        tool_call("r2", "create_role", {"name": "sneaky", "description": "x", "tools": ["ReadFile", "create_tool"]}),
+        text("done"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "make roles")
+    assert results["r1"]["is_error"] is False
+    assert results["r2"]["is_error"] is True and "create_tool" in results["r2"]["message"]
+
+
+def _fake_tenant_with_parent(root, parent_scope, parent_depth=0, pending_children=0):
+    store = _store(root)
+    parent = {"id": "job-p", "session": "sess-p", "depth": parent_depth, "scope": parent_scope}
+    for i in range(pending_children):
+        store.create({**_record(f"c{i}", created=float(i)), "parent_job_id": "job-p"})
+    return SimpleNamespace(root=root, registry=None, workspace_root=root, job_requests=store,
+                           jobs=SimpleNamespace(items={"job-p": parent}))
+
+
+def test_job_proposal_depth_bound_refuses(tmp_path):
+    tenant = _fake_tenant_with_parent(tmp_path, ["ReadFile", "recommend_job"], parent_depth=jobs.MAX_PROPOSAL_DEPTH)
+    runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "deeper", "role": "explorer"})
+    assert payload is None and "depth" in problem
+    assert tenant.job_requests.list() == []  # nothing stored
+
+
+def test_job_proposal_fanout_bound_refuses(tmp_path):
+    tenant = _fake_tenant_with_parent(tmp_path, ["ReadFile", "recommend_job"], pending_children=jobs.MAX_PENDING_PER_PARENT)
+    runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "more", "role": "explorer"})
+    assert payload is None and "waiting for the owner" in problem
+    assert len(tenant.job_requests.list()) == jobs.MAX_PENDING_PER_PARENT  # unchanged
+
+
+def test_job_proposal_escalation_flag(tmp_path):
+    runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
+    wide = _fake_tenant_with_parent(tmp_path / "a", ["ReadFile", "Glob", "Grep", "recommend_job"])
+    payload, problem = jobs.request_job(wide, runtime, {"goal": "g", "role": "explorer"})
+    assert problem is None and payload["escalation"] is False and payload["depth"] == 1 and payload["parent_job_id"] == "job-p"
+    narrow = _fake_tenant_with_parent(tmp_path / "b", ["ReadFile", "recommend_job"])
+    payload, problem = jobs.request_job(narrow, runtime, {"goal": "g", "role": "explorer"})
+    assert problem is None and payload["escalation"] is True  # Glob/Grep are beyond the parent
+
+
+def test_chat_session_proposal_carries_no_lineage(tmp_path):
+    tenant = SimpleNamespace(root=tmp_path, registry=None, workspace_root=tmp_path, job_requests=_store(tmp_path),
+                             jobs=SimpleNamespace(items={}))
+    runtime = SimpleNamespace(record=SimpleNamespace(id="s1", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "g", "role": "explorer"})
+    assert problem is None
+    assert payload["parent_job_id"] == "" and payload["depth"] == 0 and payload["escalation"] is False

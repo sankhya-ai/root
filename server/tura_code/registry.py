@@ -610,10 +610,15 @@ def host_tool_names(tenant: "Tenant", runtime: "SessionRuntime | None", registry
 
 
 def role_universe(tenant: "Tenant", runtime: "SessionRuntime | None", registry: Registry) -> set[str]:
-    """Everything a role scope may name: native tools, host tools, gateway names, and ACTIVE composites."""
+    """Everything a role scope may name: native tools, host tools, gateway names, and ACTIVE composites.
+
+    ``recommend_job`` is the ONE management tool a role may name, deliberately: proposing a job executes nothing
+    (the owner's accept is the only start path) and grants the proposer no tools, so letting a job's role include
+    it enables governed sub-job proposals - with lineage, depth/fanout bounds and an escalation flag, see
+    ``jobs.request_job``. The other management tools stay unnameable: creating tools or roles is chat-session work."""
     session = getattr(getattr(runtime, "record", None), "id", None)
     active = {name for name in registry.tool_names() if registry.active_tool(name, session)}
-    return NATIVE_TOOLS | host_tool_names(tenant, runtime, registry) | set(catalogue.GATEWAY_NAMES) | active
+    return NATIVE_TOOLS | host_tool_names(tenant, runtime, registry) | set(catalogue.GATEWAY_NAMES) | active | {RECOMMEND_JOB}
 
 
 def role_creator_ceiling(tenant: "Tenant", runtime: "SessionRuntime | None", registry: Registry) -> set[str] | None:

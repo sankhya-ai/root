@@ -296,6 +296,10 @@ def launcher_scripted() -> bool:
 
 #: Owner-reviewed job proposals kept per tenant (bounded; the oldest RESOLVED requests drop first).
 MAX_REQUESTS_KEPT = 50
+#: Recursion bounds for job-proposed sub-jobs (deterministic, not model judgment): how deep a proposal chain may
+#: nest and how many PENDING proposals one job may have open. The owner's accept stays the only start path either way.
+MAX_PROPOSAL_DEPTH = 3
+MAX_PENDING_PER_PARENT = 5
 
 
 class JobRequestStore:
@@ -418,6 +422,20 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         resolved = resolve_role(tenant, role, version, source_session=session)
     except JobError as error:
         return None, str(error)
+    # Lineage: is the proposer itself a job? Its item is keyed by the session it created.
+    parent = next((j for j in getattr(tenant, "jobs", {}).items.values() if j.get("session") == session), None) if hasattr(tenant, "jobs") else None
+    depth = int(parent.get("depth", 0)) + 1 if parent is not None else 0
+    if parent is not None and depth > MAX_PROPOSAL_DEPTH:
+        return None, (f"This job sits at proposal depth {MAX_PROPOSAL_DEPTH}; a chain may not nest deeper. "
+                      "Report the need in your contract data so the owner can start the work directly.")
+    if parent is not None:
+        pending = sum(1 for r in tenant.job_requests.list(status="pending") if r.get("parent_job_id") == parent["id"])
+        if pending >= MAX_PENDING_PER_PARENT:
+            return None, (f"This job already has {MAX_PENDING_PER_PARENT} proposals waiting for the owner; that is the cap. "
+                          "Do the parts your own tools allow, or report the rest in your contract data.")
+    # Attenuation flag: does the proposed child ask for tools the PARENT job does not have? The owner sees this at
+    # review. (A chat session proposes from the owner's full scope, so the flag applies to job proposers only.)
+    escalation = bool(parent is not None and not set(resolved["scope"]) <= set(parent.get("scope") or []))
     record = {
         "id": uuid.uuid4().hex[:12],
         "goal": goal,
@@ -432,6 +450,9 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         # a wider scope past the owner; it exists so the review shows the actual requested permissions, not a label.
         "scope": list(resolved["scope"]),
         "contract": list(resolved.get("contract") or []),
+        "parent_job_id": parent["id"] if parent is not None else "",
+        "depth": depth,
+        "escalation": escalation,
         # The job-specific limits, PINNED at proposal time (a session cannot set them; these are the defaults).
         # The accept applies exactly these, so a default changed between review and accept cannot silently alter
         # what the owner saw and approved.
@@ -443,6 +464,10 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
     payload = dict(record)
     payload["what_happens_now"] = ("Nothing started. The owner sees this recommendation and decides; their accept is "
                                    "the only way the job runs, and it runs with exactly the fields stored here.")
+    if parent is not None:
+        payload["what_happens_now"] += (" Your turn continues without waiting for it, and nothing comes back to you "
+                                        "automatically: result handoff to a waiting parent is not built yet. Report "
+                                        "what you still need in your own contract data when you finish.")
     return payload, None
 
 
@@ -594,7 +619,7 @@ class Jobs:
         job_id = uuid.uuid4().hex[:12]
         item = {
             "id": job_id, "role": spec.role, "role_version": resolved["version"], "goal": spec.goal, "session": runtime.record.id, "status": "running",
-            "started": time.time(), "budget": b.model_dump(), "scope_guarantee": catalogue.guarantee(self.tenant, runtime.record),
+            "started": time.time(), "budget": b.model_dump(), "scope": list(scope), "scope_guarantee": catalogue.guarantee(self.tenant, runtime.record),
             "handoff_from": spec.handoff_from, "result": None,
             "credentials": spec.credentials,
         }
@@ -816,6 +841,10 @@ def router(app_state):
 
         try:
             resolved_record, item = store.accept(request_id, start, find_existing)
+            if resolved_record.get("parent_job_id"):
+                item["parent_job_id"] = resolved_record["parent_job_id"]
+                item["depth"] = int(resolved_record.get("depth") or 0)
+                tenant.jobs._save(item)
         except JobError as error:
             message = str(error)
             status = 404 if "No such" in message else 409 if "already" in message else 400

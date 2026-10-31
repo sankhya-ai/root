@@ -15,6 +15,8 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
   const [jobId, setJobId] = useState("");
   const [scope, setScope] = useState<string[]>([]);
   const [limits, setLimits] = useState("");
+  const [lineage, setLineage] = useState<{ parent: string; depth: number } | null>(null);
+  const [escalation, setEscalation] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const refresh = () => {
@@ -25,6 +27,8 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
         setStatus(found ? found.status : "gone");
         setJobId(found?.job_id ?? "");
         setScope(found?.scope ?? []);
+        setLineage(found?.parent_job_id ? { parent: found.parent_job_id, depth: found.depth ?? 1 } : null);
+        setEscalation(Boolean(found?.escalation));
         const b = found?.budget ?? {};
         const parts = [`wall ${b.timeout_seconds ?? 900}s`];
         parts.push(b.max_steps ? `${b.max_steps} steps` : "no step cap");
@@ -69,6 +73,20 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
           tools: {scope.length ? scope.join(", ") : "resolving…"}
         </span>
       </div>
+      {lineage ? (
+        <div className="approvalMeta">
+          <span className="approvalChip" title="A running job asked for this help. Accepting starts a new worker job whose lineage is recorded. Result handoff back to the asking job is not built yet.">
+            asked by job {lineage.parent.slice(0, 8)} (delegation depth {lineage.depth})
+          </span>
+        </div>
+      ) : null}
+      {escalation ? (
+        <div className="approvalMeta">
+          <span className="approvalChip outside" title="This role's tool scope reaches beyond the proposer's own scope. Accepting grants more than the asker had: that widening is your decision, exactly as with a chat proposal.">
+            beyond the asker's own tools - review the scope
+          </span>
+        </div>
+      ) : null}
       <div className="approvalMeta">
         <span className="approvalChip" title="Pinned when the session proposed the job; accepting applies exactly these, even if the defaults changed since.">
           limits: {limits || "job defaults"}

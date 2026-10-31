@@ -191,3 +191,28 @@ stored fields - no agent-initiated execution anywhere. The recommending session 
 validly use (built-in, durable, or its own session-lifetime role, with `source_session` carried so the accept
 stays explicit); the owner judges the choice at accept. An owner-flagged "job-selectable" role subset remains a
 possible future narrowing, not built.
+
+### Governed recursive proposals (mission layer 1, 2026-10-31)
+
+A job can now ask for help the same governed way a chat session does - by PROPOSING a sub-job, never starting
+one. ``recommend_job`` is the one management tool a role may name (``registry.role_universe`` widened for it
+alone, with the justification in its docstring): proposing executes nothing, grants the proposer nothing, and
+the owner's accept stays the only start path. The other management tools stay unnameable in roles - creating
+tools or roles remains chat-session work.
+
+Deterministic bounds in ``jobs.request_job`` (ordinary code, not model judgment):
+
+* LINEAGE: a proposer whose session belongs to a running job records ``parent_job_id`` and ``depth`` on the
+  request; the owner's accept stamps the same lineage on the child job item, so the tree is auditable.
+* DEPTH CAP (``MAX_PROPOSAL_DEPTH = 3``): a job at the cap gets a refusal telling it to report the need in its
+  own contract data instead. Nothing is stored on a refusal.
+* FANOUT CAP (``MAX_PENDING_PER_PARENT = 5``): one job may have at most 5 proposals waiting for the owner.
+* ESCALATION FLAG: when the proposed role's scope reaches beyond the PROPOSER'S own scope (job proposers only;
+  a chat session proposes from the owner's full scope), the request is flagged and the review card says
+  "beyond the asker's own tools - review the scope". The flag informs the owner; it never blocks.
+
+OPEN - not built, not implied anywhere: result handoff back to a waiting parent job (event-driven resume) is
+layer 2. A proposing job's turn continues without waiting, and the model-facing text and the review card both
+say nothing comes back automatically. Until layer 2, a sub-job's result reaches the owner only, who can relay
+it. Cancel-during-wait semantics are undefined because waiting does not exist yet.
+

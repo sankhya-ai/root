@@ -70,6 +70,11 @@ export interface JobRequest {
   status: "pending" | "accepted" | "dismissed";
   created_at: number;
   job_id?: string;
+  /** Set when a job (not a chat session) proposed this: the parent job's id and this request's delegation depth. */
+  parent_job_id?: string;
+  depth?: number;
+  /** True when the proposed role's scope reaches beyond the proposer's own scope: the owner decides whether to widen. */
+  escalation?: boolean;
 }
 
 export interface TokenUsage {
