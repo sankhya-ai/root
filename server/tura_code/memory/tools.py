@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .errors import MemoryUnavailableError
+from .errors import MemoryScopeError, MemoryUnavailableError
 
 if TYPE_CHECKING:
     from .gateway import MemoryView
@@ -27,18 +27,18 @@ You have long-term memory (Dhee) that persists across sessions and projects:
 Relevant memories are attached automatically at the start of a request in the `## System` section. Treat them as advisory: the owner's current request wins."""
 
 
-def tool_definitions() -> list[dict[str, Any]]:
+def tool_definitions(project_only: bool = False) -> list[dict[str, Any]]:
     scope_prop = {
         "type": "string",
-        "enum": ["project", "owner"],
-        "description": "`project` for facts about this codebase; `owner` for the person's own preferences that apply everywhere.",
+        "enum": ["project"] if project_only else ["project", "owner"],
+        "description": "`project` for facts about this codebase." if project_only else "`project` for facts about this codebase; `owner` for the person's own preferences that apply everywhere.",
     }
     return [
         {
             "name": RECALL_TOOL,
             "description": (
                 "Search long-term memory for facts from earlier sessions: project conventions, build and "
-                "test commands, architectural decisions, known gotchas, and the owner's preferences. "
+                "test commands, architectural decisions, and known gotchas" + ("" if project_only else ", and the owner's preferences") + ". "
                 "Returns the most relevant memories with ids."
             ),
             "parameters": {
@@ -48,7 +48,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum results (default 6)."},
                     "scope": {
                         "type": "string",
-                        "enum": ["all", "project", "owner"],
+                        "enum": ["project"] if project_only else ["all", "project", "owner"],
                         "description": "Which memory to search (default all).",
                     },
                 },
@@ -59,8 +59,9 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": REMEMBER_TOOL,
             "description": (
-                "Store ONE durable fact in long-term memory so it is known in future sessions. Use for owner "
-                "preferences, project conventions, build/test commands, architectural decisions, and gotchas. "
+                "Store ONE durable fact in long-term memory so it is known in future sessions. Use for "
+                + ("" if project_only else "owner preferences, ")
+                + "project conventions, build/test commands, architectural decisions, and gotchas. "
                 "Never store secrets, credentials, transient task state, or code."
             ),
             "parameters": {
@@ -122,7 +123,7 @@ async def handle_tool(memory: "MemoryView", name: str, arguments: dict[str, Any]
             if not content:
                 return _return("", "`content` is required.", error=True, brief="Nothing to remember")
             kind = str(arguments.get("kind") or "fact")
-            scope = "owner" if arguments.get("scope") == "owner" else "project"
+            scope = "owner" if arguments.get("scope") == "owner" else "project"  # a delegated view refuses "owner"
             result = await memory.remember(content, workspace, scope=scope, kind=kind, session_id=session_id)
             if isinstance(result, dict) and result.get("stored") is False:
                 reason = result.get("reason") or result.get("event") or "rejected by Dhee's admission policy"
@@ -139,6 +140,8 @@ async def handle_tool(memory: "MemoryView", name: str, arguments: dict[str, Any]
             body = restored.text if restored else "No additional durable memory for this project yet."
             return _return(f"Checkpoint saved.\n\n{body}", "", brief="Checkpoint saved")
         return _return("", f"Unknown memory tool `{name}`.", error=True, brief="Unknown tool")
+    except MemoryScopeError as error:
+        return _return("", str(error), error=True, brief="Memory scope")
     except MemoryUnavailableError as error:
         return _return("", f"Memory is unavailable: {error}", error=True, brief="Memory unavailable")
     except Exception as error:  # noqa: BLE001 - a memory fault is a tool error, not a failed turn

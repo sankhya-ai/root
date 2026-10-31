@@ -216,6 +216,10 @@ class Tenant:
             except Exception:  # noqa: BLE001 - nothing after a turn may fail it
                 logger.exception("after-turn hook failed")
 
+    def memory_for(self, record: Any) -> MemoryView:
+        """The memory this session may reach: a delegated worker (stamped by the host on the record) gets project scope only."""
+        return self.memory.restricted() if getattr(record, "delegated", False) is True else self.memory
+
     async def _checkpoint(self, runtime: "SessionRuntime", turn: "TurnState", status: str) -> None:
         """Checkpoint turns that did real work; a quick answer is not an episode.
 
@@ -234,7 +238,7 @@ class Tenant:
         from .memory.digest import digest_turn
 
         try:
-            result = await digest_turn(self.memory, Path(runtime.record.workspace), turn, status, settings=self.settings.get(), api_key=self.api_key())
+            result = await digest_turn(self.memory_for(runtime.record), Path(runtime.record.workspace), turn, status, settings=self.settings.get(), api_key=self.api_key())
             runtime.emit("MemoryCheckpoint", {"saved": True, "files_touched": turn.files_touched, **result})
         except Exception as error:  # noqa: BLE001
             logger.info("turn checkpoint skipped: %s", error)

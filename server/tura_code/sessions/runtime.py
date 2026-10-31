@@ -349,7 +349,7 @@ class SessionRuntime(Approvals, Rollback, Queue):
         is_slash = text.startswith("/")
         request_text = text if is_slash else expand_mentions(text, workspace)
         memory_items: list[dict] = []
-        memory = self.tenant.memory
+        memory = self.tenant.memory_for(self.record)
         if not is_slash and memory.enabled:
             packet = await memory.compile_packet(text, workspace, seen=self.memory_seen, first_turn=self.record.turns == 0)
             if packet is not None:
