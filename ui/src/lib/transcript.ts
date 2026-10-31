@@ -36,6 +36,7 @@ export type Block =
     }
   | { kind: "approval"; key: string; turn: string | null; approval: ApprovalState }
   | { kind: "notice"; key: string; turn: string | null; tone: "info" | "warn" | "error"; text: string }
+  | { kind: "jobrequest"; key: string; turn: string | null; job: { id: string; goal: string; role: string; version: number | null; reason: string; workspace: string } }
   | { kind: "flow"; key: string; turn: string | null; flow: Flow }
   | { kind: "learned"; key: string; turn: string | null; ok: boolean; summary: string; mode: string; skills: string[]; memories: number; promoted: number; verified: boolean; error?: string }
   | {
@@ -416,6 +417,19 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         turn,
         tone: "info",
         text: `Capability gap: ${entry.misses ?? "?"} tool searches found nothing this session (recently: ${queries}). The agent can compose a new tool or propose generated code - creating it is the agent's choice, activating generated code stays yours.`,
+      });
+      break;
+    }
+    case "JobRecommended": {
+      // The session PROPOSED a job; the owner's accept is the only start path. The card reads live status from the API,
+      // so a replayed event still shows what actually happened to the request.
+      const entry = p as { id?: string; goal?: string; role?: string; version?: number | null; reason?: string; workspace?: string };
+      if (!entry.id) break;
+      state.blocks.push({
+        kind: "jobrequest",
+        key: nextKey("jobrequest"),
+        turn,
+        job: { id: entry.id, goal: entry.goal ?? "", role: entry.role ?? "developer", version: entry.version ?? null, reason: entry.reason ?? "", workspace: entry.workspace ?? "" },
       });
       break;
     }

@@ -161,6 +161,20 @@ test("adopting a role shows the narrowing, the pin and the one-way rule", () => 
   assert.match(notice.text, /advisory/);
 });
 
+test("JobRecommended becomes a jobrequest block the card renders from", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("JobRecommended", { id: "abc123", goal: "summarise the repo", role: "explorer", version: null, reason: "read-only sweep", workspace: "/w" }));
+  const block = state.blocks[state.blocks.length - 1];
+  assert.ok(block.kind === "jobrequest");
+  assert.equal(block.job.id, "abc123");
+  assert.equal(block.job.goal, "summarise the repo");
+  assert.equal(block.job.role, "explorer");
+  // An event without an id cannot be tracked or decided, so it is dropped.
+  const before = state.blocks.length;
+  applyEvent(state, ev("JobRecommended", { goal: "no id" }));
+  assert.equal(state.blocks.length, before);
+});
+
 test("files a run produced are collected per turn, once each", () => {
   const state = createTranscript();
   applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));

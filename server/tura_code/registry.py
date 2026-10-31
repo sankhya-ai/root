@@ -52,7 +52,8 @@ CREATE_TOOL = "create_tool"
 CREATE_ROLE = "create_role"
 LIST_TOOL = "registry_list"
 ADOPT_ROLE = "adopt_role"
-MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, "propose_tool", ADOPT_ROLE)  # propose_tool lives in genplugins.py
+RECOMMEND_JOB = "recommend_job"
+MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, "propose_tool", ADOPT_ROLE, RECOMMEND_JOB)  # propose_tool lives in genplugins.py
 
 MAX_TOOLS = 64
 MAX_ROLES = 32
@@ -834,6 +835,26 @@ class RegistryToolset:
                 },
             },
             {
+                "name": RECOMMEND_JOB,
+                "description": (
+                    "Recommend that the OWNER start an unattended job (a goal under a role) - for work that needs tools outside this "
+                    "session's scope, or that should keep running without you. This STORES a proposal and shows it to the owner; it starts "
+                    "nothing. The owner's accept is the only way the job runs, and it runs with exactly the fields stored at proposal time "
+                    "(the role version is pinned now). Never use this for work your own tools can do, and never present it as work underway."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string", "description": "What the job should do"},
+                        "role": {"type": "string", "description": "A built-in role, a durable registry role, or one this session created (default: developer)"},
+                        "version": {"type": "integer", "description": "Pin a registry role version (0 = the active version)"},
+                        "reason": {"type": "string", "description": "Why a job, not this session, should do it - the owner reads this"},
+                    },
+                    "required": ["goal"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": LIST_TOOL,
                 "description": "List registered tools and roles with their status (draft/active/revoked), versions, requirements and test results.",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -842,8 +863,8 @@ class RegistryToolset:
 
     def handles(self, name: str) -> bool:
         # MANAGEMENT_TOOLS is also the name-reservation list (it contains genplugins' propose_tool); this toolset
-        # only ANSWERS its own four.
-        return name in (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, ADOPT_ROLE)
+        # only ANSWERS its own five.
+        return name in (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, ADOPT_ROLE, RECOMMEND_JOB)
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tenant = runtime.tenant
@@ -923,6 +944,17 @@ class RegistryToolset:
             payload = {**record, "name": arguments["name"],
                        "tell_the_owner": f"Say what you created (role `{arguments['name']}`: {record['description']}); the owner can start jobs with it now, and promoting it into the standing catalogue is their choice."}
             return _ok(payload, f"Role `{arguments['name']}` v{record['version']} (active)")
+        if name == RECOMMEND_JOB:
+            from . import jobs as jobs_mod  # local import: jobs imports registry only inside functions
+
+            payload, problem = jobs_mod.request_job(tenant, runtime, arguments)
+            if problem:
+                return tool_error(problem, "Cannot recommend job")
+            if callable(emit):
+                emit("JobRecommended", {"id": payload["id"], "goal": payload["goal"], "role": payload["role"],
+                                        "version": payload["role_version"] or None, "reason": payload["reason"],
+                                        "workspace": payload["workspace"]})
+            return _ok(payload, f"Recommended a {payload['role']} job to the owner - nothing started")
         return tool_error(f"Unknown registry tool `{name}`.", "Unknown tool")
 
 

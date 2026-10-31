@@ -18,22 +18,33 @@ What each limit can and cannot enforce:
   shell or Python is not an isolation boundary.
 * ``contract`` - keys the final reply's JSON block must have. Checked after the fact; it does not make the
   work correct.
+* ``recommend_job`` (registry toolset) lets a SESSION propose a job. It only stores an owner-visible request:
+  the owner-authenticated ``POST /api/job-requests/{id}/accept`` is the sole start path, and it builds the
+  ``NewJob`` exclusively from the stored record (role version pinned at proposal time). A session can never
+  start a job, and nothing in the accept call can alter what the session proposed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import re
 import signal
 import time
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from . import broker, catalogue, guides
 
@@ -278,6 +289,125 @@ def launcher_scripted() -> bool:
     from . import launcher
 
     return launcher.scripted()
+
+
+#: Owner-reviewed job proposals kept per tenant (bounded; the oldest RESOLVED requests drop first).
+MAX_REQUESTS_KEPT = 50
+
+
+class JobRequestStore:
+    """Owner-reviewed job proposals (``recommend_job`` in ``registry.py``): a session proposes, the owner decides.
+
+    Same multi-process discipline as ``registry.Registry``: mutations run under an exclusive flock on
+    ``requests.lock``, re-read the store after acquiring it, and write atomically (tmp file + rename); plain
+    reads take a lock-free fresh snapshot, which is consistent because writes are atomic. A stored request is
+    inert data - only the owner-authenticated ``accept`` route turns one into ``tenant.jobs.start``, building
+    the ``NewJob`` exclusively from the stored fields.
+    """
+
+    def __init__(self, tenant: "Tenant") -> None:
+        self.dir = Path(tenant.root) / "jobs"
+        self.path = self.dir / "requests.json"
+        self.items: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self.path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            self.items = {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+    def _save(self) -> None:
+        from .registry import _atomic_write  # local import: registry imports jobs only inside functions
+
+        self.dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(self.path, self.items)
+
+    @contextmanager
+    def _exclusive(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.dir / "requests.lock", "a+b") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                self._load()
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def create(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self._exclusive():
+            self.items[record["id"]] = record
+            while len(self.items) > MAX_REQUESTS_KEPT:
+                resolved = [r for r in self.items.values() if r.get("status") != "pending"]
+                drop = min(resolved or list(self.items.values()), key=lambda r: r.get("created_at", 0))
+                del self.items[drop["id"]]
+            self._save()
+        return record
+
+    def list(self, status: str = "") -> list[dict[str, Any]]:
+        self._load()  # fresh snapshot; writes are atomic
+        items = sorted(self.items.values(), key=lambda r: r.get("created_at", 0), reverse=True)
+        return [r for r in items if not status or r.get("status") == status]
+
+    def get(self, request_id: str) -> dict[str, Any] | None:
+        self._load()
+        return self.items.get(request_id)
+
+    def mark(self, request_id: str, status: str, job_id: str = "") -> dict[str, Any]:
+        """Resolve a PENDING request once. A second resolve (accept after dismiss, double-accept) is an error."""
+        with self._exclusive():
+            record = self.items.get(request_id)
+            if record is None:
+                raise JobError("No such job request.")
+            if record.get("status") != "pending":
+                raise JobError(f"Job request {request_id} is already {record.get('status')}; it will not change again.")
+            record["status"] = status
+            record["resolved_at"] = time.time()
+            if job_id:
+                record["job_id"] = job_id
+            self._save()
+            return record
+
+
+def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate and store a session's job proposal. Starts NOTHING: the owner's accept route is the only start path.
+
+    The role is resolved and its version PINNED now, so the owner reviews exactly what the session asked for; the
+    accept route re-resolves the pinned role (a role revoked in between fails there, not mid-job). The session may
+    name a built-in role, a durable registry role, or a session-lifetime role IT created - never another session's
+    private role (``resolve_role`` refuses).
+    """
+    goal = str(arguments.get("goal") or "").strip()
+    if not goal:
+        return None, "A recommendation needs a goal: what the job should do."
+    role = str(arguments.get("role") or "developer").strip()
+    version = int(arguments.get("version") or 0)
+    session = str(getattr(runtime.record, "id", "") or "")
+    try:
+        resolved = resolve_role(tenant, role, version, source_session=session)
+    except JobError as error:
+        return None, str(error)
+    record = {
+        "id": uuid.uuid4().hex[:12],
+        "goal": goal,
+        "role": role,
+        "role_version": resolved["version"] or 0,  # pinned at proposal time; built-in presets have no version
+        "workspace": str(getattr(runtime.record, "workspace", "") or tenant.workspace_root or tenant.root),
+        "reason": str(arguments.get("reason") or "").strip(),
+        "requested_by": session,
+        "source_session": session,  # lets the owner accept a job on the session's own private role explicitly
+        "status": "pending",
+        "created_at": time.time(),
+    }
+    tenant.job_requests.create(record)
+    payload = dict(record)
+    payload["what_happens_now"] = ("Nothing started. The owner sees this recommendation and decides; their accept is "
+                                   "the only way the job runs, and it runs with exactly the fields stored here.")
+    return payload, None
 
 
 class Jobs:
@@ -587,6 +717,7 @@ class Jobs:
 def install(server) -> None:
     def extend(tenant) -> None:
         tenant.jobs = Jobs(tenant)
+        tenant.job_requests = JobRequestStore(tenant)
         tenant.closers.append(tenant.jobs.close)
 
     server.extensions.append(extend)
@@ -623,6 +754,35 @@ def router(app_state):
         if item is None:
             raise HTTPException(404, "No such job.")
         return item
+
+    @api.get("/job-requests")
+    async def job_requests(status: str = "", tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        return {"requests": tenant.job_requests.list(status=status)}
+
+    @api.post("/job-requests/{request_id}/accept")
+    async def accept_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        """The ONLY path from proposal to running job. Owner-authenticated; the NewJob comes from the stored record ALONE."""
+        store = tenant.job_requests
+        record = store.get(request_id)
+        if record is None:
+            raise HTTPException(404, "No such job request.")
+        if record.get("status") != "pending":
+            raise HTTPException(409, f"Job request is already {record.get('status')}; it will not change again.")
+        try:
+            spec = NewJob(goal=record["goal"], workspace=record["workspace"], role=record["role"],
+                          role_version=int(record.get("role_version") or 0), source_session=record.get("source_session", ""))
+            item = tenant.jobs.start(spec)  # every start() guard still applies; a role revoked since the proposal fails HERE
+            resolved_record = store.mark(request_id, "accepted", job_id=item["id"])
+        except JobError as error:
+            raise HTTPException(400, str(error)) from error
+        return {"request": resolved_record, "job": item}
+
+    @api.post("/job-requests/{request_id}/dismiss")
+    async def dismiss_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        try:
+            return {"request": tenant.job_requests.mark(request_id, "dismissed")}
+        except JobError as error:
+            raise HTTPException(404 if "No such" in str(error) else 409, str(error)) from error
 
     @api.post("/jobs/{job_id}/cancel")
     async def cancel(job_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:

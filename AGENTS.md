@@ -29,7 +29,7 @@ Four parts, one product: the runtime, the host, the UI, and the macOS app around
   - `keiki/` is root behind Keiki (WhatsApp, iMessage, Telegram, SMS, email, Slack): its external harness in inbox mode — root claims a turn by polling, runs it in that conversation's `kind="keiki"` read-only, unattended session, and answers and settles it through the turn's API (idempotent sends, lease kept alive). Local mode only.
   - `maritime.py` is Maritime's contract for a custom agent (`GET /health`, `POST /chat` answered within 30 s, a long turn returned on `status`), on only with `TURA_CODE_MARITIME=1`; those two routes skip the host check because the VM is reachable only through Maritime's front door. The repo-root `Dockerfile` and `scripts/maritime-start.py` build and start it with state in `/data`. Slack and Keiki also read their keys from the environment there (`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`, `KEIKI_API_KEY`).
   - `catalogue.py` is the dynamic tool catalogue (`dynamic_tools`: documents/GitHub/Gmail/schedules/history/Mac tools found with `find_tools`, run with `use_tool`) and the tool scope (`tool_scope` on settings and on a session). Discovery is not permission: every call passes `allowed`. `guarantee()` states what a scope bounds; a scope that leaves Shell, `process` or `run_python` in is not a boundary.
-  - `jobs.py` is `POST /api/jobs`: one unattended session with a role preset, a step cap, the runtime's own per-turn budget (`CHOTU_MAX_TURN_TOKENS`/`_WALL_SECONDS`/`_COST_USD`, from provider-reported usage, checked before each model step), an output contract and `handoff_from` (earlier jobs' contract data, never transcripts). Jobs persist in `jobs/`; one running at a restart becomes `interrupted`. Timeouts and token/cost caps are different things; cost needs a provider that reports it.
+  - `jobs.py` is `POST /api/jobs`: one unattended session with a role preset, a step cap, the runtime's own per-turn budget (`CHOTU_MAX_TURN_TOKENS`/`_WALL_SECONDS`/`_COST_USD`, from provider-reported usage, checked before each model step), an output contract and `handoff_from` (earlier jobs' contract data, never transcripts). `recommend_job` (registry toolset) lets a session PROPOSE a job: it stores an owner-visible request (`jobs/requests.json`, same flock discipline as the registry) and starts nothing - `POST /api/job-requests/{id}/accept` (owner-authenticated) is the sole start path and builds the `NewJob` exclusively from the stored record, re-resolving the role version pinned at proposal time. Jobs persist in `jobs/`; one running at a restart becomes `interrupted`. Timeouts and token/cost caps are different things; cost needs a provider that reports it.
   - `registry.py` is the runtime-created tool and role registry (`create_tool`, `create_role`, `registry_list`). A created tool is DECLARATIVE: a fixed pipeline of existing host tools with `${param}` templates - never generated code (specs carrying `code`/`command`/`shell`/`script`/`url` are refused; a new capability is a reviewed plugin). Static validation is deterministic; a valid tool is active in the creating session only (mid-turn through `use_tool` when `dynamic_tools` is on - the gateway dispatches it without any runtime change; otherwise from the next turn, when the runtime refreshes its tool list), and the owner promotes it (`POST /api/registry/tools/{name}/promote`) to offer it to future sessions. Every pipeline step re-passes the calling session's scope and approvals at execution time; composites can never call composites, the gateway or registry tools. A scoped session can author neither a tool nor a role more powerful than its own scope (the creator ceiling). Roles are versioned compositions of existing tools and guides; using one still needs the owner-authenticated job start, and the standing catalogue (`GET /api/jobs/roles`) shows only promoted roles.
   - `visual/` is `inspect_page`: headless Chromium (optional Playwright) on a localhost page or a workspace HTML file; screenshot + page text (untrusted data) + console errors + layout facts. Network limited to the page's own origin, non-GET blocked, viewport/time capped. Not read-only (the page's JS runs), so only the `designer` and `pm` job roles list it. It does not start the app (`process` does, and asks). The screenshot goes to the model only when the model reads images. A role's `verdict` is shape-checked, never a quality gate.
   - `terminal.py` — the owner's own shell in the session folder (the terminal drawer under the conversation, ⌘J; xterm.js over a WebSocket). Not the agent's: no approvals. Local installs only.
@@ -116,6 +116,12 @@ generated code ever runs without per-hash owner activation.
 
 * STARTING a job creates a new unattended session with its own tool scope. That is owner-authenticated
   (POST /api/jobs) and stays so: a session can never widen the system by spawning work.
+* PROPOSING a job is the only thing a session can do toward a start: `recommend_job` validates the goal and
+  resolves+ pins the role version, stores the request and shows it to the owner (`JobRecommended` transcript card
+  with Accept/Dismiss, backed by the live request status). The owner may accept - the job runs with exactly the
+  stored fields - or dismiss; a resolved request never resolves again. A session may name a built-in role, a
+  durable role, or a session-lifetime role IT created (the stored `source_session` keeps that choice explicit);
+  never another session's private role.
 * SELECTING a role for oneself is a BEHAVIOR choice: which guides load (guides.guides_for / script_role in
   tenancy.py) and which subset of ALREADY-ALLOWED tools are in play. A session's authority ceiling is its tool
   scope, fixed at creation; choosing among capabilities it already holds grants nothing.
@@ -163,8 +169,10 @@ miss result itself tells the model the two governed ways to add a capability (``
 missing or that building one succeeds - the model decides what to build, the owner decides what becomes durable.
 
 Decided for adoption (parent steering, 2026-10-31): one-way narrowing for the rest of the session; no reset was
-built because the existing owner session endpoint has no safe role/scope control. Still open for Ashish:
-1. May a session REQUEST that the owner start a job (a surfaced approval), or is POST /api/jobs strictly
-   owner-typed with no agent-initiated approval flow?
-2. When a job's role is chosen, may the RECOMMENDING session pick among durable roles, or should recommendations be
-   limited to roles the owner has flagged as job-selectable?
+built because the existing owner session endpoint has no safe role/scope control.
+Decided for job proposals (2026-10-31, conservative direction): a session may REQUEST a job (`recommend_job`),
+which only stores an owner-visible proposal; the owner's accept is the sole start path and runs exactly the
+stored fields - no agent-initiated execution anywhere. The recommending session may name any role it could
+validly use (built-in, durable, or its own session-lifetime role, with `source_session` carried so the accept
+stays explicit); the owner judges the choice at accept. An owner-flagged "job-selectable" role subset remains a
+possible future narrowing, not built.

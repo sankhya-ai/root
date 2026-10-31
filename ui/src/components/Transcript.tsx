@@ -11,6 +11,7 @@ import type { Flow, ProducedFile } from "../lib/types.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Activity } from "./turn/Activity.tsx";
 import { ApprovalCard, type ApproveFn } from "./turn/ApprovalCard.tsx";
+import { JobRequestCard } from "./turn/JobRequestCard.tsx";
 import { FlowCard } from "./turn/FlowCard.tsx";
 import { ThoughtRow } from "./turn/Steps.tsx";
 import { Working } from "./turn/Working.tsx";
@@ -159,6 +160,8 @@ export function Items({
             return <Activity key={item.key} item={item} workspace={workspace} running={running} live={live} onApprove={onApprove} renderChildren={children} />;
           case "approval":
             return item.approval.status === "pending" ? <ApprovalCard key={item.key} approval={item.approval} workspace={workspace} onApprove={onApprove} /> : null;
+          case "jobrequest":
+            return <JobRequestCard key={item.key} job={item.job} />;
           case "notice":
             return (
               <div key={item.key} className={`notice ${item.tone}`}>

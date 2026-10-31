@@ -6,15 +6,21 @@ B. generated-code proposal -> owner review -> refusal on a host without proven c
 C. changed code after review -> activation refused
 D. role adoption -> same-turn narrowing -> revocation keeps the narrowed snapshot
 E. new-session isolation -> explicit owner promotion -> then usable
+F. a session PROPOSES a job -> nothing starts -> the owner's accept runs exactly the stored fields (or dismiss ends it)
 """
 
 from __future__ import annotations
 
 import json
 
+import time
+from types import SimpleNamespace
+
+import pytest
+
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
-from tura_code import genplugins
+from tura_code import genplugins, jobs
 
 MATH_SOURCE = (
     "import statistics\n\n\n"
@@ -166,3 +172,154 @@ def test_scenario_e_session_isolation_then_explicit_promotion(client, workspace,
     script([tool_call("u2", "use_tool", {"name": "process_digest", "arguments": {}}), text("done")])
     _, results = _turn_results(client, workspace, script, second, "run the digest again")
     assert results["u2"]["is_error"] is False and "step 0" in results["u2"]["output"]
+
+
+# ----- Scenario F: a session proposes a job; the owner's decision is the only start path ---------------------------
+
+
+def _wait_job(client, job_id, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        item = client.get(f"/api/jobs/{job_id}").json()
+        if item["status"] != "running":
+            return item
+        time.sleep(0.2)
+    raise AssertionError("job did not finish")
+
+
+@requires_runtime
+def test_scenario_f_session_proposes_owner_decides(client, workspace, script):
+    """The loop Ashish asked for, delegation branch: the session recommends a job, NOTHING starts, the owner sees the
+    pending request in the transcript and on the API, and their accept runs exactly the stored fields."""
+    script([
+        tool_call("j", "recommend_job", {"goal": "summarise the repo", "role": "explorer", "reason": "read-only sweep while you sleep"}),
+        text("proposed"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    events, results = _turn_results(client, workspace, script, session_id, "get the repo summarised")
+    assert results["j"]["is_error"] is False, results["j"]
+    payload = json.loads(results["j"]["output"])
+    assert payload["status"] == "pending" and payload["requested_by"] == session_id
+    assert "Nothing started" in payload["what_happens_now"]
+    # The owner SEES the recommendation in the session transcript, with its goal and role.
+    notice = [e for e in events if e["type"] == "JobRecommended"]
+    assert notice and notice[0]["payload"]["goal"] == "summarise the repo" and notice[0]["payload"]["role"] == "explorer"
+    # Pending for the owner; no job exists yet.
+    requests = client.get("/api/job-requests").json()["requests"]
+    assert [r["id"] for r in requests] == [payload["id"]] and requests[0]["status"] == "pending"
+    # The accept runs EXACTLY the stored fields (the endpoint takes no body that could change them).
+    script([text("Looked. All read-only.")])
+    accepted = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    job = accepted.json()["job"]
+    assert job["goal"] == "summarise the repo" and job["role"] == "explorer"
+    item = _wait_job(client, job["id"])
+    assert item["status"] != "running"
+    assert accepted.json()["request"]["status"] == "accepted" and accepted.json()["request"]["job_id"] == job["id"]
+    # A resolved request never resolves again.
+    assert client.post(f"/api/job-requests/{payload['id']}/accept").status_code == 409
+    assert client.post(f"/api/job-requests/{payload['id']}/dismiss").status_code == 409
+
+
+@requires_runtime
+def test_recommend_job_with_unknown_role_is_refused_and_stores_nothing(client, workspace, script):
+    script([tool_call("j", "recommend_job", {"goal": "x", "role": "wizard"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend")
+    assert results["j"]["is_error"] is True and "Unknown role" in results["j"]["message"]
+    assert client.get("/api/job-requests").json()["requests"] == []
+
+
+@requires_runtime
+def test_recommend_job_cannot_spend_another_sessions_private_role(client, workspace, script):
+    """A session-lifetime role is private: only its creator may name it, and the accept carries source_session so the
+    owner's start of THAT role stays explicit."""
+    script([tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["ReadFile"]}), text("done")])
+    session_a = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results_a = _turn_results(client, workspace, script, session_a, "make a role")
+    assert results_a["r"]["is_error"] is False
+    script([tool_call("j", "recommend_job", {"goal": "snoop", "role": "reader"}), text("ok")])
+    session_b = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results_b = _turn_results(client, workspace, script, session_b, "recommend")
+    assert results_b["j"]["is_error"] is True and "private" in results_b["j"]["message"]
+    assert client.get("/api/job-requests").json()["requests"] == []
+
+
+@requires_runtime
+def test_recommend_job_with_own_private_role_pins_version_and_accepts(client, workspace, script):
+    script([
+        tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["ReadFile"]}),
+        tool_call("j", "recommend_job", {"goal": "sweep", "role": "reader", "reason": "my own role"}),
+        text("done"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "make a role and recommend a job")
+    assert results["j"]["is_error"] is False, results["j"]
+    payload = json.loads(results["j"]["output"])
+    assert payload["role_version"] == 1 and payload["source_session"] == session_id  # pinned at proposal time
+    script([text("Swept.")])
+    accepted = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["job"]["role"] == "reader"
+    _wait_job(client, accepted.json()["job"]["id"])
+
+
+@requires_runtime
+def test_dismiss_closes_the_request_and_nothing_runs(client, workspace, script):
+    script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "explorer"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend")
+    payload = json.loads(results["j"]["output"])
+    dismissed = client.post(f"/api/job-requests/{payload['id']}/dismiss")
+    assert dismissed.status_code == 200 and dismissed.json()["request"]["status"] == "dismissed"
+    assert client.post(f"/api/job-requests/{payload['id']}/accept").status_code == 409
+    assert client.get(f"/api/job-requests/{payload['id']}/accept".replace(f"/job-requests/{payload['id']}/accept", "/jobs")).status_code != 200  # no jobs endpoint listing; nothing ran
+
+
+# ----- JobRequestStore unit tests (no runtime) --------------------------------------------------------------------
+
+
+def _store(tmp_path):
+    return jobs.JobRequestStore(SimpleNamespace(root=tmp_path))
+
+
+def _record(rid, created=1.0):
+    return {"id": rid, "goal": "g", "role": "explorer", "role_version": 0, "workspace": "/w", "reason": "",
+            "requested_by": "s1", "source_session": "s1", "status": "pending", "created_at": created}
+
+
+def test_job_request_store_round_trip_and_single_resolve(tmp_path):
+    store = _store(tmp_path)
+    store.create(_record("r1"))
+    assert [r["id"] for r in store.list()] == ["r1"] and store.list(status="pending")[0]["goal"] == "g"
+    accepted = store.mark("r1", "accepted", job_id="job-1")
+    assert accepted["status"] == "accepted" and accepted["job_id"] == "job-1"
+    with pytest.raises(jobs.JobError):
+        store.mark("r1", "dismissed")
+    with pytest.raises(jobs.JobError):
+        store.mark("missing", "accepted")
+    fresh = _store(tmp_path)  # survives a restart (same tenant root)
+    assert fresh.get("r1")["status"] == "accepted"
+
+
+def test_job_request_store_caps_and_drops_resolved_first(tmp_path):
+    store = _store(tmp_path)
+    for i in range(jobs.MAX_REQUESTS_KEPT + 5):
+        store.create(_record(f"r{i}", created=float(i)))
+    assert len(store.list()) == jobs.MAX_REQUESTS_KEPT
+    for i in range(3):
+        store.mark(f"r{i + 5}", "dismissed")
+    store.create(_record("new", created=999.0))
+    ids = [r["id"] for r in store.list()]
+    assert len(ids) == jobs.MAX_REQUESTS_KEPT and "new" in ids and "r5" not in ids  # the oldest RESOLVED dropped first
+
+
+def test_request_job_validates_goal_and_pins(tmp_path):
+    tenant = SimpleNamespace(root=tmp_path, registry=None, workspace_root=tmp_path, job_requests=_store(tmp_path))
+    runtime = SimpleNamespace(record=SimpleNamespace(id="s1", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "  "})
+    assert payload is None and "goal" in problem
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "sweep", "role": "explorer", "reason": "r"})
+    assert problem is None
+    assert payload["status"] == "pending" and payload["role_version"] == 0 and payload["source_session"] == "s1"
+    assert tenant.job_requests.get(payload["id"])["goal"] == "sweep"

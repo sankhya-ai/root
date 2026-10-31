@@ -54,6 +54,20 @@ export interface ApprovalRequest {
   trust?: TrustInfo;
 }
 
+/** An owner-reviewed job proposal stored by ``recommend_job``: the session proposed; the owner's accept is the only start. */
+export interface JobRequest {
+  id: string;
+  goal: string;
+  role: string;
+  role_version: number;
+  workspace: string;
+  reason: string;
+  requested_by: string;
+  status: "pending" | "accepted" | "dismissed";
+  created_at: number;
+  job_id?: string;
+}
+
 export interface TokenUsage {
   input_other: number;
   output: number;
