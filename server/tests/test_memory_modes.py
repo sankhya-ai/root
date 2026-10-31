@@ -119,6 +119,7 @@ def test_offline_local_memory_never_downloads(monkeypatch):
         assert local.state() == "unavailable: offline"
 
 
+
 # ----- the vector store behind local memory: scale, persistence, and saying so ------
 
 import sys  # noqa: E402
