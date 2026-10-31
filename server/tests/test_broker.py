@@ -185,3 +185,15 @@ def test_credentials_and_serve_are_refused_for_a_workspace_that_overlaps_the_dat
         assert r.status_code == 400 and "data directory" in r.text, ws
     r = client.post("/api/jobs", json={"goal": "x", "workspace": str(home / "proj"), "role": "designer", "serve": {"command": "sleep 1", "port": 45998}})
     assert r.status_code == 400
+
+
+def test_revoking_a_credential_closes_access_immediately(tmp_path, echo):
+    # The store is re-read on every request: a deletion closes access at the next request, no cached grant.
+    b = broker.Broker(tmp_path)
+    b.put("api", SECRET, [echo])
+    b.request("api", "GET", f"http://{echo}/x")
+    assert Echo.seen == [f"Bearer {SECRET}"]
+    b.delete("api")
+    with pytest.raises(broker.BrokerError):
+        b.request("api", "GET", f"http://{echo}/x")
+    assert not b.has("api") and Echo.seen == [f"Bearer {SECRET}"]

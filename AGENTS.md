@@ -278,3 +278,30 @@ Semantics kept deliberately, now load-bearing for later layers: crash mid-resume
 inspection; resume-turn error = outcomes undelivered and named, no auto-retry; no hard within-turn spend bound;
 mission-wide steps unmeasurable.
 
+### Bounded delegation + credential properties (mission layer 4, 2026-10-31)
+
+MISSION DELEGATION CAP (``Jobs.MAX_DELEGATIONS_PER_MISSION = 10``): one job may have at most this many ACCEPTED
+children over its whole life, sequential or parallel. The pending-fanout cap alone did not bound this: a mission
+that proposes, parks, resumes and proposes again could stack accepted children without limit. Each accepted child
+is a real worker with real side effects and its own budget, so the footprint is now bounded by ordinary code.
+The refusal is delivered to the proposing worker as a normal tool error; nothing is stored (scenario L:
+propose -> accept -> complete -> resume -> re-propose refused, cap=1).
+
+CREDENTIAL/SCOPE PROPERTIES ACROSS THE MISSION, each pinned by a test:
+
+* NO CREDENTIAL INHERITANCE: a proposal record carries goal/role/scope/reason only - there is no credentials
+  field, so an accepted child never inherits the asking job's credentials. The owner grants credentials only by
+  a direct, owner-authenticated start.
+* SCOPE PINNED ACROSS RESUMES: the resume worker is created with ``item["scope"]`` (pinned at start); the resume
+  path never consults the registry, so a wider role version saved while the job is parked cannot widen the next
+  worker. Record scope cannot be widened by role changes mid-mission.
+* REVOCATION CLOSES ACCESS: the broker re-reads its store on every request, so deleting a credential closes
+  access at the next request - no cached grant survives (test_broker).
+* CANCELLATION CLOSES ACCESS: a terminal job drives no more turns, so its credential names are never resolved
+  again (no job-driven turn exists to call the broker). The ended session's RECORD stays on the owner surface,
+  where the owner holds full authority anyway - that is not a leak channel, it is the owner's own data.
+* THE GENUINE BOUNDARY, not a rename: the start() guard that REFUSES a code-capable role with credentials
+  unless the owner picks bwrap-model-only or explicitly acknowledges (``accept_unprotected_credentials``) is
+  what keeps a non-isolated code-running worker from reading the same-user 0600 credential store. Redaction
+  protects the model's view; it is NOT a boundary against the worker's own code, and the docs and the refusal
+  say so plainly.

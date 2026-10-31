@@ -953,3 +953,112 @@ async def test_resume_turn_error_is_not_a_delivery(tmp_path):
     j.items.update({"p": parent, "c": child})
     await j._resume_drive(parent, [child], [])
     assert parent["status"].startswith("error") and parent["delivered"] == [] and parent["undelivered"] == ["c"]
+
+
+# ----- Layer 4: bounded delegation + credential/scope properties across the mission ---------------------------------
+
+
+def test_job_proposal_mission_delegation_cap(tmp_path):
+    # The pending-fanout cap alone would allow an unbounded SEQUENCE of accepted children; the mission cap refuses.
+    store = _store(tmp_path)
+    parent = {"id": "job-p", "session": "sess-p", "depth": 0, "scope": ["ReadFile", "recommend_job"]}
+    children = {f"c{i}": {"id": f"c{i}", "parent_job_id": "job-p", "status": "finished"} for i in range(jobs.MAX_DELEGATIONS_PER_MISSION)}
+    tenant = SimpleNamespace(root=tmp_path, registry=None, workspace_root=tmp_path, job_requests=store,
+                             jobs=SimpleNamespace(items={**children, "job-p": parent}))
+    runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "one more", "role": "explorer"})
+    assert payload is None and "delegation cap" in problem
+    assert tenant.job_requests.list() == []
+
+
+def test_proposal_carries_no_credentials(tmp_path):
+    # A proposal cannot ask for credentials: the stored record has no field for them, so an accepted child never
+    # inherits the parent's credentials - the owner grants credentials only by a direct, owner-authenticated start.
+    parent = {"id": "job-p", "session": "sess-p", "depth": 0, "scope": ["ReadFile", "recommend_job"],
+              "credentials": ["stripe-key"]}
+    tenant = SimpleNamespace(root=tmp_path, registry=None, workspace_root=tmp_path, job_requests=_store(tmp_path),
+                             jobs=SimpleNamespace(items={"job-p": parent}))
+    runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
+    payload, problem = jobs.request_job(tenant, runtime, {"goal": "g", "role": "explorer"})
+    assert problem is None
+    record = tenant.job_requests.list()[0]
+    assert "credentials" not in record and "credentials" not in str(sorted(record.keys()))
+
+
+async def test_resume_worker_gets_pinned_scope_not_current_role(tmp_path):
+    # Scope pinning across resumes: the fresh worker is created with the mission's pinned scope; nothing in the
+    # resume consults the registry, so a wider role version created while parked cannot widen the worker.
+    created = {}
+
+    class FakeRuntime:
+        def __init__(self):
+            self._turn_done = asyncio.Event()
+            self.record = SimpleNamespace(id="sess-new", max_tokens=0, max_cost_usd=0.0, last_status="finished")
+            self.last_budget, self.last_reply, self.last_error, self.last_files = {}, "done", "", []
+            self.prompts = []
+
+        async def prompt(self, text, attachments=None):
+            self.prompts.append(text)
+            self._turn_done.set()
+
+        async def wait_turn(self, timeout=None):
+            return None
+
+        def save_record(self):
+            return None
+
+    fake = FakeRuntime()
+
+    def fake_create(workspace, title, mode="", tool_scope=()):
+        created["tool_scope"] = list(tool_scope)
+        return fake
+
+    # No registry on this tenant AT ALL: any lookup would fail loudly.
+    tenant = SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": []),
+                             sessions=SimpleNamespace(create=fake_create),
+                             broker=SimpleNamespace(redact_json=lambda v: v), proxy=SimpleNamespace(enabled=False))
+    j = _jobs_with(tmp_path)
+    j.tenant = tenant
+    parent = {"id": "p", "session": "sess-p", "status": "running", "budget": {}, "used": {}, "resumes": 1,
+              "delivered": [], "delivered_requests": [], "started": time.time(), "contract": [], "credentials": [],
+              "workspace": "/w", "role": "builder", "goal": "g", "scope": ["ReadFile", "Grep"]}
+    j.items["p"] = parent
+    await j._resume_drive(parent, [], [])
+    assert created["tool_scope"] == ["ReadFile", "Grep"]  # pinned at start, not re-resolved
+    assert parent["session"] == "sess-new" and parent["session_history"] == ["sess-p"]
+
+
+@requires_runtime
+def test_scenario_l_sequential_delegation_is_bounded(client, workspace, monkeypatch):
+    """Adversarial: a mission that proposes again after each accepted child completes is still bounded - the
+    mission-wide delegation cap refuses the next proposal, the refusal reaches the worker, nothing is stored."""
+    from mock_provider import MockProvider
+
+    monkeypatch.setattr(jobs, "MAX_DELEGATIONS_PER_MISSION", 1)
+    replies = [
+        {"tool_calls": [{"name": "create_role", "arguments": {"name": "builder", "description": "d", "tools": ["ReadFile", "Grep", "recommend_job"]}}]},
+        {"text": "done"},
+        {"tool_calls": [{"name": "recommend_job", "arguments": {"goal": "child one", "role": "explorer", "reason": "r"}}]},
+        {"text": "proposed"},
+        {"text": "child one done"},
+        {"tool_calls": [{"name": "recommend_job", "arguments": {"goal": "child two", "role": "explorer", "reason": "r"}}]},
+        {"text": "final: cap reached"},
+    ]
+    with MockProvider(replies) as mock:
+        client.put("/api/settings", json={"base_url": mock.base_url, "openrouter_api_key": "sk-test-mock", "model": "mock/model", "dynamic_tools": True})
+        session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+        _, results = _turn_results(client, workspace, None, session_id, "make a role")
+        assert list(results.values())[0]["is_error"] is False
+        parent = client.post("/api/jobs", json={"goal": "keep delegating", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+        _wait_parked(client, parent["id"])
+        req = client.get("/api/job-requests").json()["requests"][0]
+        child = client.post(f"/api/job-requests/{req['id']}/accept").json()["job"]
+        _wait_terminal(client, child["id"])
+        done = _wait_terminal(client, parent["id"], timeout=40)
+    assert done["status"] == "finished", done
+    assert done["resumes"] == 1
+    assert len(client.get("/api/job-requests").json()["requests"]) == 1  # the second proposal was refused, nothing stored
+    page = client.get(f"/api/sessions/{done['session']}/events").json()
+    events = page.get("events", page) if isinstance(page, dict) else page
+    tool_results = [e for e in events if e.get("type") == "ToolResult"]
+    assert any("delegation cap" in str(e.get("payload", {}).get("return_value", "")) for e in tool_results)

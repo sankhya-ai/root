@@ -303,6 +303,10 @@ MAX_PENDING_PER_PARENT = 5
 #: How many times one parked job may be resumed by resolved delegated work. Every resume is a real model turn,
 #: so the loop of propose -> park -> resume is bounded by ordinary code, not by the model's good judgment.
 MAX_RESUMES = 10
+#: Total ACCEPTED children one job may ever have, sequential or parallel: each accepted child is a real worker
+#: with real side effects and its own budget, so the mission's delegation footprint is bounded over its LIFE -
+#: the pending-fanout cap alone would allow an unbounded sequence of accepted children.
+MAX_DELEGATIONS_PER_MISSION = 10
 
 
 class JobRequestStore:
@@ -436,6 +440,10 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         if pending >= MAX_PENDING_PER_PARENT:
             return None, (f"This job already has {MAX_PENDING_PER_PARENT} proposals waiting for the owner; that is the cap. "
                           "Do the parts your own tools allow, or report the rest in your contract data.")
+        accepted = sum(1 for j in tenant.jobs.items.values() if j.get("parent_job_id") == parent["id"])
+        if accepted >= MAX_DELEGATIONS_PER_MISSION:
+            return None, (f"This job already has {MAX_DELEGATIONS_PER_MISSION} accepted sub-jobs over its life; that is the "
+                          "mission delegation cap. Report the rest in your contract data so the owner can start the work directly.")
     # Attenuation flag: does the proposed child ask for tools the PARENT job does not have? The owner sees this at
     # review. (A chat session proposes from the owner's full scope, so the flag applies to job proposers only.)
     escalation = bool(parent is not None and not set(resolved["scope"]) <= set(parent.get("scope") or []))
