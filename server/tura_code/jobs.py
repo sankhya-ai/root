@@ -103,6 +103,9 @@ class NewJob(BaseModel):
     goal: str
     workspace: str
     role: str = "developer"
+    #: Pin a registry role's version (0 = the version active at start). A session-lifetime role is never promoted
+    #: silently: using it means naming it - and optionally its exact version - in this owner-authenticated request.
+    role_version: int = 0
     budget: Budget = Budget()
     #: Keys the final JSON block must contain, e.g. ["summary", "files_changed"].
     contract: list[str] = []
@@ -122,7 +125,7 @@ class NewJob(BaseModel):
     isolation: Literal["", "bwrap", "bwrap-model-only"] = ""
 
 
-def resolve_role(tenant: "Tenant", name: str) -> dict[str, Any]:
+def resolve_role(tenant: "Tenant", name: str, version: int = 0) -> dict[str, Any]:
     """A role's effective scope: the built-in presets plus ACTIVE registry roles (``registry.py``), re-validated at use time.
 
     A registry role is data created through ``create_role``; using it still needs this owner-authenticated job start.
@@ -132,10 +135,10 @@ def resolve_role(tenant: "Tenant", name: str) -> dict[str, Any]:
     if name in ROLES:
         return {"scope": list(ROLES[name]), "version": None, "verdict": name in VERDICT_ROLES, "contract": VERDICT_ROLES.get(name, []), "description": "built-in preset"}
     registry = getattr(tenant, "registry", None)
-    record = registry.active_role(name) if registry is not None else None
+    record = registry.active_role(name, version=version or None) if registry is not None else None
     if record is None:
         known = sorted(ROLES) + sorted(registry.roles if registry is not None else [])
-        raise JobError(f"Unknown role `{name}`. Roles: {', '.join(known)}.")
+        raise JobError(f"Unknown role `{name}`" + (f" v{version}." if version else f". Roles: {', '.join(known)}."))
     inactive = [t for t in record["tools"] if t in registry.tool_names() and registry.active_tool(t) is None]
     if inactive:
         raise JobError(f"Role `{name}` v{record['version']} names registry tool(s) {', '.join(inactive)}, which are no longer active. The job was not started.")
@@ -373,7 +376,7 @@ class Jobs:
         return out
 
     def start(self, spec: NewJob) -> dict[str, Any]:
-        resolved = resolve_role(self.tenant, spec.role)
+        resolved = resolve_role(self.tenant, spec.role, spec.role_version)
         if not spec.goal.strip():
             raise JobError("A job needs a goal.")
         if not spec.contract and resolved["contract"]:

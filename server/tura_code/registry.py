@@ -254,12 +254,12 @@ class Registry:
     def tool_names(self) -> set[str]:
         return set(self.tools)
 
-    def active_role(self, name: str) -> dict[str, Any] | None:
+    def active_role(self, name: str, version: int | None = None) -> dict[str, Any] | None:
         """The version a job may start with. Both lifetimes resolve: naming the role in POST /api/jobs is the owner's act."""
         entry = self.roles.get(name)
         if not entry:
             return None
-        version = entry.get("active_version")
+        version = version or entry.get("active_version")
         found = next((v for v in entry["versions"] if v["version"] == version and v["status"] == "active"), None)
         return {**found, "name": name} if found else None
 

@@ -646,3 +646,15 @@ def test_event_payloads_and_outputs_carry_no_hidden_data(tmp_path):
     runtime.emit = lambda kind, payload, persist=True: events.append(payload)
     run(registry.RegistryToolset().call(runtime, "c1", "create_tool", spec()))
     assert set(events[0]) == {"kind", "name", "version", "status", "lifetime", "description"}
+
+
+def test_a_job_can_pin_a_role_version(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path)
+    universe = registry.role_universe(tenant, runtime, reg)
+    reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
+    reg.create_role(role_spec(tools=["ReadFile"]), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
+    assert jobs.resolve_role(tenant, "docs_reviewer")["version"] == 2  # latest active by default
+    pinned = jobs.resolve_role(tenant, "docs_reviewer", version=1)
+    assert pinned["version"] == 1 and "read_pdf" in pinned["scope"]
+    with pytest.raises(jobs.JobError, match="v9"):
+        jobs.resolve_role(tenant, "docs_reviewer", version=9)
