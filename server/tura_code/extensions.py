@@ -14,11 +14,12 @@ if TYPE_CHECKING:
 
 def install(server: "Server") -> None:
     """Register every service's tenant extension and after-turn hook."""
-    from . import broker, catalogue, connections, jobs, visual, documents, driver, flows, history, keiki, learning, line, schedules, slack, toolbox
+    from . import broker, catalogue, connections, jobs, visual, guides, documents, driver, flows, history, keiki, learning, line, schedules, slack, toolbox
 
     catalogue.install(server)
     jobs.install(server)
     visual.install(server)
+    guides.install(server)
     broker.install(server)
     learning.install(server)
     documents.install(server)
