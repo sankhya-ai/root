@@ -153,6 +153,25 @@ def stats(tenant: "Tenant", runtime: "SessionRuntime") -> dict[str, int]:
     }
 
 
+def _composite_definitions(runtime: "SessionRuntime") -> list[dict[str, Any]]:
+    """ACTIVE registry tools this session may call (created by it, or promoted durable). Empty without a registry."""
+    registry = getattr(runtime.tenant, "registry", None)
+    if registry is None:
+        return []
+    from .registry import CompositeToolset
+
+    toolset = next((t for t in runtime.tenant.toolsets if isinstance(t, CompositeToolset)), None)
+    return toolset.definitions(runtime) if toolset is not None else []
+
+
+def _composite_record(runtime: "SessionRuntime", name: str) -> dict[str, Any] | None:
+    registry = getattr(runtime.tenant, "registry", None)
+    if registry is None:
+        return None
+    record = registry.active_tool(name, getattr(runtime.record, "id", None))
+    return {**record, "name": name} if record is not None else None
+
+
 def gateway_definitions() -> list[dict[str, Any]]:
     return [
         {
@@ -174,7 +193,7 @@ def gateway_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": USE_TOOL,
-            "description": f"Run a tool that `{FIND_TOOL}` returned, by name, with arguments matching its schema.",
+            "description": f"Run a tool that `{FIND_TOOL}` returned, by name, with arguments matching its schema. Also the way to call a registry tool created earlier in this turn.",
             "parameters": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
@@ -201,7 +220,7 @@ class GatewayToolset:
         found = deferred_definitions(tenant, runtime)
         if name == FIND_TOOL:
             limit = arguments.get("limit") if isinstance(arguments.get("limit"), int) else MAX_RESULTS
-            hits = rank(str(arguments.get("query") or ""), [d for _, d in found], limit)
+            hits = rank(str(arguments.get("query") or ""), [d for _, d in found] + _composite_definitions(runtime), limit)
             if not hits:
                 return {"is_error": False, "output": "No matching tool. Do the task with the tools already listed.", "message": "", "display": [{"type": "brief", "text": "No tools found"}]}
             return {"is_error": False, "output": json.dumps(hits, ensure_ascii=False), "message": "", "display": [{"type": "brief", "text": f"Found {len(hits)} tool(s)"}]}
@@ -210,6 +229,14 @@ class GatewayToolset:
         if not isinstance(args, dict):
             return tool_error("`arguments` must be an object.", "Invalid arguments")
         owner = next((t for t, d in found if d["name"] == target), None)
+        # A registry tool created this turn is not in the runtime's initialized tool list; the gateway still reaches it,
+        # through the same scope check as any call. No runtime change, no bypass: each pipeline step re-checks scope and approvals.
+        if owner is None:
+            composite = _composite_record(runtime, target)
+            if composite is not None and allowed(tenant, target, runtime):
+                from .registry import run_composite
+
+                return await run_composite(tenant, runtime, call_id, composite, args, tenant.registry)
         # Re-checked at call time: the model may name a tool it never found, or one outside the scope.
         if owner is None or not allowed(tenant, target, runtime):
             return tool_error(f"`{target}` is not an available tool. Use `{FIND_TOOL}` to see what is.", "Unavailable")

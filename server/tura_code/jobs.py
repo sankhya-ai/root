@@ -122,6 +122,27 @@ class NewJob(BaseModel):
     isolation: Literal["", "bwrap", "bwrap-model-only"] = ""
 
 
+def resolve_role(tenant: "Tenant", name: str) -> dict[str, Any]:
+    """A role's effective scope: the built-in presets plus ACTIVE registry roles (``registry.py``), re-validated at use time.
+
+    A registry role is data created through ``create_role``; using it still needs this owner-authenticated job start.
+    If a composite tool the role names was revoked since the role was created, the job fails here, not mid-job:
+    validation at creation time is not treated as a permanent fact.
+    """
+    if name in ROLES:
+        return {"scope": list(ROLES[name]), "version": None, "verdict": name in VERDICT_ROLES, "contract": VERDICT_ROLES.get(name, []), "description": "built-in preset"}
+    registry = getattr(tenant, "registry", None)
+    record = registry.active_role(name) if registry is not None else None
+    if record is None:
+        known = sorted(ROLES) + sorted(registry.roles if registry is not None else [])
+        raise JobError(f"Unknown role `{name}`. Roles: {', '.join(known)}.")
+    inactive = [t for t in record["tools"] if t in registry.tool_names() and registry.active_tool(t) is None]
+    if inactive:
+        raise JobError(f"Role `{name}` v{record['version']} names registry tool(s) {', '.join(inactive)}, which are no longer active. The job was not started.")
+    return {"scope": list(record["tools"]), "version": record["version"], "verdict": bool(record.get("verdict")),
+            "contract": list(record.get("contract") or []), "description": record.get("description", "")}
+
+
 def check_contract(reply: str, required: list[str]) -> dict[str, Any]:
     """The last fenced or bare JSON object in the reply and which required keys it lacks.
 
@@ -352,19 +373,20 @@ class Jobs:
         return out
 
     def start(self, spec: NewJob) -> dict[str, Any]:
-        if spec.role not in ROLES:
-            raise JobError(f"Unknown role `{spec.role}`. Roles: {', '.join(sorted(ROLES))}.")
+        resolved = resolve_role(self.tenant, spec.role)
         if not spec.goal.strip():
             raise JobError("A job needs a goal.")
-        if not spec.contract and spec.role in VERDICT_ROLES:
-            spec = spec.model_copy(update={"contract": VERDICT_ROLES[spec.role]})
+        if not spec.contract and resolved["contract"]:
+            spec = spec.model_copy(update={"contract": resolved["contract"]})  # a role's default contract applies when the job doesn't set one
+        elif not spec.contract and resolved["verdict"]:
+            spec = spec.model_copy(update={"contract": ["verdict", "reasons"]})
         handoff = self._handoff(spec.handoff_from)
         for name in spec.credentials:
             if not self.tenant.broker.has(name):
                 raise JobError(f"credentials: `{name}` is not registered.")
         if (spec.credentials or spec.serve) and overlaps(Path(spec.workspace), Path(self.tenant.root)):
             raise JobError("A job with credentials or a served app cannot use a workspace that contains or sits inside the data directory.")
-        runs_code = spec.serve or any(t in ("Shell", "process", "run_python") for t in ROLES[spec.role])
+        runs_code = spec.serve or any(t in ("Shell", "process", "run_python") for t in resolved["scope"])
         # Only the model-only jail takes the host network (and so the owner API's open bootstrap) away from the role's code.
         # A served app keeps the shared network even then, so it never counts as protected.
         protected = spec.isolation == "bwrap-model-only" and not spec.serve
@@ -378,7 +400,7 @@ class Jobs:
                 raise JobError("An isolated job needs budget.max_tokens: the jail's model token is only bounded by that provider-reported token cap (plus request, body, output and model limits). The proxy cannot enforce a dollar cap, so the job was not started.")
         visual_authority = self._visual_authority(spec)
         b = spec.budget
-        scope = ROLES[spec.role] + ([broker.TOOL_NAME] if spec.credentials else [])
+        scope = resolved["scope"] + ([broker.TOOL_NAME] if spec.credentials else [])
         runtime = self.tenant.sessions.create(spec.workspace, f"Job · {spec.role}", mode="accept_edits", tool_scope=scope)
         runtime.record.credentials = list(spec.credentials)
         runtime.record.isolation = spec.isolation
@@ -392,7 +414,7 @@ class Jobs:
         runtime.save_record()
         job_id = uuid.uuid4().hex[:12]
         item = {
-            "id": job_id, "role": spec.role, "goal": spec.goal, "session": runtime.record.id, "status": "running",
+            "id": job_id, "role": spec.role, "role_version": resolved["version"], "goal": spec.goal, "session": runtime.record.id, "status": "running",
             "started": time.time(), "budget": b.model_dump(), "scope_guarantee": catalogue.guarantee(self.tenant, runtime.record),
             "handoff_from": spec.handoff_from, "result": None,
             "credentials": spec.credentials,
@@ -420,7 +442,7 @@ class Jobs:
         prompt = spec.goal
         if handoff:
             prompt += "\n\nContext from earlier jobs (their own reports; check anything you rely on):\n" + handoff
-        prompt += guides.index_for(spec.role)
+        prompt += guides.index_for(spec.role, self.tenant)
         if spec.contract:
             prompt += f"\n\nEnd your final reply with one JSON object in a ```json block with the keys: {', '.join(spec.contract)}."
         proxy = self.tenant.proxy
@@ -450,7 +472,7 @@ class Jobs:
                 item["stopped_by"] = which_limit(runtime.last_budget)
             item["budget_used"] = runtime.last_budget or None  # the runtime's own accounting for the turn
             item["result"] = {"reply": reply, "error": error, "contract": check_contract(reply, spec.contract), "files_touched": runtime.last_files}
-            if guides.guides_for(spec.role):
+            if guides.guides_for(spec.role, self.tenant):
                 # Only whether each cited anchor exists; whether a finding is true is not something the host can check.
                 data = item["result"]["contract"].get("data") or {}
                 if not isinstance(data, dict) or "findings" not in data:
@@ -565,8 +587,15 @@ def router(app_state):
     api = APIRouter(prefix="/api")
 
     @api.get("/jobs/roles")
-    async def roles() -> dict:
-        return {"roles": ROLES}
+    async def roles(tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        registry = getattr(tenant, "registry", None)
+        catalogue_roles = {}
+        if registry is not None:
+            for name, record in registry.catalogue_roles().items():
+                catalogue_roles[name] = {"version": record["version"], "description": record["description"], "tools": record["tools"], "verdict": record["verdict"]}
+        return {"roles": ROLES, "registry_roles": catalogue_roles,
+                "note": "registry_roles are the durable catalogue (owner-promoted). A session-lifetime role still starts a job when the owner names it; "
+                        "using any role is this same owner-authenticated job start."}
 
     @api.post("/jobs")
     async def create(body: NewJob, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
