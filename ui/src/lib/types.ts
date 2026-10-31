@@ -407,3 +407,43 @@ export interface ProducedFile {
   scope: "scratch" | "workspace";
   size: number;
 }
+
+/** A generated plugin version as listed by GET /api/registry/plugins. */
+export interface GeneratedPluginVersion {
+  version: number;
+  status: string;
+  lifetime?: string;
+  session?: string;
+  sha256?: string;
+  created_by?: string;
+  created_at?: string;
+  activated_at?: string | null;
+  verified?: { ok?: boolean } | null;
+}
+
+export interface GeneratedPluginEntry {
+  active_version: number | null;
+  versions: GeneratedPluginVersion[];
+}
+
+export type GeneratedPluginListing = Record<string, GeneratedPluginEntry>;
+
+/** The full owner review payload: exactly what activation would run. */
+export interface PluginReview {
+  name: string;
+  version: number;
+  status: string;
+  lifetime?: string;
+  session?: string;
+  created_by?: string;
+  created_at?: string;
+  activated_at?: string | null;
+  verified?: { ok?: boolean; results?: { name: string; ok: boolean }[] } | null;
+  sha256: string;
+  on_disk_sha256: string;
+  hash_matches_record: boolean;
+  files: Record<string, string>;
+  tools: { name: string; description?: string; parameters?: unknown }[];
+  execution: { available: boolean; reason: string; isolation: string };
+  activation: string;
+}

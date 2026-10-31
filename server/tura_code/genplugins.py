@@ -321,6 +321,37 @@ class PluginStore:
             self._save()
         return {**record, "name": name}
 
+    def review(self, name: str, version: int | None = None) -> dict[str, Any]:
+        """Everything the owner needs BEFORE activation: the exact files, their hash, the manifest, and the honest
+        runtime facts. The hash is recomputed from the bytes on disk at review time - a mismatch with the stored
+        record means the candidate was tampered with or corrupted, and the UI must not offer activation."""
+        with self._plugin_lock():
+            entry = self.state.get(name)
+            if not entry:
+                raise PluginError(f"unknown plugin `{name}`")
+            record = self._version(name, version if version is not None else max(v["version"] for v in entry["versions"]))
+            files = read_files(self.dir / name / str(record["version"]))
+            on_disk = content_hash(files)
+            available, reason = execution_policy()
+            return {
+                "name": name,
+                **{k: record.get(k) for k in ("version", "status", "lifetime", "session", "created_by", "created_at", "verified", "activated_at")},
+                "sha256": record["sha256"],
+                "on_disk_sha256": on_disk,
+                "hash_matches_record": on_disk == record["sha256"],
+                "files": files,
+                "tools": record["manifest"].get("tools", []),
+                "execution": {
+                    "available": available is not None,
+                    "reason": reason,
+                    "isolation": ("each run is a fresh bubblewrap jail: no network, scrubbed environment, minimal mounts "
+                                  "(no /etc, /opt, home or tenant paths), rlimit ceilings, exact-hash snapshot execution; "
+                                  "aggregate memory/task limits apply only where the cgroup probe proves them"),
+                },
+                "activation": (f"POST /api/registry/plugins/{name}/activate with {{\"version\": {record['version']}, "
+                               f"\"sha256\": \"{record['sha256']}\"}} - the exact hash of what you reviewed; anything else is refused"),
+            }
+
     def activate(self, name: str, version: int, sha256: str) -> dict[str, Any]:
         """The owner's act: make EXACTLY the reviewed, re-verified hash callable. Refuses anything else."""
         with self._plugin_lock():
@@ -673,6 +704,13 @@ def router(app_state):
     @api.get("/registry/plugins")
     async def listing(tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
         return tenant.plugin_store.listing()
+
+    @api.get("/registry/plugins/{name}/review")
+    async def review_plugin(name: str, version: int | None = None, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        try:
+            return tenant.plugin_store.review(name, version)
+        except PluginError as error:
+            raise HTTPException(404, str(error)) from error
 
     @api.post("/registry/plugins/{name}/activate")
     async def activate(name: str, tenant: Tenant = Depends(app_state.auth.tenant), body: dict = Body(...)) -> dict:

@@ -394,3 +394,48 @@
     max-width: 100%;
   }
 }
+
+/* Generated plugin review: the owner reads exact bytes before activating their hash. */
+.generatedReview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.reviewTabs {
+  display: flex;
+  gap: 6px;
+}
+.reviewTabOn {
+  border-color: var(--line-strong, var(--pill-line));
+}
+.reviewCode {
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px 12px;
+  white-space: pre;
+}
+.reviewHash {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  user-select: all;
+  word-break: break-all;
+}
+.reviewWarn {
+  color: var(--del-ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+.reviewActions {
+  display: flex;
+  gap: 8px;
+}

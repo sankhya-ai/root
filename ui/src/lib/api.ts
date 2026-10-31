@@ -1,5 +1,8 @@
 import type {
   Checkpoint,
+  GeneratedPluginListing,
+  GeneratedPluginVersion,
+  PluginReview,
   Connections,
   DeviceFlow,
   Flow,
@@ -107,6 +110,13 @@ export const api = {
   skill: (name: string) => request<{ name: string; text: string }>(`/api/skills/${encodeURIComponent(name)}`),
   rollbackSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/rollback`),
   forgetSkill: (name: string) => request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  generatedPlugins: () => request<GeneratedPluginListing>("/api/registry/plugins"),
+  reviewGeneratedPlugin: (name: string, version?: number) =>
+    request<PluginReview>(`/api/registry/plugins/${encodeURIComponent(name)}/review${version ? `?${q({ version: String(version) })}` : ""}`),
+  activateGeneratedPlugin: (name: string, version: number, sha256: string) =>
+    post<GeneratedPluginVersion>(`/api/registry/plugins/${encodeURIComponent(name)}/activate`, { version, sha256 }),
+  promoteGeneratedPlugin: (name: string) => post<GeneratedPluginVersion>(`/api/registry/plugins/${encodeURIComponent(name)}/promote`),
+  revokeGeneratedPlugin: (name: string) => post<{ ok: boolean }>(`/api/registry/plugins/${encodeURIComponent(name)}/revoke`),
   flows: () => request<{ flows: Flow[] }>("/api/flows"),
   createFlow: (body: { task: string; repo?: string; verification_commands?: string[]; candidate_count?: number; auto_start?: boolean }) =>
     post<{ flow: Flow }>("/api/flows", body),

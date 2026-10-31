@@ -134,7 +134,15 @@ Implemented as the `adopt_role` host tool (registry.py), with these exact, teste
   grant or ledger entry can settle an out-of-scope action. Residual, stated honestly: read-only native tools
   inside the workspace do not ask the host per call, so for them the narrowed native set is guaranteed from the
   NEXT turn, when the launcher spec fingerprint (now including script_role and tool_scope) re-initializes the
-  runtime. Same-turn enforcement is therefore NOT claimed for in-workspace read-only native calls. There is no model-side reset: the
+  runtime. Same-turn enforcement is therefore NOT claimed for in-workspace read-only native calls.
+
+  ASSESSMENT, immediate-with-exceptions vs deferred-to-turn-boundary (asked 2026-10-31): deferring the whole
+  transition to the turn boundary would be uniform - one moment when everything changes - but strictly WEAKER:
+  the rest of the adopting turn would keep the old, wider scope for every tool kind. The implemented order
+  narrows host, gateway and every approval-mediated native action immediately and only in-workspace read-only
+  native calls (which never consult the host) wait for the next turn's re-init. The residual is smaller than
+  the deferral gap, so adoption stays immediate and the exception is documented at the tool, in the owner
+  notice and here - not promised away. There is no model-side reset: the
   existing owner session endpoint (PATCH /api/sessions/{id}) only supports title and permission mode, so no reset
   was built - a session that needs its wider scope back starts fresh or asks the owner.
 * REVOCATION, explicit: revoking the registry role later does NOT widen the session back - the narrowed scope is

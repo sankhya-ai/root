@@ -596,3 +596,74 @@ def test_in_jail_self_check_refuses_when_the_cgroupfs_is_absent(tmp_path):
              "import sys; sys.path.insert(0, %r); from genplugin_runner import check_cgroup; check_cgroup('268435456', '64')" % str(runner.parent)]
     result = _subprocess.run(argv, capture_output=True, text=True, timeout=30)
     assert result.returncode != 0 and ("unreadable" in result.stderr or "refusing" in result.stderr)
+
+
+# ----- the owner's review surface: see exactly what activation would run -------------------------------------------
+
+from conftest import of_type, requires_runtime, run_turn, text, tool_call  # noqa: E402
+
+
+def test_review_returns_the_exact_files_hash_and_execution_truth(tmp_path, monkeypatch):
+    """Direct store level: review recomputes the on-disk hash, exposes every file, and reports execution
+    availability honestly. Verification is stubbed here; the real jail path is covered (or skip-labeled) elsewhere."""
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (["true"], ""))
+    tenant, runtime, store = make(tmp_path)
+    store.propose("numstats", {"plugin.py": MATH_SOURCE, "plugin.json": json.dumps({"tools": MANIFEST}), "tests.py": MATH_TESTS},
+                  created_by="model", session="s1")
+    store.record_verification("numstats", 1, {"ok": True, "results": [{"name": "test_mean", "ok": True}]})
+    review = store.review("numstats")
+    assert review["files"]["plugin.py"] == MATH_SOURCE and review["files"]["tests.py"] == MATH_TESTS
+    assert review["sha256"] == review["on_disk_sha256"] and review["hash_matches_record"] is True
+    assert review["tools"][0]["name"] == "stats_summary"
+    assert review["execution"]["available"] is True
+    assert review["sha256"] in review["activation"]
+    with pytest.raises(genplugins.PluginError):
+        store.review("numstats", 9)
+    with pytest.raises(genplugins.PluginError):
+        store.review("nope")
+
+
+def test_review_exposes_on_disk_tampering_and_blocks_stale_activation(tmp_path, monkeypatch):
+    """Stale review must never authorize changed code: after the files change on disk, review says so and the
+    previously reviewed hash no longer activates."""
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (["true"], ""))
+    tenant, runtime, store = make(tmp_path)
+    store.propose("numstats", {"plugin.py": MATH_SOURCE, "plugin.json": json.dumps({"tools": MANIFEST}), "tests.py": MATH_TESTS},
+                  created_by="model", session="s1")
+    store.record_verification("numstats", 1, {"ok": True, "results": [{"name": "test_mean", "ok": True}]})
+    reviewed_hash = store.review("numstats")["sha256"]
+    target = store.dir / "numstats" / "1" / "plugin.py"
+    target.write_text(MATH_SOURCE + "\n# tampered after review\n", "utf-8")
+    stale = store.review("numstats")
+    assert stale["hash_matches_record"] is False and stale["on_disk_sha256"] != reviewed_hash
+    with pytest.raises(genplugins.PluginError, match="no longer match"):
+        store.activate("numstats", 1, reviewed_hash)
+
+
+@requires_runtime
+def test_review_endpoint_through_the_real_app(client, workspace, script, monkeypatch, home):
+    """The owner flow over HTTP: propose in a session, GET the review, activate with the reviewed hash, and a
+    404 for unknown plugins. Verification is stubbed (this host has no cgroup enforcement); the hash gates are real."""
+    monkeypatch.setattr(genplugins, "execution_policy", lambda: (["true"], ""))
+
+    async def fake_jailed(store, name, version, payload, *, timeout, expected_sha256=None):
+        return {"ok": True, "results": [{"name": "test_mean", "ok": True}], "isolation": "verification stubbed in this test"}
+
+    monkeypatch.setattr(genplugins, "run_jailed", fake_jailed)
+    script([tool_call("p", "propose_tool", {"name": "numstats", "tools": MANIFEST, "source": MATH_SOURCE, "tests": MATH_TESTS}), text("proposed")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "build the stats tool"), "ToolResult")}
+    assert json.loads(results["p"]["output"])["status"] == "verified"
+    assert client.get("/api/registry/plugins/nope/review").status_code == 404
+    review = client.get("/api/registry/plugins/numstats/review").json()
+    assert review["status"] == "verified" and review["hash_matches_record"] is True
+    assert review["files"]["plugin.py"] == MATH_SOURCE
+    activated = client.post("/api/registry/plugins/numstats/activate", json={"version": 1, "sha256": review["sha256"]})
+    assert activated.status_code == 200, activated.text
+    # On-disk tamper after review: the next review reports it and the old hash can no longer activate a re-review cycle.
+    target = home / "registry" / "plugins" / "numstats" / "1" / "plugin.py"
+    target.write_text(MATH_SOURCE + "\n# tampered\n", "utf-8")
+    stale = client.get("/api/registry/plugins/numstats/review").json()
+    assert stale["hash_matches_record"] is False
