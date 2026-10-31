@@ -435,3 +435,79 @@ def test_accept_racing_dismiss_has_one_winner(tmp_path):
     with pytest.raises(jobs.JobError, match="already dismissed"):
         store.accept("r1", lambda record: {"id": "job-should-not-exist"})
     assert store.get("r1")["status"] == "dismissed" and "job_id" not in store.get("r1")
+
+def _requests_file(request_id):
+    """The tenant's job-request store file that holds this request (several tenants can share /tmp in one pytest run)."""
+    import json as _json
+    from pathlib import Path
+    for candidate in Path("/tmp").glob("**/jobs/requests.json"):
+        try:
+            data = _json.loads(candidate.read_text())
+        except (OSError, ValueError):
+            continue
+        if request_id in data:
+            return candidate, data
+    raise AssertionError("requests store file for the tenant not found")
+
+
+# ----- Crash-window idempotency and pinned limits --------------------------------------------------------------------
+
+
+@requires_runtime
+def test_accept_after_crash_window_adopts_the_existing_job(client, workspace, script):
+    """Failure injection: the accept created and persisted the job, then the host 'died' before the accepted state
+    was saved - on disk the request reads pending while its job exists. The retried accept ADOPTS that job: same
+    job id, no duplicate start, and the job records which request it fulfills."""
+    script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "explorer"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend")
+    payload = json.loads(results["j"]["output"])
+    script([text("Swept.")])
+    first = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert first.status_code == 200, first.text
+    job_id = first.json()["job"]["id"]
+    item = client.get(f"/api/jobs/{job_id}").json()
+    assert item.get("request_id") == payload["id"]  # lineage: the job names the request it fulfills
+    # Simulate the crash window: the request's accepted state never landed on disk.
+    import json as _json
+    store_file, data = _requests_file(payload["id"])
+    data[payload["id"]]["status"] = "pending"
+    del data[payload["id"]]["job_id"]
+    del data[payload["id"]]["resolved_at"]
+    store_file.write_text(_json.dumps(data))
+    # The retried accept must not start a second job.
+    second = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert second.status_code == 200, second.text
+    assert second.json()["job"]["id"] == job_id  # SAME job adopted
+    assert second.json()["request"]["status"] == "accepted"
+
+
+@requires_runtime
+def test_accept_applies_the_pinned_budget_not_fresh_defaults(client, workspace, script):
+    """The budget the owner reviewed is what runs: the stored record's pinned values, not defaults re-read at accept."""
+    script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "explorer"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend")
+    payload = json.loads(results["j"]["output"])
+    assert payload["budget"]["timeout_seconds"] == 900 and payload["budget"]["max_steps"] == 0  # defaults pinned at proposal
+    # A default changed after review must not leak in: rewrite the pinned budget as the review saw it (tighter).
+    import json as _json
+    store_file, data = _requests_file(payload["id"])
+    data[payload["id"]]["budget"]["max_steps"] = 3
+    store_file.write_text(_json.dumps(data))
+    script([text("Swept.")])
+    accepted = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    item = client.get(f"/api/jobs/{accepted.json()['job']['id']}").json()
+    assert item["budget"]["max_steps"] == 3  # the REVIEWED value ran, not a fresh default
+
+
+def test_store_accept_adopts_existing_job_without_starting(tmp_path):
+    """Store-level injection of the same window: a job already exists for the request; accept must not call start."""
+    store = _store(tmp_path)
+    store.create(_record("r1"))
+    calls = []
+    record, item = store.accept("r1", lambda rec: calls.append(rec) or {"id": "job-new"},
+                                find_existing=lambda rid: {"id": "job-existing"})
+    assert calls == [] and item["id"] == "job-existing"
+    assert record["job_id"] == "job-existing" and record["status"] == "accepted"

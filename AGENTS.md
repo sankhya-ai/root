@@ -126,7 +126,13 @@ generated code ever runs without per-hash owner activation.
   role), so the owner reviews actual permissions, not a label. Claim and start run under the store lock: a double
   accept or an accept racing a dismiss has exactly one winner and can never launch two jobs; a failed start leaves
   the request pending (nothing ran, the owner can dismiss or retry). A session that ADOPTED a role cannot call
-  `recommend_job` at all - management tools narrow away with everything else.
+  `recommend_job` at all - management tools narrow away with everything else. The job-specific limits (wall clock,
+  step/token/cost caps) are PINNED into the request at proposal time (a session cannot set them; they are the
+  defaults) and the accept applies exactly those, so a default changed between review and accept cannot silently
+  alter what the owner approved; the card shows the values. Crash window: if the host dies after the job was
+  created and persisted but before the accepted state was saved, the retried accept ADOPTS the existing job
+  (matched by the request_id recorded on the job item) instead of launching a duplicate; a crash before the job
+  was persisted is a failure before job creation - nothing was recorded, and the retry starts fresh.
 * SELECTING a role for oneself is a BEHAVIOR choice: which guides load (guides.guides_for / script_role in
   tenancy.py) and which subset of ALREADY-ALLOWED tools are in play. A session's authority ceiling is its tool
   scope, fixed at creation; choosing among capabilities it already holds grants nothing.

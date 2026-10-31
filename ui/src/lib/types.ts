@@ -65,6 +65,8 @@ export interface JobRequest {
   requested_by: string;
   /** The role's effective tool scope resolved at proposal time (display-only; the accept re-resolves the pinned role). */
   scope?: string[];
+  /** Job-specific limits pinned at proposal time; the accept applies exactly these. */
+  budget?: { max_steps?: number; timeout_seconds?: number; max_tokens?: number; max_cost_usd?: number };
   status: "pending" | "accepted" | "dismissed";
   created_at: number;
   job_id?: string;

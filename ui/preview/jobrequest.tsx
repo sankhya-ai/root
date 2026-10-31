@@ -16,6 +16,7 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       id: "f3a91c0d2e4b", goal: "Summarise the repo and file a digest", role: "explorer", role_version: 0,
       workspace: "/tmp/demo", reason: "read-only sweep while you sleep", requested_by: "sess-1", status: "pending", created_at: 1,
       scope: ["ReadFile", "Glob", "Grep"],
+      budget: { max_steps: 0, timeout_seconds: 900, max_tokens: 0, max_cost_usd: 0 },
     }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
   }
   return originalFetch(input, init);

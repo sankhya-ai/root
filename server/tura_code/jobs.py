@@ -138,6 +138,9 @@ class NewJob(BaseModel):
     #: Run the job's runtime (and so its Shell, process and run_python) in a bubblewrap jail. "bwrap": files only, the host's
     #: network is shared. "bwrap-model-only": files and network; only the LLM proxy is reachable. Fails closed.
     isolation: Literal["", "bwrap", "bwrap-model-only"] = ""
+    #: Set ONLY by the job-request accept route: the proposal this job fulfills. Recorded on the item so an accept
+    #: retried after a host crash adopts the already-created job instead of launching a duplicate.
+    request_id: str = ""
 
 
 def resolve_role(tenant: "Tenant", name: str, version: int = 0, source_session: str = "") -> dict[str, Any]:
@@ -357,18 +360,24 @@ class JobRequestStore:
         self._load()
         return self.items.get(request_id)
 
-    def accept(self, request_id: str, start) -> tuple[dict[str, Any], dict[str, Any]]:
+    def accept(self, request_id: str, start, find_existing=None) -> tuple[dict[str, Any], dict[str, Any]]:
         """Claim AND resolve a pending request under one lock: a double accept, or accept racing dismiss, has exactly
         one winner. ``start(record)`` runs while the lock is held, so a concurrent mutation waits and then sees the
         outcome. A FAILED start leaves the request PENDING - nothing ran, the error says why, the owner can still
-        dismiss or fix the cause and retry."""
+        dismiss or fix the cause and retry.
+
+        ``find_existing(request_id)`` closes the crash window: the host died AFTER the job was created and persisted
+        but BEFORE the accepted state was saved, so the request reads pending while its job exists. The retried
+        accept ADOPTS that job instead of starting a duplicate. A crash before the job was persisted is a failure
+        before job creation: nothing was recorded, and the retry starts fresh."""
         with self._exclusive():
             record = self.items.get(request_id)
             if record is None:
                 raise JobError("No such job request.")
             if record.get("status") != "pending":
                 raise JobError(f"Job request {request_id} is already {record.get('status')}; it will not change again.")
-            item = start(record)
+            existing = find_existing(request_id) if find_existing is not None else None
+            item = existing if existing is not None else start(record)
             record["status"] = "accepted"
             record["resolved_at"] = time.time()
             record["job_id"] = item["id"]
@@ -423,6 +432,10 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         # a wider scope past the owner; it exists so the review shows the actual requested permissions, not a label.
         "scope": list(resolved["scope"]),
         "contract": list(resolved.get("contract") or []),
+        # The job-specific limits, PINNED at proposal time (a session cannot set them; these are the defaults).
+        # The accept applies exactly these, so a default changed between review and accept cannot silently alter
+        # what the owner saw and approved.
+        "budget": Budget().model_dump(),
         "status": "pending",
         "created_at": time.time(),
     }
@@ -597,6 +610,8 @@ class Jobs:
             item["scope_guarantee"] = {**item["scope_guarantee"], "isolation": spec.isolation, "isolation_note": "Tool names are still not the boundary; the jail is. Shared kernel; no seccomp profile of our own." + (" The host's network is shared: loopback services, including the owner API's open bootstrap (which hands out the owner token), are reachable from the jailed code." if spec.isolation == "bwrap" else " Network for jailed code: only the filtered LLM bridge.") + " Host tools in host_tools_outside_jail (inspect_page, credentialed_request, the find_tools/use_tool gateway) run outside the jail with their own limits."}
         if spec.serve and not spec.isolation:
             item["scope_guarantee"] = {**item["scope_guarantee"], "level": "none", "serve": "The host runs an owner-named command as the host user for this job. The role's tool names do not bound that app's code."}
+        if spec.request_id:
+            item["request_id"] = spec.request_id
         self.items[job_id] = item
         self._save(item)
         for old in list(self.items)[:-MAX_JOBS_KEPT]:
@@ -791,11 +806,16 @@ def router(app_state):
 
         def start(record: dict[str, Any]) -> dict[str, Any]:
             spec = NewJob(goal=record["goal"], workspace=record["workspace"], role=record["role"],
-                          role_version=int(record.get("role_version") or 0), source_session=record.get("source_session", ""))
+                          role_version=int(record.get("role_version") or 0), source_session=record.get("source_session", ""),
+                          budget=Budget(**(record.get("budget") or {})), request_id=request_id)
             return tenant.jobs.start(spec)  # every start() guard still applies; a role revoked since the proposal fails HERE
 
+        def find_existing(rid: str) -> dict[str, Any] | None:
+            # A previous accept created and persisted the job, then the host died before saving the accepted state.
+            return next((j for j in tenant.jobs.items.values() if j.get("request_id") == rid), None)
+
         try:
-            resolved_record, item = store.accept(request_id, start)
+            resolved_record, item = store.accept(request_id, start, find_existing)
         except JobError as error:
             message = str(error)
             status = 404 if "No such" in message else 409 if "already" in message else 400

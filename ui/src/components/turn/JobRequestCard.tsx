@@ -14,6 +14,7 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
   const [status, setStatus] = useState<string | null>(null);
   const [jobId, setJobId] = useState("");
   const [scope, setScope] = useState<string[]>([]);
+  const [limits, setLimits] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = () => {
@@ -24,6 +25,12 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
         setStatus(found ? found.status : "gone");
         setJobId(found?.job_id ?? "");
         setScope(found?.scope ?? []);
+        const b = found?.budget ?? {};
+        const parts = [`wall ${b.timeout_seconds ?? 900}s`];
+        parts.push(b.max_steps ? `${b.max_steps} steps` : "no step cap");
+        parts.push(b.max_tokens ? `${b.max_tokens} tokens` : "no token cap");
+        parts.push(b.max_cost_usd ? `$${b.max_cost_usd} cost cap` : "no cost cap");
+        setLimits(parts.join(" · "));
       })
       .catch(() => setStatus("unknown"));
   };
@@ -60,6 +67,11 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
       <div className="approvalMeta">
         <span className="approvalChip" title="The exact tools the job would run with, resolved when the session proposed it. The job gets no budget beyond the job defaults.">
           tools: {scope.length ? scope.join(", ") : "resolving…"}
+        </span>
+      </div>
+      <div className="approvalMeta">
+        <span className="approvalChip" title="Pinned when the session proposed the job; accepting applies exactly these, even if the defaults changed since.">
+          limits: {limits || "job defaults"}
         </span>
       </div>
       {status === "pending" || status === null ? (
