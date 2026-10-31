@@ -74,19 +74,43 @@ that implements a genuinely new tool. The rules, enforced by ordinary code:
 The registry store serializes multi-process read-modify-write with an flock on `registry/.lock` plus atomic
 tmp-file writes; parallel creators lose no versions (tested with 6 OS processes).
 
-### How this compares to current practice (researched 2026-10-31)
+### Current public practice, primary sources (checked 2026-10-31)
 
-* Anthropic's Claude Code sandboxes bash with bubblewrap on Linux (Seatbelt on macOS), network denied by default -
-  the same OS-primitive tier chosen here, and their sandbox-runtime (anthropic-experimental) wraps arbitrary
-  processes and MCP servers the same way this jail wraps candidate code. https://playciso.com/blog/agent-sandbox-comparison-srt-vs-alternatives-2026
-* Hosted agent code execution uses stronger boundaries when no human watches each call: claude.ai runs code in
-  ephemeral gVisor containers; E2B and Vercel run Firecracker microVMs. The 2026 guidance: human-in-the-loop ->
-  namespace sandbox (what Root does); fully autonomous fleets -> microVM. Root's jobs already document the shared
-  -kernel caveat; generated plugins inherit it. https://niteagent.com/blog/2026-08-15-agent-sandboxing-2026/
-* The WASM/capability tier (Extism, WASI) removes ambient authority in-process but constrains languages and host
-  interop; for a Python host with an existing bubblewrap dependency, the namespace jail plus a whitelisted-stdlib
-  screen gives the same deny-by-default shape without a new runtime.
-  https://www.systemshardening.com/articles/wasm/wasm-sandboxed-mcp-tools/
-* The common lifecycle pattern matches Ashish's rule: propose -> deterministic verify -> human activation of an exact
-  artifact -> audited invoke -> instant revoke. MCP security guidance likewise centers manifest-declared permissions,
-  approval gates and schema-locked tool interfaces. https://www.practical-devsecops.com/mcp-security-best-practices/
+* Anthropic's sandbox-runtime (github.com/anthropics/sandbox-runtime): an open-source wrapper that enforces
+  filesystem and network restrictions on arbitrary processes with OS primitives - bubblewrap on Linux, sandbox-exec
+  on macOS - and proxy-based network filtering, built for Claude Code and documented for local MCP servers. Root's
+  generated-plugin jail uses the same Linux primitive (bubblewrap) with the same default-deny shape: minimal mounts,
+  no network. Difference to note: srt adds a domain-allowlisting network proxy; generated plugins get no network at
+  all, so no proxy is needed.
+* Claude Code sandboxing docs (code.claude.com/docs/en/sandboxing) describe the same model for agent-initiated bash:
+  OS-level sandbox with network denied by default, approval gates outside it.
+* E2B (e2b.dev/docs) runs agent code in Firecracker microVMs (github.com/firecracker-microvm/firecracker): a
+  separate kernel, a stronger boundary than any namespace jail. Root's plugin jail is a namespace sandbox with a
+  shared host kernel - the docs in genplugins.py carry that caveat, and a microVM tier is the honest step up if
+  generated code ever runs WITHOUT per-hash owner activation.
+* Extism (extism.org/docs) and WASI pursue in-process capability isolation via WebAssembly: no ambient authority,
+  host-granted functions only. That model constrains plugins to WASM-compilable languages and a host-function ABI;
+  Root's candidates are ordinary Python, so this design does not claim the WASM capability model - its whitelist AST
+  screen is a FILTER with known bypass surface (dynamic attribute access), and the bubblewrap process is the only
+  claimed boundary.
+* MCP security best practices (modelcontextprotocol.io/specification/draft/basic/security_best_practices) cover
+  confused-deputy and token-passthrough risks for tool servers; the owner-activation gate and per-call scope checks
+  here are the local answer, not an equivalence claim.
+
+### Resource limits, stated exactly
+
+Set and tested: 10s CPU (RLIMIT_CPU), 512MB address space (RLIMIT_AS), 16MB per file (RLIMIT_FSIZE), 256 fds, a
+wall-clock timeout with SIGKILL backstop, and a no-network namespace. Set but NOT jail-scoped: RLIMIT_NPROC counts
+per-uid across the host user (defense-in-depth only; the fork path is also refused by the import screen). NOT bounded
+in v1: aggregate disk/inode exhaustion - the scratch workspace is a jail-private tmpfs (RAM-backed) with no size
+option in the installed bubblewrap; the CPU limit bounds write rate in practice but a determined candidate can
+pressure host RAM within its 10s CPU budget. That residual is documented, not hidden.
+
+### Role selection, bounded within existing grants
+
+Root has no automatic role selection for interactive sessions. The bounded mechanism that fits the existing grants:
+a session may RECOMMEND a job (role + goal + workspace) to the owner; the owner starts it with POST /api/jobs. The
+recommendation surface is the durable role catalogue (GET /api/jobs/roles - promoted roles only) plus roles the
+session itself created, named with source_session. Selection never starts anything: POST /api/jobs stays
+owner-authenticated, and a private role requires the explicit source_session reference. This is a description of
+the supported path, not a claim that the model picks roles autonomously.

@@ -17,6 +17,12 @@ may PROPOSE a generated plugin: a small Python module it writes itself. The gove
 * The static screen is a FILTER: passing means "nothing obviously forbidden", never "safe". Verification is the
   candidate's own declared tests passing in the jail: evidence, not proof. The trust decision is the owner's,
   made with the diff, the screen result and the test report in front of them.
+* Activation is SESSION-LOCAL: the owner activates an exact hash for the creating session; making the plugin callable
+  by future sessions is the owner's separate promotion. Revocation ends it everywhere on the next call.
+* Resource limits, stated exactly: CPU 10s, address space 512MB, 16MB per file, 256 fds, wall-clock kill, no network.
+  RLIMIT_NPROC is per-uid (host-wide) defense-in-depth, not a jail-scoped cap. Aggregate disk/inode pressure inside
+  the RAM-backed scratch tmpfs is NOT bounded in v1; the CPU budget bounds write rate in practice. Shared host
+  kernel; a microVM tier is the step up if generated code ever runs without per-hash owner activation.
 * Identity is content: a version is the SHA-256 of its files. Activation names the hash and re-verifies in the jail
   before flipping the switch, so a tampered file or a stale review cannot activate. Revocation takes effect on the
   next call; each call re-resolves the active version and re-checks the hash before spending a process on it.
@@ -110,6 +116,12 @@ def screen_source(source: str, filename: str, *, extra_allowed: frozenset[str] =
                 problems.append(f"{filename}:{node.lineno}: `{fn.id}(...)` is refused (it defeats review and the interpreter rules)")
             elif isinstance(fn, ast.Attribute) and fn.attr in FORBIDDEN_CALLS:
                 problems.append(f"{filename}:{node.lineno}: `.{fn.attr}(...)` is refused")
+            elif isinstance(fn, ast.Attribute) and fn.attr in ("format", "format_map"):
+                # "{0.__globals__}".format(x) hides attribute access inside a string the attribute check never sees.
+                # The template is the RECEIVER of .format (fn.value); format_map's mapping can carry one too.
+                candidates = [fn.value, *node.args]
+                if any(isinstance(c, ast.Constant) and isinstance(c.value, str) and "__" in c.value for c in candidates):
+                    problems.append(f"{filename}:{node.lineno}: a format template carries a dunder access path; dynamic attribute access is not review surface")
         elif isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRIBUTES:
             problems.append(f"{filename}:{node.lineno}: attribute `{node.attr}` is refused (interpreter internals are not review surface)")
     return problems
@@ -207,20 +219,28 @@ class PluginStore:
 
     # ----- lookups ---------------------------------------------------------------
 
-    def active_version(self, name: str) -> dict[str, Any] | None:
+    def active_version(self, name: str, session: str | None = None) -> dict[str, Any] | None:
+        """The version a session may call. Lifetime mirrors the registry: activation makes the plugin ACTIVE IN THE
+        CREATING SESSION only; only the owner's separate promotion makes it durable (any session)."""
         self._load()
         entry = self.state.get(name)
         if not entry:
             return None
         version = entry.get("active_version")
         record = next((v for v in entry["versions"] if v["version"] == version and v["status"] == "active"), None)
-        return {**record, "name": name} if record else None
+        if record is None:
+            return None
+        if record.get("lifetime") == "durable":
+            return {**record, "name": name}
+        if session is not None and record.get("session") == session:
+            return {**record, "name": name}
+        return None
 
-    def tool_owner(self, tool_name: str) -> dict[str, Any] | None:
-        """The active plugin version exposing `tool_name`, if any."""
+    def tool_owner(self, tool_name: str, session: str | None = None) -> dict[str, Any] | None:
+        """The active plugin version exposing `tool_name` TO THIS SESSION, if any."""
         self._load()
-        for name, entry in self.state.items():
-            record = self.active_version(name)
+        for name in self.state:
+            record = self.active_version(name, session)
             if record and any(t["name"] == tool_name for t in record["manifest"].get("tools", [])):
                 return record
         return None
@@ -231,7 +251,7 @@ class PluginStore:
         for name, entry in sorted(self.state.items()):
             out[name] = {
                 "active_version": entry.get("active_version"),
-                "versions": [{k: v.get(k) for k in ("version", "status", "sha256", "created_by", "created_at", "verified", "activated_at")}
+                "versions": [{k: v.get(k) for k in ("version", "status", "lifetime", "session", "sha256", "created_by", "created_at", "verified", "activated_at")}
                              for v in entry["versions"]],
             }
         return out
@@ -314,6 +334,24 @@ class PluginStore:
             record["status"] = "active"
             record["activated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             entry["active_version"] = version
+            # Activation is session-lifetime: the creating session may call it at once; future sessions need the
+            # owner's separate promotion. record["session"] was fixed at proposal time.
+            record["lifetime"] = "session"
+            self._save()
+        return {**record, "name": name}
+
+    def promote(self, name: str, version: int | None = None) -> dict[str, Any]:
+        """The owner's second, separate act: make an ACTIVATED version durable for future sessions."""
+        with self._plugin_lock():
+            entry = self.state.get(name)
+            if not entry:
+                raise PluginError(f"unknown plugin `{name}`")
+            version = version or entry.get("active_version")
+            record = next((v for v in entry["versions"] if v["version"] == version and v["status"] == "active"), None)
+            if record is None:
+                raise PluginError(f"`{name}` has no active v{version}; only an activated version can be promoted (activation is the hash gate, promotion is the lifetime gate).")
+            record["lifetime"] = "durable"
+            record["promoted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._save()
         return {**record, "name": name}
 
@@ -357,7 +395,7 @@ def sandbox_problem() -> str:
 JAIL_SYSTEM_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin")
 
 
-def _jail_argv(python: str, runner: Path, snapshot: Path, scratch: Path) -> list[str]:
+def _jail_argv(python: str, runner: Path, snapshot: Path) -> list[str]:
     args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
             "--unshare-cgroup-try", "--unshare-net"]
     for path in JAIL_SYSTEM_DIRS:
@@ -367,7 +405,8 @@ def _jail_argv(python: str, runner: Path, snapshot: Path, scratch: Path) -> list
             args += ["--ro-bind", path, path]
     args += ["--dev", "/dev", "--tmpfs", "/tmp"]
     args += ["--ro-bind", str(runner), str(runner), "--ro-bind", str(snapshot), str(snapshot)]
-    args += ["--bind", str(scratch), str(scratch), "--chdir", str(scratch)]
+    # The scratch workspace is a jail-PRIVATE tmpfs: it dies with the namespace and no host path is ever writable.
+    args += ["--tmpfs", "/scratch", "--chdir", "/scratch"]
     return [*args, "--", python, str(runner), str(snapshot)]
 
 
@@ -384,7 +423,6 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
     python = shutil.which("python3")
     if not python:
         return {"ok": False, "error": "no python3 on PATH for the jail; nothing ran"}
-    scratch = Path(tempfile.mkdtemp(prefix="genplugin-"))
     snapshot = Path(tempfile.mkdtemp(prefix="genplugin-src-"))
     try:
         source_dir = store.dir / name / str(version)
@@ -395,7 +433,7 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
         for filename, content in files.items():
             if content:
                 (snapshot / filename).write_text(content, "utf-8")
-        argv = _jail_argv(python, runner, snapshot, scratch)
+        argv = _jail_argv(python, runner, snapshot)
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"}
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
@@ -417,7 +455,6 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
             return {"ok": False, "error": f"the candidate produced no protocol reply ({why}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
         return reply
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
         shutil.rmtree(snapshot, ignore_errors=True)
 
 
@@ -435,30 +472,38 @@ class GeneratedToolset:
     def __init__(self, store: PluginStore) -> None:
         self.store = store
 
-    def _active_tools(self) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    def _active_tools(self, session: str | None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         out = []
         for name in sorted(self.store.state.keys()):
-            record = self.store.active_version(name)
+            record = self.store.active_version(name, session)
             if record:
                 for tool in record["manifest"].get("tools", []):
                     out.append((record, tool))
         return out
 
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
+        session = getattr(runtime.record, "id", None)
         return [{
             "name": tool["name"],
             "description": tool["description"] + f" (generated plugin `{record['name']}` v{record['version']}, hash {record['sha256'][:12]}...: "
                                                  "model-written code, owner-activated, every call runs in a fresh networkless bubblewrap jail.)",
             "parameters": tool["parameters"],
-        } for record, tool in self._active_tools()]
+        } for record, tool in self._active_tools(session)]
 
     def handles(self, name: str) -> bool:
-        return self.store.tool_owner(name) is not None
+        # ``handles`` sees no runtime; ``call`` enforces the session gate.
+        return any(self.store.tool_owner(name, s) for s in (None,)) or any(
+            t["name"] == name
+            for entry in self.store.state.values()
+            for record in entry["versions"]
+            if record["status"] == "active"
+            for t in record["manifest"].get("tools", []))
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        record = self.store.tool_owner(name)
+        record = self.store.tool_owner(name, getattr(runtime.record, "id", None))
         if record is None:
-            return tool_error(f"`{name}` is not an active generated tool (unknown, not yet owner-activated, or revoked).", "Unavailable")
+            return tool_error(f"`{name}` is not available to this session (unknown, not yet owner-activated, revoked, or session-lifetime in its creating session only).",
+                              "Unavailable")
         # TOCTOU, closed: run_jailed snapshots the files, re-hashes the snapshot against the activated hash, and
         # only then mounts the snapshot into the jail. A swapped file never executes.
         reply = await run_jailed(self.store, record["name"], record["version"], {"mode": "call", "tool": name, "arguments": arguments},
@@ -538,10 +583,11 @@ class ProposeToolset:
             "name": plugin_name,
             "verification": report,
             "what_this_means": ("the candidate's declared tests passed in a networkless jail: evidence, not proof of correctness or safety. "
-                                "The tool is callable by NO session until the owner activates this exact hash."),
-            "owner_activation": f"POST /api/registry/plugins/{plugin_name}/activate with {{\"version\": {record['version']}, \"sha256\": \"{record['sha256']}\"}}",
+                                "The tool is callable by NO session until the owner activates this exact hash - and activation makes it "
+                                "callable IN THIS SESSION only. Future sessions get it only if the owner then promotes it."),
+            "owner_activation": f"POST /api/registry/plugins/{plugin_name}/activate with {{\"version\": {record['version']}, \"sha256\": \"{record['sha256']}\"}} (this session only); POST /api/registry/plugins/{plugin_name}/promote makes it durable",
             "tell_the_owner": (f"Say what you proposed ({plugin_name}: {', '.join(t['name'] for t in record['manifest']['tools'])}), "
-                               "show the verification report, and leave activation to them."),
+                               "show the verification report, and leave activation - and any promotion to future sessions - to them."),
         }
         return {"is_error": False, "output": json.dumps(payload, indent=2, default=str), "message": "",
                 "display": [{"type": "brief", "text": f"Proposed {plugin_name} v{record['version']} ({record['status']})"}]}
@@ -588,6 +634,14 @@ def router(app_state):
             raise HTTPException(409, f"re-verification failed at activation, so nothing was activated: {json.dumps(report)[:500]}")
         try:
             return store.activate(name, version, sha256)
+        except PluginError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @api.post("/registry/plugins/{name}/promote")
+    async def promote(name: str, tenant: Tenant = Depends(app_state.auth.tenant), body: dict = Body(default={})) -> dict:
+        """The owner's separate lifetime gate: an ACTIVATED version becomes durable for future sessions."""
+        try:
+            return tenant.plugin_store.promote(name, body.get("version"))
         except PluginError as error:
             raise HTTPException(409, str(error)) from error
 

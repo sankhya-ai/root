@@ -90,6 +90,12 @@ def test_screen_refuses_os_network_and_interpreter_access():
     assert genplugins.screen_source("x.__globals__", "plugin.py")
     assert genplugins.screen_source("compile('1', 'f', 'eval')", "plugin.py")
     assert genplugins.screen_source("not python at all {", "plugin.py")
+    # Attribute access hidden in a format TEMPLATE string escapes the attribute check; the screen must catch it.
+    assert genplugins.screen_source("'{0.__globals__}'.format(x)", "plugin.py")
+    assert genplugins.screen_source("'{0.__class__}'.format(())", "plugin.py")
+    # An ordinary f-string carries real AST nodes, and ordinary prose strings pass.
+    assert genplugins.screen_source("f'{x.__class__}'", "plugin.py")  # an Attribute node, caught as such
+    assert genplugins.screen_source("note = 'a __double__ underscore in prose'", "plugin.py") == []
 
 
 def test_screen_allows_whitelisted_stdlib():
@@ -136,7 +142,7 @@ def test_proposal_verifies_in_jail_but_stays_inert(tmp_path):
     generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
     assert generated.definitions(runtime) == []
     call = run(generated.call(runtime, "c2", "stats_summary", {"numbers": [1.0]}))
-    assert call["is_error"] and "not an active generated tool" in call["output"] + call["message"]
+    assert call["is_error"] and "not available to this session" in call["output"] + call["message"]
 
 
 @needs_bwrap
@@ -197,6 +203,50 @@ def test_revocation_is_immediate_and_terminal(tmp_path):
     assert call["is_error"]
     with pytest.raises(genplugins.PluginError, match="terminal"):
         store.activate("numstats", 1, payload["sha256"])
+
+
+# ----- lifecycle: activation is session-local; promotion is the owner's separate act --------------------------------
+
+
+def _other_runtime(tenant):
+    return SimpleNamespace(tenant=tenant, record=SimpleNamespace(job_role="", id="s2", tool_scope=[]), emit=None)
+
+
+@needs_bwrap
+def test_activation_is_session_local_until_promoted(tmp_path):
+    tenant, runtime, store = make(tmp_path)
+    payload = json.loads(propose(runtime)["output"])  # proposed by session s1
+    store.activate("numstats", 1, payload["sha256"])
+    generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
+    # The creating session can call it at once.
+    assert any(d["name"] == "stats_summary" for d in generated.definitions(runtime))
+    ok = run(generated.call(runtime, "c11", "stats_summary", {"numbers": [2.0, 4.0]}))
+    assert not ok["is_error"]
+    # An unrelated session cannot: no definitions, and a direct call is refused.
+    other = _other_runtime(tenant)
+    assert generated.definitions(other) == []
+    refused = run(generated.call(other, "c12", "stats_summary", {"numbers": [1.0]}))
+    assert refused["is_error"] and "not available to this session" in refused["message"]
+    # The owner's separate promotion opens it to future sessions.
+    store.promote("numstats")
+    assert any(d["name"] == "stats_summary" for d in generated.definitions(other))
+    now_ok = run(generated.call(other, "c13", "stats_summary", {"numbers": [1.0, 3.0]}))
+    assert not now_ok["is_error"] and json.loads(now_ok["output"])["mean"] == 2.0
+    # Revocation still ends it for everyone, immediately.
+    store.revoke("numstats")
+    assert generated.definitions(runtime) == [] and generated.definitions(other) == []
+
+
+def test_promotion_requires_activation_first(tmp_path):
+    tenant, runtime, store = make(tmp_path)
+    if genplugins.sandbox_problem():
+        pytest.skip("bwrap unavailable")
+    payload = json.loads(propose(runtime)["output"])
+    with pytest.raises(genplugins.PluginError, match="no active"):
+        store.promote("numstats")  # verified-but-never-activated cannot be promoted
+    store.activate("numstats", 1, payload["sha256"])
+    record = store.promote("numstats")
+    assert record["lifetime"] == "durable" and record["status"] == "active"
 
 
 # ----- the jail is the boundary ----------------------------------------------------------------------------------
@@ -397,14 +447,27 @@ def test_e2e_propose_activate_invoke_through_the_real_app(client, workspace, scr
     assert bad.status_code == 409
     ok = client.post("/api/registry/plugins/numstats/activate", json={"version": 1, "sha256": proposal["sha256"]})
     assert ok.status_code == 200, ok.text
-    # Now a NEW session can invoke it for real.
+    # Activation is session-local: the SAME session can invoke it on its next turn...
     script([tool_call("u", "stats_summary", {"numbers": [2.0, 4.0]}), text("done")])
-    session2 = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
-    with client.websocket_connect(f"/api/sessions/{session2}/ws") as ws:
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
         ws.receive_json()
         results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "summarize 2 and 4"), "ToolResult")}
     assert results["u"]["is_error"] is False
     assert json.loads(results["u"]["output"])["mean"] == 3.0
+    # ...but a NEW session cannot, until the owner promotes it.
+    script([text("no tools needed")])
+    session2 = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    with client.websocket_connect(f"/api/sessions/{session2}/ws") as ws:
+        ws.receive_json()
+        events2 = run_turn(ws, "summarize 1 and 3")
+    assert not any(e["payload"].get("name") == "stats_summary" for e in events2 if e.get("type") == "ToolCall"), events2
+    assert client.post("/api/registry/plugins/numstats/promote", json={}).status_code == 200
+    script([tool_call("u2", "stats_summary", {"numbers": [1.0, 3.0]}), text("done")])
+    with client.websocket_connect(f"/api/sessions/{session2}/ws") as ws:
+        ws.receive_json()
+        results2 = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "summarize 1 and 3"), "ToolResult")}
+    assert results2["u2"]["is_error"] is False
+    assert json.loads(results2["u2"]["output"])["mean"] == 2.0
     # Revocation over the owner API takes the tool away immediately.
     assert client.post("/api/registry/plugins/numstats/revoke").status_code == 200
     assert client.get("/api/registry/plugins").json()["numstats"]["active_version"] is None
