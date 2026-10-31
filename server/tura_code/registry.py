@@ -28,11 +28,18 @@ The rules are enforced by ordinary code, not by asking the model to behave:
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+try:
+    import fcntl
+except ImportError:  # Windows development machines: no inter-process lock; single-writer deployments only.
+    fcntl = None
 
 from . import catalogue
 from .sessions.host_tools import tool_error
@@ -44,7 +51,7 @@ if TYPE_CHECKING:
 CREATE_TOOL = "create_tool"
 CREATE_ROLE = "create_role"
 LIST_TOOL = "registry_list"
-MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL)
+MANAGEMENT_TOOLS = (CREATE_TOOL, CREATE_ROLE, LIST_TOOL, "propose_tool")  # propose_tool lives in genplugins.py
 
 MAX_TOOLS = 64
 MAX_ROLES = 32
@@ -230,10 +237,46 @@ class Registry:
     def _save_roles(self) -> None:
         _atomic_write(self.dir / "roles.json", self.roles)
 
+    # ----- multi-process safety ---------------------------------------------------
+    #
+    # Several server processes (and job runners) can share one tenant root. Every write is already atomic (tmp file +
+    # rename), but a read-modify-write across two processes could still lose the other process's update. Mutations
+    # therefore run under an exclusive flock on ``.lock`` and RE-READ the store after acquiring it; plain reads take a
+    # lock-free fresh snapshot, which is consistent because writes are atomic.
+
+    def _refresh(self) -> None:
+        tools: dict[str, Any] = {}
+        roles: dict[str, Any] = {}
+        self._load("tools.json", tools)
+        self._load("roles.json", roles)
+        self.tools, self.roles = tools, roles
+
+    @contextmanager
+    def _exclusive(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.dir / ".lock", "a+b") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                self._refresh()
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _mutates(fn):
+        @functools.wraps(fn)
+        def wrapper(self: "Registry", *args, **kwargs):
+            with self._exclusive():
+                return fn(self, *args, **kwargs)
+        return wrapper
+
     # ----- lookups ---------------------------------------------------------------
 
     def active_tool(self, name: str, session: str | None = None) -> dict[str, Any] | None:
         """The version a session may call: active, and either durable or created by THIS session."""
+        self._refresh()
         entry = self.tools.get(name)
         if not entry:
             return None
@@ -256,6 +299,7 @@ class Registry:
 
     def active_role(self, name: str, version: int | None = None) -> dict[str, Any] | None:
         """The version a job may start with. Both lifetimes resolve: naming the role in POST /api/jobs is the owner's act."""
+        self._refresh()
         entry = self.roles.get(name)
         if not entry:
             return None
@@ -270,6 +314,7 @@ class Registry:
 
     # ----- tools -----------------------------------------------------------------
 
+    @_mutates
     def create_tool(self, spec: dict[str, Any], *, existing_names: set[str], host_tool_names: set[str], created_by: str, session: str, ceiling: set[str] | None = None) -> tuple[dict[str, Any] | None, list[str]]:
         """Validate a tool spec and store it as a new version, ACTIVE in the creating session only. Returns (record, problems)."""
         problems: list[str] = []
@@ -357,6 +402,7 @@ class Registry:
         self._save_tools()
         return {**record, "name": name}, []
 
+    @_mutates
     def record_test_report(self, name: str, version: int, report: dict[str, Any], activate: bool) -> dict[str, Any] | None:
         """Attach a test report. Passing tests keep the tool active (activation upgrades to ``tests``); failing tests
         take it back to DRAFT even in its own session: declared tests that failed are a stronger signal than the default."""
@@ -376,6 +422,7 @@ class Registry:
         self._save_tools()
         return {**record, "name": name}
 
+    @_mutates
     def promote_tool(self, name: str, version: int | None = None) -> dict[str, Any]:
         """The owner's explicit choice: offer this tool to future sessions. Only an active tool can be promoted;
         a draft (failed tests) must be re-activated first, so promotion never launders a known failure."""
@@ -393,6 +440,7 @@ class Registry:
         self._save_tools()
         return {**record, "name": name}
 
+    @_mutates
     def promote_role(self, name: str) -> dict[str, Any]:
         entry = self.roles.get(name)
         if entry is None:
@@ -405,6 +453,7 @@ class Registry:
         self._save_roles()
         return {**record, "name": name}
 
+    @_mutates
     def set_tool_status(self, name: str, status: str, activation: str | None = None, version: int | None = None) -> dict[str, Any]:
         entry = self.tools.get(name)
         if entry is None:
@@ -428,6 +477,7 @@ class Registry:
 
     # ----- roles -----------------------------------------------------------------
 
+    @_mutates
     def create_role(self, spec: dict[str, Any], *, universe: set[str], guide_names: set[str], builtin_roles: set[str], created_by: str, session: str = "", ceiling: set[str] | None = None) -> tuple[dict[str, Any] | None, list[str]]:
         created_by_session = session
         problems: list[str] = []
@@ -492,6 +542,7 @@ class Registry:
         self._save_roles()
         return {**record, "name": name}, []
 
+    @_mutates
     def set_role_status(self, name: str, status: str) -> dict[str, Any]:
         entry = self.roles.get(name)
         if entry is None:
@@ -509,6 +560,7 @@ class Registry:
     # ----- listings ----------------------------------------------------------------
 
     def listing(self) -> dict[str, Any]:
+        self._refresh()
         return {
             "tools": {
                 name: {

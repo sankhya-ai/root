@@ -395,7 +395,7 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
     case "RegistryChanged": {
       // A tool or role this session created (or changed): visible, not silent. Session-lifetime until the owner promotes it.
       const entry = p as { kind?: string; name?: string; version?: number; status?: string; lifetime?: string; description?: string };
-      const what = entry.kind === "role" ? "role" : "tool";
+      const what = entry.kind === "role" ? "role" : entry.kind === "plugin" ? "generated plugin" : "tool";
       const lifetime = entry.lifetime === "durable" ? "in the durable catalogue" : "for this session only";
       state.blocks.push({
         kind: "notice",

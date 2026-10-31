@@ -1,0 +1,568 @@
+"""Generated plugins: a genuinely MISSING capability as new code, reviewed and jailed - never trusted.
+
+``create_tool`` composes existing tools declaratively. When no combination of existing tools can do the job, a session
+may PROPOSE a generated plugin: a small Python module it writes itself. The governing rule, enforced by ordinary code:
+
+    Model-written code is a CANDIDATE. It runs nowhere - not even once - except inside a throwaway bubblewrap jail,
+    until the owner activates one exact content hash through the owner-authenticated API.
+
+* Process isolation from day one: every execution (verification AND later calls) is a fresh ``bwrap`` process with
+  ``--unshare-net`` (no network at all - not even the host's loopback), a read-only system, a private scratch
+  workspace, and a scrubbed environment (no broker credentials, no API keys, no owner token). Python in-process
+  sandboxing is not attempted; the process and its namespaces are the boundary. Shared kernel, no seccomp profile of
+  our own - the same honest caveat the jobs isolation carries.
+* No packages, no secrets, no network in v1. The static screen refuses imports outside a small stdlib whitelist and
+  the jail cannot reach a network anyway. A capability that needs those is a hand-reviewed built-in plugin, not
+  generated code.
+* The static screen is a FILTER: passing means "nothing obviously forbidden", never "safe". Verification is the
+  candidate's own declared tests passing in the jail: evidence, not proof. The trust decision is the owner's,
+  made with the diff, the screen result and the test report in front of them.
+* Identity is content: a version is the SHA-256 of its files. Activation names the hash and re-verifies in the jail
+  before flipping the switch, so a tampered file or a stale review cannot activate. Revocation takes effect on the
+  next call; each call re-resolves the active version and re-checks the hash before spending a process on it.
+
+Lifecycle: draft -> verified (jailed tests passed; still callable by NO session) -> active (owner activated the exact
+hash) -> revoked (terminal). A changed file is a new version with a new hash.
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import hashlib
+import json
+import shutil
+import tempfile
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from . import catalogue
+from .registry import NAME_RE, RegistryError, _atomic_write, validate_schema
+from .sandbox import Bubblewrap, Mounts
+from .sessions.host_tools import tool_error
+
+if TYPE_CHECKING:
+    from .sessions.runtime import SessionRuntime
+    from .tenancy import Tenant
+
+PROPOSE_TOOL = "propose_tool"
+
+MAX_PLUGINS = 16
+MAX_PLUGIN_TOOLS = 8
+MAX_SOURCE_CHARS = 64_000
+MAX_TESTS_CHARS = 32_000
+MAX_RESULT_CHARS = 8_000
+VERIFY_TIMEOUT = 30.0
+CALL_TIMEOUT = 20.0
+
+#: The entire import surface a candidate may use. Pure computation only: nothing that touches the OS, the network,
+#: or the interpreter's own machinery. The jail is the real boundary; this list keeps the reviewed surface small.
+ALLOWED_IMPORTS = {
+    "base64", "collections", "csv", "dataclasses", "datetime", "decimal", "enum", "fractions", "functools",
+    "hashlib", "itertools", "json", "math", "random", "re", "statistics", "string", "textwrap", "typing",
+}
+
+#: Names a candidate may never call, however it reaches them. ``getattr``/``globals`` and friends are refused because
+#: they defeat the attribute rules below (``getattr(x, "__globals__")``).
+FORBIDDEN_CALLS = {
+    "eval", "exec", "compile", "__import__", "breakpoint", "input", "exit", "quit",
+    "getattr", "setattr", "delattr", "globals", "locals", "vars",
+}
+
+#: Dunder attribute reads that escape the module sandbox Python doesn't have. Refused on sight; the ordinary dunders
+#: a module legitimately writes (``__name__`` etc. as bare names) are unaffected.
+FORBIDDEN_ATTRIBUTES = {
+    "__globals__", "__builtins__", "__subclasses__", "__mro__", "__class__", "__dict__", "__code__", "__closure__",
+    "__import__", "__loader__", "__spec__", "__bases__", "__base__", "__qualname__", "__getattribute__",
+}
+
+FILES = ("plugin.py", "plugin.json", "tests.py")
+
+
+class PluginError(RegistryError):
+    pass
+
+
+def screen_source(source: str, filename: str, *, extra_allowed: frozenset[str] = frozenset()) -> list[str]:
+    """The static screen: a deterministic AST filter. A pass means "nothing obviously forbidden", NOT "safe" -
+    only the jail plus the owner's review stand between a candidate and the host."""
+    allowed = ALLOWED_IMPORTS | extra_allowed
+    problems: list[str] = []
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as error:
+        return [f"{filename}: does not parse: {error}"]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root not in allowed:
+                    problems.append(f"{filename}:{node.lineno}: import `{alias.name}` is outside the whitelist (pure stdlib computation only; no OS, network or interpreter access)")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if node.level or root not in allowed:
+                problems.append(f"{filename}:{node.lineno}: import from `{node.module}` is outside the whitelist")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id in FORBIDDEN_CALLS:
+                problems.append(f"{filename}:{node.lineno}: `{fn.id}(...)` is refused (it defeats review and the interpreter rules)")
+            elif isinstance(fn, ast.Attribute) and fn.attr in FORBIDDEN_CALLS:
+                problems.append(f"{filename}:{node.lineno}: `.{fn.attr}(...)` is refused")
+        elif isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRIBUTES:
+            problems.append(f"{filename}:{node.lineno}: attribute `{node.attr}` is refused (interpreter internals are not review surface)")
+    return problems
+
+
+def validate_manifest(manifest: Any, *, existing_names: set[str]) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(manifest, dict):
+        return ["plugin.json must be an object"]
+    unknown = set(manifest) - {"tools"}
+    if unknown:
+        problems.append(f"plugin.json: unsupported keys: {', '.join(sorted(unknown))}")
+    tools = manifest.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return problems + ["plugin.json: `tools` must be a non-empty list"]
+    if len(tools) > MAX_PLUGIN_TOOLS:
+        problems.append(f"plugin.json: {len(tools)} tools; the limit is {MAX_PLUGIN_TOOLS}")
+    seen: set[str] = set()
+    for i, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            problems.append(f"tools[{i}]: must be an object")
+            continue
+        unknown = set(tool) - {"name", "description", "parameters"}
+        if unknown:
+            problems.append(f"tools[{i}]: unsupported keys: {', '.join(sorted(unknown))}")
+        name = str(tool.get("name") or "")
+        if not NAME_RE.match(name):
+            problems.append(f"tools[{i}]: `name` must match {NAME_RE.pattern}")
+        elif name in seen:
+            problems.append(f"tools[{i}]: duplicate tool name `{name}`")
+        elif name in existing_names:
+            problems.append(f"tools[{i}]: `{name}` collides with an existing tool; a generated plugin cannot shadow or replace one")
+        seen.add(name)
+        description = str(tool.get("description") or "").strip()
+        if not description:
+            problems.append(f"tools[{i}]: `description` is required")
+        elif len(description) > 500:
+            problems.append(f"tools[{i}]: `description` is over 500 characters")
+        problems += validate_schema(tool.get("parameters", {"type": "object", "properties": {}, "additionalProperties": False}),
+                                    f"tools[{i}].parameters")
+    return problems
+
+
+def content_hash(files: dict[str, str]) -> str:
+    """The identity of a version: SHA-256 over its exact files. Activation and calls name this, never just a name."""
+    digest = hashlib.sha256()
+    for name in FILES:
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(files.get(name, "").encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def read_files(plugin_dir: Path) -> dict[str, str]:
+    return {name: (plugin_dir / name).read_text("utf-8") if (plugin_dir / name).exists() else "" for name in FILES}
+
+
+class PluginStore:
+    """Per-tenant store of generated plugin candidates. Owns plugins.json under the registry dir, with the same
+    atomic-write + flock discipline as the registry itself."""
+
+    def __init__(self, root: Path) -> None:
+        self.dir = Path(root) / "registry" / "plugins"
+        self.state_path = Path(root) / "registry" / "plugins.json"
+        self.state: dict[str, Any] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self.state_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict):
+            self.state = data
+
+    def _save(self) -> None:
+        _atomic_write(self.state_path, self.state)
+
+    def _plugin_lock(self):
+        import fcntl
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(self.dir / ".lock", "a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    self._load()
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return held()
+
+    # ----- lookups ---------------------------------------------------------------
+
+    def active_version(self, name: str) -> dict[str, Any] | None:
+        self._load()
+        entry = self.state.get(name)
+        if not entry:
+            return None
+        version = entry.get("active_version")
+        record = next((v for v in entry["versions"] if v["version"] == version and v["status"] == "active"), None)
+        return {**record, "name": name} if record else None
+
+    def tool_owner(self, tool_name: str) -> dict[str, Any] | None:
+        """The active plugin version exposing `tool_name`, if any."""
+        self._load()
+        for name, entry in self.state.items():
+            record = self.active_version(name)
+            if record and any(t["name"] == tool_name for t in record["manifest"].get("tools", [])):
+                return record
+        return None
+
+    def listing(self) -> dict[str, Any]:
+        self._load()
+        out = {}
+        for name, entry in sorted(self.state.items()):
+            out[name] = {
+                "active_version": entry.get("active_version"),
+                "versions": [{k: v.get(k) for k in ("version", "status", "sha256", "created_by", "created_at", "verified", "activated_at")}
+                             for v in entry["versions"]],
+            }
+        return out
+
+    # ----- mutations ---------------------------------------------------------------
+
+    def propose(self, name: str, files: dict[str, str], *, created_by: str, session: str) -> tuple[dict[str, Any] | None, list[str]]:
+        """Store a candidate as DRAFT after static screening. Nothing runs here; nothing half-exists on a refusal."""
+        problems: list[str] = []
+        if not NAME_RE.match(name or ""):
+            problems.append(f"`name` must match {NAME_RE.pattern}")
+        source = files.get("plugin.py", "")
+        tests = files.get("tests.py", "")
+        if not source.strip():
+            problems.append("plugin.py is required and must define handle(tool, arguments)")
+        if len(source) > MAX_SOURCE_CHARS:
+            problems.append(f"plugin.py is over {MAX_SOURCE_CHARS} characters")
+        if len(tests) > MAX_TESTS_CHARS:
+            problems.append(f"tests.py is over {MAX_TESTS_CHARS} characters")
+        if not tests.strip():
+            problems.append("tests.py is required: a candidate must carry the tests its verification will run in the jail")
+        if problems:
+            return None, problems
+        problems += screen_source(source, "plugin.py")
+        problems += screen_source(tests, "tests.py", extra_allowed=frozenset({"plugin"}))  # the tests import the candidate itself
+        if problems:
+            return None, problems
+        with self._plugin_lock():
+            entry = self.state.setdefault(name, {"versions": [], "active_version": None})
+            if len(entry["versions"]) >= 20:
+                return None, [f"`{name}` has 20 versions; the history is full"]
+            version = (entry["versions"][-1]["version"] + 1) if entry["versions"] else 1
+            plugin_dir = self.dir / name / str(version)
+            if plugin_dir.exists():
+                return None, [f"`{name}` v{version} already exists on disk; versions are immutable"]
+            plugin_dir.mkdir(parents=True)
+            for filename in FILES:
+                if files.get(filename):
+                    (plugin_dir / filename).write_text(files[filename], "utf-8")
+            record = {
+                "version": version,
+                "sha256": content_hash(files),
+                "status": "draft",
+                "created_by": created_by,
+                "session": session,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "manifest": json.loads(files["plugin.json"]),
+                "verified": None,
+            }
+            entry["versions"].append(record)
+            self._save()
+        return record, []
+
+    def record_verification(self, name: str, version: int, report: dict[str, Any]) -> dict[str, Any]:
+        with self._plugin_lock():
+            record = self._version(name, version)
+            record["verified"] = report
+            if report.get("ok") and record["status"] == "draft":
+                record["status"] = "verified"
+            self._save()
+        return {**record, "name": name}
+
+    def activate(self, name: str, version: int, sha256: str) -> dict[str, Any]:
+        """The owner's act: make EXACTLY the reviewed, re-verified hash callable. Refuses anything else."""
+        with self._plugin_lock():
+            record = self._version(name, version)
+            if record["status"] == "revoked":
+                raise PluginError(f"`{name}` v{version} is revoked; a revoked version is terminal - propose a new version instead.")
+            if record["status"] != "verified":
+                raise PluginError(f"`{name}` v{version} is {record['status']}; only a jail-verified version can be activated.")
+            if record["sha256"] != sha256:
+                raise PluginError(f"hash mismatch: the owner reviewed {sha256[:12]}... but `{name}` v{version} is {record['sha256'][:12]}... . Activation names the exact hash; nothing else activates.")
+            on_disk = content_hash(read_files(self.dir / name / str(version)))
+            if on_disk != sha256:
+                raise PluginError(f"the files on disk no longer match the reviewed hash (now {on_disk[:12]}...); the candidate was tampered with or corrupted. Activation refused.")
+            entry = self.state[name]
+            for other in entry["versions"]:
+                if other["status"] == "active":
+                    other["status"] = "superseded"
+            record["status"] = "active"
+            record["activated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            entry["active_version"] = version
+            self._save()
+        return {**record, "name": name}
+
+    def revoke(self, name: str) -> dict[str, Any]:
+        with self._plugin_lock():
+            entry = self.state.get(name)
+            if not entry:
+                raise PluginError(f"unknown plugin `{name}`")
+            found = None
+            for record in entry["versions"]:
+                if record["status"] == "active":
+                    record["status"] = "revoked"
+                    found = record
+            entry["active_version"] = None
+            self._save()
+            if found is None:
+                raise PluginError(f"`{name}` has no active version")
+        return {**found, "name": name}
+
+    def _version(self, name: str, version: int) -> dict[str, Any]:
+        entry = self.state.get(name)
+        if not entry:
+            raise PluginError(f"unknown plugin `{name}`")
+        record = next((v for v in entry["versions"] if v["version"] == version), None)
+        if record is None:
+            raise PluginError(f"unknown version `{name}` v{version}")
+        return record
+
+
+# ----- the jail ----------------------------------------------------------------------------------------------------
+
+
+def sandbox_problem() -> str:
+    """Why generated plugins cannot run here, or "". Fail-closed: a problem means NO verification and NO activation."""
+    return Bubblewrap(network=False).problem()
+
+
+async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    """One execution of candidate code: a fresh process in a fresh jail. No network, read-only system and plugin
+    source, a private scratch workspace deleted afterwards, a scrubbed environment. The process is the boundary."""
+    problem = sandbox_problem()
+    if problem:
+        return {"ok": False, "error": f"generated plugins need bubblewrap isolation, which is unavailable here, so nothing ran: {problem}"}
+    plugin_dir = store.dir / name / str(version)
+    runner = Path(__file__).with_name("genplugin_runner.py")
+    python = shutil.which("python3")
+    if not python:
+        return {"ok": False, "error": "no python3 on PATH for the jail; nothing ran"}
+    scratch = Path(tempfile.mkdtemp(prefix="genplugin-"))
+    try:
+        sandbox = Bubblewrap(network=False)
+        argv = sandbox.wrap([python, str(runner), str(plugin_dir)], Mounts(workspace=scratch, readable=(runner, plugin_dir)))
+        env = sandbox.environment({"PATH": "/usr/bin:/bin"}, Mounts(workspace=scratch))
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            proc.kill()
+            await proc.wait()
+            return {"ok": False, "error": f"the candidate did not finish within {timeout:.0f}s and was killed"}
+        # Read enough for a legitimately large result, then parse BEFORE capping: truncating first corrupts the JSON.
+        text = stdout.decode(errors="replace")[:1_000_000]
+        line = text.strip().splitlines()[-1] if text.strip() else ""
+        try:
+            reply = json.loads(line)
+        except ValueError:
+            return {"ok": False, "error": f"the candidate produced no protocol reply (exit {proc.returncode}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
+        return reply
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ----- the host toolsets -------------------------------------------------------------------------------------------
+
+
+class GeneratedToolset:
+    """Exposes the tools of ACTIVE generated plugins and runs each call in a fresh jail.
+
+    Every call re-resolves the active version and re-checks the content hash on disk before spending a process:
+    revocation takes effect on the next call, and a tampered file simply refuses to run."""
+
+    plugin = "generated"
+
+    def __init__(self, store: PluginStore) -> None:
+        self.store = store
+
+    def _active_tools(self) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        out = []
+        for name in sorted(self.store.state.keys()):
+            record = self.store.active_version(name)
+            if record:
+                for tool in record["manifest"].get("tools", []):
+                    out.append((record, tool))
+        return out
+
+    def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
+        return [{
+            "name": tool["name"],
+            "description": tool["description"] + f" (generated plugin `{record['name']}` v{record['version']}, hash {record['sha256'][:12]}...: "
+                                                 "model-written code, owner-activated, every call runs in a fresh networkless bubblewrap jail.)",
+            "parameters": tool["parameters"],
+        } for record, tool in self._active_tools()]
+
+    def handles(self, name: str) -> bool:
+        return self.store.tool_owner(name) is not None
+
+    async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        record = self.store.tool_owner(name)
+        if record is None:
+            return tool_error(f"`{name}` is not an active generated tool (unknown, not yet owner-activated, or revoked).", "Unavailable")
+        # TOCTOU: the files behind the active version must still hash to what the owner activated.
+        on_disk = content_hash(read_files(self.store.dir / record["name"] / str(record["version"])))
+        if on_disk != record["sha256"]:
+            return tool_error(f"`{name}`'s files no longer match the activated hash; refusing to run until the owner reviews again.", "Hash mismatch")
+        reply = await run_jailed(self.store, record["name"], record["version"], {"mode": "call", "tool": name, "arguments": arguments}, timeout=CALL_TIMEOUT)
+        if not reply.get("ok"):
+            return tool_error(str(reply.get("error", "the generated tool failed")), "Generated tool failed")
+        result = reply.get("result")
+        text = result if isinstance(result, str) else json.dumps(result, indent=2, default=str)
+        return {"is_error": False, "output": text[:MAX_RESULT_CHARS], "message": "",
+                "display": [{"type": "brief", "text": f"{name} (jailed)"}]}
+
+
+class ProposeToolset:
+    """``propose_tool``: write a candidate, screen it, verify it in the jail. NEVER activates - that is the owner's
+    API call with the exact hash, and this toolset cannot make it."""
+
+    plugin = "registry"
+
+    def __init__(self, store: PluginStore) -> None:
+        self.store = store
+
+    def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
+        return [{
+            "name": PROPOSE_TOOL,
+            "description": (
+                "Propose a genuinely NEW capability as generated Python, when no pipeline of existing tools can do it. "
+                "The code is a CANDIDATE: it is statically screened (a filter, not a safety judgment) and its own declared tests run once "
+                "inside a networkless bubblewrap jail. It then stays INERT - callable by no session - until the owner activates the exact "
+                "content hash through the owner API. Tell the owner what you proposed, its hash, and that activation is their call. "
+                "No network, packages or secrets are available to generated code; needing those means this is the wrong path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "snake_case plugin name"},
+                    "tools": {"type": "array", "description": "Manifest: [{name, description, parameters}] the plugin exposes"},
+                    "source": {"type": "string", "description": "plugin.py: must define handle(tool, arguments); whitelisted stdlib imports only"},
+                    "tests": {"type": "string", "description": "tests.py: test_*() functions; run in the jail as verification"},
+                },
+                "required": ["name", "tools", "source", "tests"],
+                "additionalProperties": False,
+            },
+        }]
+
+    def handles(self, name: str) -> bool:
+        return name == PROPOSE_TOOL
+
+    async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .registry import existing_tool_names  # local import: registry must not depend on this module
+
+        tenant = runtime.tenant
+        plugin_name = str(arguments.get("name") or "")
+        existing = existing_tool_names(tenant, runtime, tenant.registry)
+        for entry_name in self.store.state:
+            for record in self.store.state[entry_name]["versions"]:
+                existing |= {t["name"] for t in record["manifest"].get("tools", [])}
+        manifest = {"tools": arguments.get("tools")}
+        problems = validate_manifest(manifest, existing_names=existing)
+        if problems:
+            return tool_error("Candidate refused by manifest validation:\n- " + "\n- ".join(problems), "Invalid candidate")
+        if len(self.store.state) >= MAX_PLUGINS and plugin_name not in self.store.state:
+            return tool_error(f"The generated-plugin store is full ({MAX_PLUGINS}); the owner must revoke one first.", "Store full")
+        files = {"plugin.py": str(arguments.get("source") or ""), "plugin.json": json.dumps(manifest, indent=2), "tests.py": str(arguments.get("tests") or "")}
+        created_by = getattr(runtime.record, "job_role", None) or f"session:{getattr(runtime.record, 'id', '?')}"
+        record, problems = self.store.propose(plugin_name, files, created_by=created_by, session=getattr(runtime.record, "id", "") or "")
+        if problems:
+            return tool_error("Candidate refused by the static screen (a filter; passing it would not have meant safe):\n- " + "\n- ".join(problems), "Invalid candidate")
+        report = await run_jailed(self.store, plugin_name, record["version"], {"mode": "test"}, timeout=VERIFY_TIMEOUT)
+        record = self.store.record_verification(plugin_name, record["version"], report)
+        emit = getattr(runtime, "emit", None)
+        if callable(emit):
+            emit("RegistryChanged", {"kind": "plugin", "name": plugin_name, "version": record["version"], "status": record["status"],
+                                     "lifetime": f"inert until the owner activates hash {record['sha256'][:12]}...",
+                                     "description": "; ".join(t["name"] for t in record["manifest"]["tools"])})
+        payload = {
+            **{k: record.get(k) for k in ("version", "sha256", "status", "created_by")},
+            "name": plugin_name,
+            "verification": report,
+            "what_this_means": ("the candidate's declared tests passed in a networkless jail: evidence, not proof of correctness or safety. "
+                                "The tool is callable by NO session until the owner activates this exact hash."),
+            "owner_activation": f"POST /api/registry/plugins/{plugin_name}/activate with {{\"version\": {record['version']}, \"sha256\": \"{record['sha256']}\"}}",
+            "tell_the_owner": (f"Say what you proposed ({plugin_name}: {', '.join(t['name'] for t in record['manifest']['tools'])}), "
+                               "show the verification report, and leave activation to them."),
+        }
+        return {"is_error": False, "output": json.dumps(payload, indent=2, default=str), "message": "",
+                "display": [{"type": "brief", "text": f"Proposed {plugin_name} v{record['version']} ({record['status']})"}]}
+
+
+# ----- wiring --------------------------------------------------------------------------------------------------------
+
+
+def install(server) -> None:
+    def extend(tenant) -> None:
+        tenant.plugin_store = PluginStore(Path(tenant.root))
+        tenant.toolsets.append(GeneratedToolset(tenant.plugin_store))
+        tenant.toolsets.append(ProposeToolset(tenant.plugin_store))
+
+    server.extensions.append(extend)
+
+
+def router(app_state):
+    from fastapi import APIRouter, Body, Depends, HTTPException
+
+    from .tenancy import Tenant
+
+    api = APIRouter(prefix="/api")
+
+    @api.get("/registry/plugins")
+    async def listing(tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        return tenant.plugin_store.listing()
+
+    @api.post("/registry/plugins/{name}/activate")
+    async def activate(name: str, tenant: Tenant = Depends(app_state.auth.tenant), body: dict = Body(...)) -> dict:
+        try:
+            version = int(body.get("version"))
+            sha256 = str(body.get("sha256") or "")
+        except (TypeError, ValueError) as error:
+            raise HTTPException(422, "activation needs {version, sha256}: the exact reviewed hash, nothing else") from error
+        problem = sandbox_problem()
+        if problem:
+            raise HTTPException(409, f"generated plugins need bubblewrap isolation, which is unavailable here, so nothing was activated: {problem}")
+        store = tenant.plugin_store
+        # Re-verify the exact candidate in the jail at activation time: review plus a fresh pass, never a stale one.
+        report = await run_jailed(store, name, version, {"mode": "test"}, timeout=VERIFY_TIMEOUT)
+        store.record_verification(name, version, report)
+        if not report.get("ok"):
+            raise HTTPException(409, f"re-verification failed at activation, so nothing was activated: {json.dumps(report)[:500]}")
+        try:
+            return store.activate(name, version, sha256)
+        except PluginError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @api.post("/registry/plugins/{name}/revoke")
+    async def revoke(name: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        try:
+            return tenant.plugin_store.revoke(name)
+        except PluginError as error:
+            raise HTTPException(404, str(error)) from error
+
+    return api

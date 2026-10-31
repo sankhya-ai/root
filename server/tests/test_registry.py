@@ -658,3 +658,90 @@ def test_a_job_can_pin_a_role_version(tmp_path):
     assert pinned["version"] == 1 and "read_pdf" in pinned["scope"]
     with pytest.raises(jobs.JobError, match="v9"):
         jobs.resolve_role(tenant, "docs_reviewer", version=9)
+
+
+# ----- multi-process safety: the flock must make concurrent read-modify-write lose nothing ------------------------------
+
+
+def _parallel_create_worker(args):
+    """A separate process with its OWN Registry instance on the shared dir, creating versions of the same tool."""
+    import sys
+    path, count = args
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+    from tura_code import registry as reg_mod
+
+    reg = reg_mod.Registry(__import__("pathlib").Path(path))
+    base = {
+        "name": "shared_tool",
+        "description": "Created concurrently by several processes.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        "steps": [{"tool": "read_pdf", "arguments": {}}],
+    }
+    for _ in range(count):
+        record, problems = reg.create_tool(dict(base), existing_names=set(), host_tool_names={"read_pdf"}, created_by="race", session=f"proc-{__import__('os').getpid()}")
+        assert not problems, problems
+    return True
+
+
+def test_concurrent_processes_lose_no_versions(tmp_path):
+    """Truly simultaneous mutation: 6 OS processes x 4 creates of the SAME tool name against one store.
+
+    Without the flock the interleaved read-modify-writes clobber each other and versions vanish; with it every
+    create lands and version numbers are exactly 1..24."""
+    import multiprocessing
+
+    reg = registry.Registry(tmp_path)
+    reg.create_tool({  # v1 exists before the race
+        "name": "shared_tool", "description": "First.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        "steps": [{"tool": "read_pdf", "arguments": {}}],
+    }, existing_names=set(), host_tool_names={"read_pdf"}, created_by="setup", session="s0")
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(6) as pool:
+        pool.map(_parallel_create_worker, [(str(tmp_path), 4)] * 6)
+    final = registry.Registry(tmp_path)
+    versions = [v["version"] for v in final.tools["shared_tool"]["versions"]]
+    # MAX_VERSIONS_KEPT prunes to the last 20; what proves the lock is that the kept tail is CONTIGUOUS and every
+    # process's creates landed: 6..25 with no gaps and no duplicates (lost updates would collide or truncate early).
+    assert sorted(versions) == list(range(6, 26)), versions
+    # And the file on disk is intact JSON, not a torn write.
+    assert json.loads((tmp_path / "registry" / "tools.json").read_text())["shared_tool"]["versions"][-1]["version"] == 25
+
+
+def _parallel_lifecycle_worker(args):
+    path, kind = args
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+    from tura_code import registry as reg_mod
+
+    reg2 = reg_mod.Registry(__import__("pathlib").Path(path))
+    for _ in range(10):
+        try:
+            if kind == "promote":
+                reg2.promote_tool("raced_tool")
+            else:
+                reg2.set_tool_status("raced_tool", "active", activation="owner")
+        except reg_mod.RegistryError:
+            pass
+
+
+def test_concurrent_promotion_and_revocation_stay_consistent(tmp_path):
+    """Two processes race the SAME version's lifecycle; the file must always parse and end in one clean state."""
+    import multiprocessing
+
+    reg = registry.Registry(tmp_path)
+    record, problems = reg.create_tool({
+        "name": "raced_tool", "description": "Raced.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        "steps": [{"tool": "read_pdf", "arguments": {}}],
+    }, existing_names=set(), host_tool_names={"read_pdf"}, created_by="setup", session="s0")
+    assert not problems
+
+    ctx = multiprocessing.get_context("spawn")
+    procs = [ctx.Process(target=_parallel_lifecycle_worker, args=((str(tmp_path), k),)) for k in ("promote", "activate")]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+        assert p.exitcode == 0
+    final = registry.Registry(tmp_path)  # parses, so no torn write
+    entry = final.tools["raced_tool"]
+    assert entry["active_version"] in {v["version"] for v in entry["versions"]}

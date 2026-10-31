@@ -54,3 +54,22 @@ Four parts, one product: the runtime, the host, the UI, and the macOS app around
 - Host context is attached in the `## System` / `## User` envelope (`memory.packet_envelope`); Jev relies on that split.
 - Every port from Chotu must work end to end with a test through the real runtime — no placeholder modules.
 - UI styling follows Tura's deployed look (top of `ui/src/styles/base.css`): ink only — no orange, no blue, no gradient fills; primary actions are the black ink pill, others outlined. Keep surfaces quiet: no stat cards, tier diagrams or eyebrows; settings-style rows in rounded groups.
+
+
+## Generated plugins (`propose_tool`, server/tura_code/genplugins.py)
+
+When no pipeline of existing tools can do the job, a session may PROPOSE a generated plugin: model-written Python
+that implements a genuinely new tool. The rules, enforced by ordinary code:
+
+* The candidate runs nowhere except a throwaway bubblewrap jail (`--unshare-net`, read-only system and source,
+  private scratch workspace, scrubbed environment) until the owner activates one exact SHA-256 content hash via
+  `POST /api/registry/plugins/{name}/activate`. Activation re-runs the candidate's own declared tests in the jail
+  first; a tampered file or wrong hash refuses.
+* The static AST screen (whitelisted stdlib imports, no eval/exec/getattr/dunder escapes) is a FILTER, never a
+  safety judgment; the jailed test pass is EVIDENCE, never proof. The trust decision is the owner's.
+* No network, packages or secrets for generated code in v1. Needing those means hand-reviewed built-in plugin.
+* Every call after activation is a fresh jailed process; revocation takes effect on the next call.
+* Lifecycle: draft -> verified -> active -> revoked (terminal). Files are immutable per version; identity is content.
+
+The registry store serializes multi-process read-modify-write with an flock on `registry/.lock` plus atomic
+tmp-file writes; parallel creators lose no versions (tested with 6 OS processes).
