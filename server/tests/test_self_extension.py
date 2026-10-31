@@ -323,3 +323,115 @@ def test_request_job_validates_goal_and_pins(tmp_path):
     assert problem is None
     assert payload["status"] == "pending" and payload["role_version"] == 0 and payload["source_session"] == "s1"
     assert tenant.job_requests.get(payload["id"])["goal"] == "sweep"
+
+
+# ----- Owner-start edges: one winner, no false start, owner sees the real scope ----------------------------------
+
+
+@requires_runtime
+def test_accept_after_role_revocation_fails_pending_and_dismissable(client, workspace, script):
+    """Pinned-version discipline: the role is revoked between proposal and accept, so the accept REFUSES (the
+    re-resolution fails), nothing starts, the request stays pending and the owner can still dismiss it."""
+    script([
+        tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["ReadFile"]}),
+        tool_call("j", "recommend_job", {"goal": "sweep", "role": "reader"}),
+        text("done"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "make a role and recommend a job")
+    payload = json.loads(results["j"]["output"])
+    assert client.post("/api/registry/roles/reader/revoke").status_code == 200
+    refused = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert refused.status_code == 400 and "Unknown role" in refused.text
+    still = client.get("/api/job-requests").json()["requests"][0]
+    assert still["status"] == "pending" and "job_id" not in still  # no false start, request not lost
+    assert client.post(f"/api/job-requests/{payload['id']}/dismiss").status_code == 200
+
+
+@requires_runtime
+def test_a_narrowed_session_cannot_even_propose(client, workspace, script):
+    """Adopting a role narrows the MANAGEMENT tools away with everything else: a session narrowed to explorer
+    cannot call recommend_job at all. Proposing new work is a management act, not something a focused role does."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    script([
+        tool_call("a", "adopt_role", {"name": "explorer"}),
+        tool_call("j", "recommend_job", {"goal": "build the feature", "role": "developer"}),
+        text("done"),
+    ])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "adopt explorer and recommend a developer job")
+    assert results["a"]["is_error"] is False  # narrowed
+    assert results["j"]["is_error"] is True  # recommend_job is outside the narrowed scope
+    assert client.get("/api/job-requests").json()["requests"] == []  # nothing was stored
+
+
+@requires_runtime
+def test_the_owner_sees_the_effective_scope_before_starting(client, workspace, script):
+    """The stored request carries the role's resolved tool scope, so the owner reviews the actual permissions
+    being authorized - the role label never hides them."""
+    script([tool_call("j", "recommend_job", {"goal": "build the feature", "role": "developer", "reason": "needs writes and shell"}), text("done")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend a developer job")
+    assert results["j"]["is_error"] is False
+    payload = json.loads(results["j"]["output"])
+    assert "Shell" in payload["scope"]
+    stored = client.get("/api/job-requests").json()["requests"][0]
+    assert set(stored["scope"]) == set(jobs.ROLES["developer"])
+
+
+def test_concurrent_accepts_have_exactly_one_winner(tmp_path):
+    """Two accepts racing one pending request: the store lock admits one; the other sees the resolved state.
+    Exactly one start runs, so exactly one job would exist."""
+    import threading
+
+    store = _store(tmp_path)
+    store.create(_record("r1"))
+    started = []
+    outcomes = []
+
+    def slow_start(record):
+        time.sleep(0.05)  # widen the race window: the loser must still not enter start()
+        started.append(record["id"])
+        return {"id": "job-1"}
+
+    def try_accept():
+        try:
+            store.accept("r1", slow_start)
+            outcomes.append("accepted")
+        except jobs.JobError as error:
+            outcomes.append(str(error))
+
+    threads = [threading.Thread(target=try_accept) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert started == ["r1"]  # start ran ONCE
+    assert outcomes.count("accepted") == 1 and sum("already accepted" in o for o in outcomes) == 1
+    assert store.get("r1")["status"] == "accepted" and store.get("r1")["job_id"] == "job-1"
+
+
+def test_failed_start_leaves_the_request_pending_and_dismissable(tmp_path):
+    store = _store(tmp_path)
+    store.create(_record("r1"))
+
+    def broken_start(record):
+        raise jobs.JobError("isolation `bwrap` is not available here, so the job was not started")
+
+    with pytest.raises(jobs.JobError, match="not available"):
+        store.accept("r1", broken_start)
+    assert store.get("r1")["status"] == "pending" and "job_id" not in store.get("r1")
+    dismissed = store.mark("r1", "dismissed")  # the owner can still close it out
+    assert dismissed["status"] == "dismissed"
+    with pytest.raises(jobs.JobError):
+        store.accept("r1", lambda record: {"id": "job-late"})  # and no late accept revives it
+
+
+def test_accept_racing_dismiss_has_one_winner(tmp_path):
+    """Dismiss holds the same lock: an accept that arrives after a dismiss sees the resolved state and starts nothing."""
+    store = _store(tmp_path)
+    store.create(_record("r1"))
+    store.mark("r1", "dismissed")
+    with pytest.raises(jobs.JobError, match="already dismissed"):
+        store.accept("r1", lambda record: {"id": "job-should-not-exist"})
+    assert store.get("r1")["status"] == "dismissed" and "job_id" not in store.get("r1")

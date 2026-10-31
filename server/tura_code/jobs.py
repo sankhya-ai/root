@@ -357,6 +357,24 @@ class JobRequestStore:
         self._load()
         return self.items.get(request_id)
 
+    def accept(self, request_id: str, start) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Claim AND resolve a pending request under one lock: a double accept, or accept racing dismiss, has exactly
+        one winner. ``start(record)`` runs while the lock is held, so a concurrent mutation waits and then sees the
+        outcome. A FAILED start leaves the request PENDING - nothing ran, the error says why, the owner can still
+        dismiss or fix the cause and retry."""
+        with self._exclusive():
+            record = self.items.get(request_id)
+            if record is None:
+                raise JobError("No such job request.")
+            if record.get("status") != "pending":
+                raise JobError(f"Job request {request_id} is already {record.get('status')}; it will not change again.")
+            item = start(record)
+            record["status"] = "accepted"
+            record["resolved_at"] = time.time()
+            record["job_id"] = item["id"]
+            self._save()
+            return record, item
+
     def mark(self, request_id: str, status: str, job_id: str = "") -> dict[str, Any]:
         """Resolve a PENDING request once. A second resolve (accept after dismiss, double-accept) is an error."""
         with self._exclusive():
@@ -400,6 +418,11 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         "reason": str(arguments.get("reason") or "").strip(),
         "requested_by": session,
         "source_session": session,  # lets the owner accept a job on the session's own private role explicitly
+        # What the owner is being asked to authorize, resolved NOW: the role's effective tool scope and default
+        # contract. Display-only - the accept route re-resolves the pinned role, so this snapshot can never smuggle
+        # a wider scope past the owner; it exists so the review shows the actual requested permissions, not a label.
+        "scope": list(resolved["scope"]),
+        "contract": list(resolved.get("contract") or []),
         "status": "pending",
         "created_at": time.time(),
     }
@@ -761,20 +784,22 @@ def router(app_state):
 
     @api.post("/job-requests/{request_id}/accept")
     async def accept_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
-        """The ONLY path from proposal to running job. Owner-authenticated; the NewJob comes from the stored record ALONE."""
+        """The ONLY path from proposal to running job. Owner-authenticated; the NewJob comes from the stored record
+        ALONE, and claim + start happen under the store lock, so a double accept or an accept racing a dismiss has
+        exactly one winner and can never launch two jobs."""
         store = tenant.job_requests
-        record = store.get(request_id)
-        if record is None:
-            raise HTTPException(404, "No such job request.")
-        if record.get("status") != "pending":
-            raise HTTPException(409, f"Job request is already {record.get('status')}; it will not change again.")
-        try:
+
+        def start(record: dict[str, Any]) -> dict[str, Any]:
             spec = NewJob(goal=record["goal"], workspace=record["workspace"], role=record["role"],
                           role_version=int(record.get("role_version") or 0), source_session=record.get("source_session", ""))
-            item = tenant.jobs.start(spec)  # every start() guard still applies; a role revoked since the proposal fails HERE
-            resolved_record = store.mark(request_id, "accepted", job_id=item["id"])
+            return tenant.jobs.start(spec)  # every start() guard still applies; a role revoked since the proposal fails HERE
+
+        try:
+            resolved_record, item = store.accept(request_id, start)
         except JobError as error:
-            raise HTTPException(400, str(error)) from error
+            message = str(error)
+            status = 404 if "No such" in message else 409 if "already" in message else 400
+            raise HTTPException(status, message) from error
         return {"request": resolved_record, "job": item}
 
     @api.post("/job-requests/{request_id}/dismiss")

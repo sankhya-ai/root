@@ -122,6 +122,11 @@ generated code ever runs without per-hash owner activation.
   stored fields - or dismiss; a resolved request never resolves again. A session may name a built-in role, a
   durable role, or a session-lifetime role IT created (the stored `source_session` keeps that choice explicit);
   never another session's private role.
+  The stored request also carries the role's RESOLVED tool scope (display-only; the accept re-resolves the pinned
+  role), so the owner reviews actual permissions, not a label. Claim and start run under the store lock: a double
+  accept or an accept racing a dismiss has exactly one winner and can never launch two jobs; a failed start leaves
+  the request pending (nothing ran, the owner can dismiss or retry). A session that ADOPTED a role cannot call
+  `recommend_job` at all - management tools narrow away with everything else.
 * SELECTING a role for oneself is a BEHAVIOR choice: which guides load (guides.guides_for / script_role in
   tenancy.py) and which subset of ALREADY-ALLOWED tools are in play. A session's authority ceiling is its tool
   scope, fixed at creation; choosing among capabilities it already holds grants nothing.

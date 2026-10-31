@@ -13,6 +13,7 @@ export type JobProposal = { id: string; goal: string; role: string; version: num
 export function JobRequestCard({ job }: { job: JobProposal }) {
   const [status, setStatus] = useState<string | null>(null);
   const [jobId, setJobId] = useState("");
+  const [scope, setScope] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
   const refresh = () => {
@@ -22,6 +23,7 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
         const found = requests.find((r) => r.id === job.id);
         setStatus(found ? found.status : "gone");
         setJobId(found?.job_id ?? "");
+        setScope(found?.scope ?? []);
       })
       .catch(() => setStatus("unknown"));
   };
@@ -54,6 +56,11 @@ export function JobRequestCard({ job }: { job: JobProposal }) {
           <code>{job.goal}</code>
         </span>
         {job.reason ? <span className="approvalChip" title="Why the session says a job, not this chat, should do it">{job.reason}</span> : null}
+      </div>
+      <div className="approvalMeta">
+        <span className="approvalChip" title="The exact tools the job would run with, resolved when the session proposed it. The job gets no budget beyond the job defaults.">
+          tools: {scope.length ? scope.join(", ") : "resolving…"}
+        </span>
       </div>
       {status === "pending" || status === null ? (
         <div className="approvalActions">

@@ -63,6 +63,8 @@ export interface JobRequest {
   workspace: string;
   reason: string;
   requested_by: string;
+  /** The role's effective tool scope resolved at proposal time (display-only; the accept re-resolves the pinned role). */
+  scope?: string[];
   status: "pending" | "accepted" | "dismissed";
   created_at: number;
   job_id?: string;
