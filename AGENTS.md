@@ -129,8 +129,12 @@ Implemented as the `adopt_role` host tool (registry.py), with these exact, teste
   unless every STEP of that composite is in the ceiling too: naming a composite is not permission for its steps.
 * EFFECT, one-way: record.role + record.role_version are pinned and record.tool_scope becomes the role's scope -
   a snapshot copy. Host and gateway calls honor the narrowing in the SAME turn (the gateway re-reads the record
-  per call); native runtime tools follow from the next turn, because the launcher spec fingerprint (which now
-  includes script_role and tool_scope) changes and the runtime re-initializes. There is no model-side reset: the
+  per call), and native commands, writes, web fetches and outside-workspace reads are rejected from the moment of
+  adoption: the approval path (Approvals._approve) checks the sender against the scope BEFORE trust policy, so no
+  grant or ledger entry can settle an out-of-scope action. Residual, stated honestly: read-only native tools
+  inside the workspace do not ask the host per call, so for them the narrowed native set is guaranteed from the
+  NEXT turn, when the launcher spec fingerprint (now including script_role and tool_scope) re-initializes the
+  runtime. Same-turn enforcement is therefore NOT claimed for in-workspace read-only native calls. There is no model-side reset: the
   existing owner session endpoint (PATCH /api/sessions/{id}) only supports title and permission mode, so no reset
   was built - a session that needs its wider scope back starts fresh or asks the owner.
 * REVOCATION, explicit: revoking the registry role later does NOT widen the session back - the narrowed scope is
@@ -140,6 +144,15 @@ Implemented as the `adopt_role` host tool (registry.py), with these exact, teste
   only for jobs; both the tool result and the notice say so.
 * Adoption that would WIDEN the session refuses and tells the model to ask the owner to start a job with that
   role instead - that is the owner API's effect, not the session's.
+
+### Capability-gap detection (deterministic, not judgment)
+
+The self-extension loop starts with noticing a gap. Detection is ordinary code, never the model validating
+itself: every ``find_tools`` miss is tallied on the session record (``capability_misses``, capped at 20), the
+miss result itself tells the model the two governed ways to add a capability (``create_tool`` composes,
+``propose_tool`` generates code under owner hash activation), and every 3 misses the owner sees a
+``CapabilityGap`` transcript notice with the actual queries. A miss is a SIGNAL, not proof that a capability is
+missing or that building one succeeds - the model decides what to build, the owner decides what becomes durable.
 
 Decided for adoption (parent steering, 2026-10-31): one-way narrowing for the rest of the session; no reset was
 built because the existing owner session endpoint has no safe role/scope control. Still open for Ashish:

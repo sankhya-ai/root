@@ -37,6 +37,9 @@ class SessionRecord:
     #: The registry role version ``role`` was adopted at (0 = built-in or none). Set by ``adopt_role``; pinned, so a
     #: newer role version never silently changes a session that adopted the old one.
     role_version: int = 0
+    #: Recent ``find_tools`` misses ({"query", "at"}), newest last, capped - the deterministic capability-gap
+    #: signal the owner is shown every few misses (``catalogue.capability_miss``). Set by the gateway, never the model.
+    capability_misses: list[dict] = field(default_factory=list)
     #: Nobody is watching (a scheduled run): what would ask the owner is declined instead.
     unattended: bool = False
     #: The schedule that started this session, if any.

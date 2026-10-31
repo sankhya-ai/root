@@ -895,9 +895,12 @@ class RegistryToolset:
                                      "guides": loaded, "pinned": True, "reversible": False})
             payload = {"role": resolved["name"], "version": resolved["version"], "tools_now_in_scope": list(resolved["tools"]),
                        "guides_loaded": loaded, "pinned": True, "one_way": True,
-                       "honest_limits": ("tools narrow at once for host tools and from the next turn for native runtime tools; "
-                                         "guides follow the role now; any output contract is advisory in a chat session (enforced for jobs only); "
-                                         "if this role is revoked later, your narrowed tools stay narrowed and its guides stop loading.")}
+                       "honest_limits": ("host and gateway tools narrow at once; native commands, writes, web and outside-workspace reads are "
+                                         "rejected from this moment via the approval path; read-only native tools inside the workspace may not "
+                                         "consult the host per call, so for them the narrowed set is guaranteed from the next turn (the runtime "
+                                         "re-initializes); guides follow the role now; any output contract is advisory in a chat session "
+                                         "(enforced for jobs only); if this role is revoked later, your narrowed tools stay narrowed and its "
+                                         "guides stop loading.")}
             return _ok(payload, f"Adopted role `{resolved['name']}`" + (f" v{resolved['version']}" if resolved["version"] else ""))
         if name == CREATE_ROLE:
             from .guides import GUIDES  # local import: guides imports nothing from here

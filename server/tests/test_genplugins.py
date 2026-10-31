@@ -525,3 +525,74 @@ def test_e2e_propose_activate_invoke_through_the_real_app(client, workspace, scr
     # Revocation over the owner API takes the tool away immediately.
     assert client.post("/api/registry/plugins/numstats/revoke").status_code == 200
     assert client.get("/api/registry/plugins").json()["numstats"]["active_version"] is None
+
+
+# --- synthetic-cgroupfs verification of the in-jail self-check (no-cost route on hosts WITHOUT cgroup support) ------
+#
+# Honest label: these tests verify the self-check CODE PATH end-to-end inside a real bubblewrap namespace jail -
+# the real genplugin_runner.check_cgroup, reading a real /proc/self/cgroup (0::/ under a cgroup namespace) and a
+# synthetic /sys/fs/cgroup bind-mounted read-only. They prove the runner refuses wrong/absent limits and accepts
+# exact ones. They do NOT prove any host enforces those limits: that still requires a cgroup-capable host, and the
+# bounded-execution suite stays skip-labeled here.
+
+import os as _os
+import shutil as _shutil
+from pathlib import Path as _Path
+import subprocess as _subprocess
+
+import pytest as _pytest
+
+
+def _synthetic_cgroup_run(tmp_path, memory_max, pids_max, expected):
+    fake = tmp_path / "fake-cgroupfs"
+    fake.mkdir()
+    (fake / "memory.max").write_text(memory_max)
+    (fake / "pids.max").write_text(pids_max)
+    runner = _Path(genplugins.__file__).with_name("genplugin_runner.py")
+    argv = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-cgroup-try", "--unshare-net"]
+    for path in genplugins.JAIL_SYSTEM_DIRS:
+        if _os.path.islink(path):
+            argv += ["--symlink", _os.readlink(path), path]
+        elif _os.path.isdir(path):
+            argv += ["--ro-bind", path, path]
+    argv += ["--proc", "/proc", "--dir", "/sys", "--dir", "/sys/fs",
+             "--ro-bind", str(fake), "/sys/fs/cgroup", "--ro-bind", str(runner), str(runner), "--",
+             _shutil.which("python3"), "-c",
+             "import sys; sys.path.insert(0, %r); from genplugin_runner import check_cgroup; check_cgroup(*sys.argv[1:])" % str(runner.parent),
+             *expected]
+    return _subprocess.run(argv, capture_output=True, text=True, timeout=30)
+
+
+@_pytest.mark.skipif(bool(genplugins.sandbox_problem()), reason=genplugins.sandbox_problem() or "ok")
+def test_in_jail_self_check_accepts_the_exact_probed_limits(tmp_path):
+    result = _synthetic_cgroup_run(tmp_path, "268435456\n", "64\n", ["268435456", "64"])
+    assert result.returncode == 0, result.stderr
+
+
+@_pytest.mark.skipif(bool(genplugins.sandbox_problem()), reason=genplugins.sandbox_problem() or "ok")
+def test_in_jail_self_check_refuses_an_unbounded_pids_limit(tmp_path):
+    result = _synthetic_cgroup_run(tmp_path, "268435456\n", "max\n", ["268435456", "64"])
+    assert result.returncode != 0 and "refusing to run candidate code" in result.stderr
+
+
+@_pytest.mark.skipif(bool(genplugins.sandbox_problem()), reason=genplugins.sandbox_problem() or "ok")
+def test_in_jail_self_check_refuses_a_wrong_memory_limit(tmp_path):
+    result = _synthetic_cgroup_run(tmp_path, "536870912\n", "64\n", ["268435456", "64"])
+    assert result.returncode != 0 and "refusing to run candidate code" in result.stderr
+
+
+@_pytest.mark.skipif(bool(genplugins.sandbox_problem()), reason=genplugins.sandbox_problem() or "ok")
+def test_in_jail_self_check_refuses_when_the_cgroupfs_is_absent(tmp_path):
+    # No /sys/fs/cgroup mount at all: the runner must refuse, not proceed unbounded.
+    runner = _Path(genplugins.__file__).with_name("genplugin_runner.py")
+    argv = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-cgroup-try", "--unshare-net"]
+    for path in genplugins.JAIL_SYSTEM_DIRS:
+        if _os.path.islink(path):
+            argv += ["--symlink", _os.readlink(path), path]
+        elif _os.path.isdir(path):
+            argv += ["--ro-bind", path, path]
+    argv += ["--proc", "/proc", "--ro-bind", str(runner), str(runner), "--",
+             _shutil.which("python3"), "-c",
+             "import sys; sys.path.insert(0, %r); from genplugin_runner import check_cgroup; check_cgroup('268435456', '64')" % str(runner.parent)]
+    result = _subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0 and ("unreadable" in result.stderr or "refusing" in result.stderr)

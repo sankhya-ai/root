@@ -950,3 +950,126 @@ def test_adopt_role_that_widens_is_refused_in_a_scoped_session(client, workspace
     assert results["a"]["is_error"] is True and "outside its current ceiling" in results["a"]["message"]
     record = client.get(f"/api/sessions/{session_id}").json()
     assert record["role"] == "" and record["tool_scope"] == ["find_tools", "use_tool", "adopt_role"]
+
+
+def test_approval_path_rejects_out_of_scope_native_senders_same_turn(tmp_path):
+    """Native tools don't re-read the session record mid-turn, but every command, write, web fetch and
+    outside-workspace read asks the host: the approval path rejects out-of-scope senders BEFORE trust policy,
+    so no grant or ledger entry can launder them. This is adopt_role's same-turn native enforcement."""
+    from tura_code.sessions.approvals import Approvals
+    from tura_code.trust.ledger import TrustLedger
+
+    class FakeRt(Approvals):
+        def __init__(self, tenant, record):
+            self.tenant = tenant
+            self.record = record
+            self.pending = {}
+            self.events = []
+
+        def emit(self, kind, payload, persist=True):
+            self.events.append((kind, payload))
+
+        def own_roots(self):
+            return ()
+
+    tenant, runtime, reg, _ = make(tmp_path)
+    tenant.trust = TrustLedger(tmp_path / "trust.json")
+    tenant.server = SimpleNamespace(mode="local")
+    record = SimpleNamespace(permission_mode="yolo", kind="session", unattended=False, grants=[], workspace=str(tmp_path),
+                             tool_scope=["find_tools", "use_tool", "ReadFile"])
+    rt = FakeRt(tenant, record)
+
+    # Even in yolo mode with everything auto-approved, an out-of-scope sender is rejected.
+    rejected = run(rt._approve({"id": "r1", "sender": "Shell", "action": "run command", "description": "ls", "display": []}))
+    assert rejected == "reject"
+    resolved = [p for k, p in rt.events if k == "ApprovalResolved"]
+    assert resolved and resolved[-1]["auto"] is True and "outside this session's tool scope" in resolved[-1]["reason"]
+
+    # An in-scope sender falls through to the normal trust policy (yolo auto-approves reads of the workspace).
+    allowed = run(rt._approve({"id": "r2", "sender": "ReadFile", "action": "read file", "description": "Read `x.py`", "display": []}))
+    assert allowed == "approve"
+
+
+@requires_runtime
+def test_adopt_role_blocks_a_native_command_in_the_same_turn(client, workspace, script):
+    """Real runtime, same turn: after adopt_role narrows the scope, a native Shell call is auto-rejected by the
+    approval path - the runtime's initialized tool list no longer decides what may run."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    first = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["find_tools", "use_tool", "ReadFile"]}), text("done")])
+    with client.websocket_connect(f"/api/sessions/{first}/ws") as ws:
+        ws.receive_json()
+        run_turn(ws, "make a role")
+    assert client.post("/api/registry/roles/reader/promote").status_code == 200
+
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([
+        tool_call("a", "adopt_role", {"name": "reader"}),
+        tool_call("s", "Shell", {"command": "echo should-not-run"}),
+        text("done"),
+    ])
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "adopt then try a command")
+    rejections = [e["payload"] for e in of_type(events, "ApprovalResolved")
+                  if e["payload"].get("response") == "reject" and e["payload"].get("sender") == "Shell"]
+    assert rejections and "outside this session's tool scope" in rejections[0]["reason"]
+    results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(events, "ToolResult")}
+    assert results["a"]["is_error"] is False
+    assert "should-not-run" not in str(results.get("s", ""))  # the command never executed
+
+
+# --- capability-miss signal: deterministic detection, never proof -------------------------------------------------
+
+
+def test_find_tools_miss_tallies_the_record_and_hints_how_to_extend(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    runtime, events = adoptable_runtime(tenant)
+    gateway = next(t for t in tenant.toolsets if isinstance(t, catalogue.GatewayToolset))
+    result = run(gateway.call(runtime, "g1", "find_tools", {"query": "translate speech in real time"}))
+    assert result["is_error"] is False
+    assert "create_tool" in result["output"] and "propose_tool" in result["output"]
+    assert runtime.record.capability_misses[0]["query"] == "translate speech in real time"
+    assert not [e for e in events if e[0] == "CapabilityGap"]  # first miss: no owner notice yet
+
+
+def test_every_third_miss_shows_the_owner_a_capability_gap(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    runtime, events = adoptable_runtime(tenant)
+    gateway = next(t for t in tenant.toolsets if isinstance(t, catalogue.GatewayToolset))
+    for i in range(7):
+        run(gateway.call(runtime, f"g{i}", "find_tools", {"query": f"missing thing {i}"}))
+    gaps = [p for k, p in events if k == "CapabilityGap"]
+    assert [g["misses"] for g in gaps] == [3, 6]
+    assert gaps[0]["queries"] == ["missing thing 0", "missing thing 1", "missing thing 2"]
+    assert len(runtime.record.capability_misses) == 7
+
+
+def test_miss_history_is_bounded(tmp_path):
+    tenant, runtime, reg, _ = make(tmp_path, dynamic=True)
+    runtime, events = adoptable_runtime(tenant)
+    runtime.record.capability_misses = [{"query": f"old {i}", "at": 0} for i in range(catalogue.MISS_KEEP)]
+    gateway = next(t for t in tenant.toolsets if isinstance(t, catalogue.GatewayToolset))
+    run(gateway.call(runtime, "g1", "find_tools", {"query": "newest"}))
+    assert len(runtime.record.capability_misses) == catalogue.MISS_KEEP
+    assert runtime.record.capability_misses[-1]["query"] == "newest"
+
+
+@requires_runtime
+def test_capability_gap_surfaces_in_a_real_session(client, workspace, script):
+    """Real runtime: three find_tools misses emit one CapabilityGap event the UI renders as a notice."""
+    client.put("/api/settings", json={"dynamic_tools": True})
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([
+        tool_call("m1", "find_tools", {"query": "zzz nonexistent capability one"}),
+        tool_call("m2", "find_tools", {"query": "zzz nonexistent capability two"}),
+        tool_call("m3", "find_tools", {"query": "zzz nonexistent capability three"}),
+        text("done"),
+    ])
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "look for tools")
+    gaps = [e["payload"] for e in of_type(events, "CapabilityGap")]
+    assert len(gaps) == 1 and gaps[0]["misses"] == 3
+    record = client.get(f"/api/sessions/{session_id}").json()
+    assert len(record["capability_misses"]) == 3

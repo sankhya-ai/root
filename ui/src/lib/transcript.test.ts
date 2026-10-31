@@ -140,6 +140,16 @@ test("a registry creation becomes a visible notice, not a silent event", () => {
   assert.match(roleNotice.text, /durable catalogue/);
 });
 
+test("a capability gap becomes a visible notice with the missed queries", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("CapabilityGap", { queries: ["translate speech", "ocr labels", "resize video"], misses: 3 }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /Capability gap: 3 tool searches found nothing/);
+  assert.match(notice.text, /translate speech/);
+  assert.match(notice.text, /activating generated code stays yours/);
+});
+
 test("adopting a role shows the narrowing, the pin and the one-way rule", () => {
   const state = createTranscript();
   applyEvent(state, ev("RoleAdopted", { role: "docs_reviewer", version: 2, tools: 5, guides: ["evidence"], reversible: false }));

@@ -406,6 +406,19 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
       });
       break;
     }
+    case "CapabilityGap": {
+      // find_tools kept missing: the owner should see the repeated gap, not a buried tool result.
+      const entry = p as { queries?: string[]; misses?: number };
+      const queries = (entry.queries ?? []).map((q) => `\"${q}\"`).join(", ");
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: `Capability gap: ${entry.misses ?? "?"} tool searches found nothing this session (recently: ${queries}). The agent can compose a new tool or propose generated code - creating it is the agent's choice, activating generated code stays yours.`,
+      });
+      break;
+    }
     case "RoleAdopted": {
       // The session took on a role: one-way narrowing, pinned version. The owner must SEE the narrowing, not infer it.
       const entry = p as { role?: string; version?: number | null; tools?: number; guides?: string[]; reversible?: boolean };
