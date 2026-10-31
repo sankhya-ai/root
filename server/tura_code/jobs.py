@@ -631,10 +631,13 @@ class Jobs:
         visual_authority = self._visual_authority(spec)
         b = spec.budget
         scope = resolved["scope"] + ([broker.TOOL_NAME] if spec.credentials else [])
+        job_id = uuid.uuid4().hex[:12]
         runtime = self.tenant.sessions.create(spec.workspace, f"Job · {spec.role}", mode="accept_edits", tool_scope=scope)
         runtime.record.credentials = list(spec.credentials)
         runtime.record.isolation = spec.isolation
         runtime.record.job_role = spec.role
+        runtime.record.job = job_id
+        runtime.record.delegated = bool(spec.parent_job_id)
         runtime.record.visual = visual_authority
         runtime.record.unattended = True
         runtime.record.max_steps = b.max_steps
@@ -642,7 +645,6 @@ class Jobs:
         runtime.record.max_cost_usd = b.max_cost_usd
         runtime.record.max_wall_seconds = b.timeout_seconds
         runtime.save_record()
-        job_id = uuid.uuid4().hex[:12]
         item = {
             "id": job_id, "role": spec.role, "role_version": resolved["version"], "goal": spec.goal, "session": runtime.record.id, "status": "running",
             "workspace": spec.workspace,
@@ -905,6 +907,8 @@ class Jobs:
         runtime.record.credentials = list(item.get("credentials") or [])  # names only; the broker holds the values
         runtime.record.isolation = item.get("isolation")
         runtime.record.job_role = item.get("role")
+        runtime.record.job = item["id"]
+        runtime.record.delegated = bool(item.get("parent_job_id"))
         if item.get("visual_authority"):
             runtime.record.visual = item["visual_authority"]
         runtime.record.unattended = True

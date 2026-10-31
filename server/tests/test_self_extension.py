@@ -1047,11 +1047,15 @@ async def test_resume_worker_gets_pinned_scope_not_current_role(tmp_path):
     j.tenant = tenant
     parent = {"id": "p", "session": "sess-p", "status": "running", "budget": {}, "used": {}, "resumes": 1,
               "delivered": [], "delivered_requests": [], "started": time.time(), "contract": [], "credentials": [],
-              "workspace": "/w", "role": "builder", "goal": "g", "scope": ["ReadFile", "Grep"]}
+              "workspace": "/w", "role": "builder", "goal": "g", "scope": ["ReadFile", "Grep"],
+              "isolation": "bwrap-model-only", "parent_job_id": "root-job"}
     j.items["p"] = parent
     await j._resume_drive(parent, [], [])
     assert created["tool_scope"] == ["ReadFile", "Grep"]  # pinned at start, not re-resolved
     assert parent["session"] == "sess-new" and parent["session_history"] == ["sess-p"]
+    # a fresh resume worker keeps the mission's jail and is stamped as the same delegated job (host-set metadata)
+    assert fake.record.isolation == "bwrap-model-only"
+    assert fake.record.job == "p" and fake.record.delegated is True
 
 
 @requires_runtime
@@ -1127,3 +1131,28 @@ def test_delegated_code_guard_at_the_start_boundary(client, workspace, script):
     own = client.post("/api/jobs", json={"goal": "x", "workspace": str(workspace), "role": "developer"})
     assert own.status_code == 200, own.text
     assert _wait_terminal(client, own.json()["id"])["status"] == "finished"
+
+
+@requires_runtime
+def test_standalone_child_stays_delegated_for_the_guard(client, workspace, script):
+    """Lineage cannot be erased to bypass the jail guard: the parent is CANCELLED before accept, so the child is
+    standalone - but the stored record's parent_job_id still drives start(), so a code-running standalone child
+    still needs the jail or the explicit ack. The delegation marker is on the session record either way."""
+    session_id = _proposer_role(client, workspace, script)
+    script([tool_call("j", "recommend_job", {"goal": "build the thing", "role": "developer", "reason": "code needed"}), text("proposed")])
+    parent = client.post("/api/jobs", json={"goal": "delegate code work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    _wait_parked(client, parent["id"])
+    client.post(f"/api/jobs/{parent['id']}/cancel")
+    assert _wait_terminal(client, parent["id"])["status"] == "stopped"
+    req = client.get("/api/job-requests").json()["requests"][0]
+    refused = client.post(f"/api/job-requests/{req['id']}/accept")
+    assert refused.status_code == 400 and "scope ceiling" in refused.text  # still delegated: no bypass by outliving the parent
+    script([text("done")])
+    accepted = client.post(f"/api/job-requests/{req['id']}/accept", json={"accept_unprotected_credentials": True})
+    assert accepted.status_code == 200, accepted.text
+    child = accepted.json()["job"]
+    assert child["standalone"] and child["parent_job_id"] == parent["id"]  # marked, lineage kept
+    done = _wait_terminal(client, child["id"])
+    assert done["status"] == "finished", done
+    session = client.get(f"/api/sessions/{done['session']}").json()
+    assert session.get("job") == child["id"] and session.get("delegated") is True

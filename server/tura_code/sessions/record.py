@@ -60,6 +60,12 @@ class SessionRecord:
     isolation: str = ""
     #: The job role (``jobs``) when the session is a job: selects the review guides it may load. Set by the host.
     job_role: str = ""
+    #: The job this session works (or worked) for, stamped by the HOST at creation - every resume worker too.
+    #: Never model-supplied: reliable metadata for per-turn policy (e.g. how much memory a worker is shown).
+    job: str = ""
+    #: True when that job answers another job's proposal (``parent_job_id``): a DELEGATED worker, stamped by the
+    #: host at creation from the accepted record. Least-context policy keys off this, not off model claims.
+    delegated: bool = False
     #: What the owner authorized this job to do on pages (``visual.act``): {"interact": {origin, allow_writes}, "deployed": {urls}}. Host-set only.
     visual: dict = field(default_factory=dict)
 
