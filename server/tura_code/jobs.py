@@ -141,6 +141,16 @@ class NewJob(BaseModel):
     #: Set ONLY by the job-request accept route: the proposal this job fulfills. Recorded on the item so an accept
     #: retried after a host crash adopts the already-created job instead of launching a duplicate.
     request_id: str = ""
+    #: Set only by the accept path when this job answers a JOB's proposal (a delegated child): the scope ceiling
+    #: must hold against the child's own code, so the code-running guard below treats delegation like credentials.
+    parent_job_id: str = ""
+
+
+class AcceptOptions(BaseModel):
+    #: The owner's explicit choices when accepting a proposal - the ONLY way a delegated child runs:
+    #: isolation puts the child's code behind the network-isolated jail; the ack knowingly waives that protection.
+    isolation: str = ""
+    accept_unprotected_credentials: bool = False
 
 
 def resolve_role(tenant: "Tenant", name: str, version: int = 0, source_session: str = "") -> dict[str, Any]:
@@ -609,8 +619,9 @@ class Jobs:
         # Only the model-only jail takes the host network (and so the owner API's open bootstrap) away from the role's code.
         # A served app keeps the shared network even then, so it never counts as protected.
         protected = spec.isolation == "bwrap-model-only" and not spec.serve
-        if spec.credentials and runs_code and not protected and not spec.accept_unprotected_credentials:
-            raise JobError(f"The {spec.role} role (or the served app) can run code that can read the credential store or fetch the owner token from the host's loopback API. Only isolation `bwrap-model-only` without `serve` protects against that. Pass accept_unprotected_credentials=true to proceed anyway, or use a role without Shell, process or run_python.")
+        if (spec.credentials or spec.parent_job_id) and runs_code and not protected and not spec.accept_unprotected_credentials:
+            delegated = " A delegated worker's scope ceiling means nothing against its own code: unjailed it reads the store as your user and becomes the owner." if spec.parent_job_id and not spec.credentials else ""
+            raise JobError(f"The {spec.role} role (or the served app) can run code that can read the credential store or fetch the owner token from the host's loopback API.{delegated} Only isolation `bwrap-model-only` without `serve` protects against that. Pass accept_unprotected_credentials=true to proceed anyway, or use a role without Shell, process or run_python.")
         if spec.isolation:
             if spec.budget.max_cost_usd:
                 raise JobError("An isolated job cannot set budget.max_cost_usd: the jail reaches the model through the host proxy, which has no prices and cannot enforce a dollar cap on those requests. Use budget.max_tokens (provider-reported tokens), or run the job without isolation. The job was not started.")
@@ -1135,16 +1146,19 @@ def router(app_state):
         return {"requests": tenant.job_requests.list(status=status)}
 
     @api.post("/job-requests/{request_id}/accept")
-    async def accept_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+    async def accept_request(request_id: str, options: AcceptOptions | None = None, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
         """The ONLY path from proposal to running job. Owner-authenticated; the NewJob comes from the stored record
         ALONE, and claim + start happen under the store lock, so a double accept or an accept racing a dismiss has
         exactly one winner and can never launch two jobs."""
         store = tenant.job_requests
 
         def start(record: dict[str, Any]) -> dict[str, Any]:
+            opts = options or AcceptOptions()
             spec = NewJob(goal=record["goal"], workspace=record["workspace"], role=record["role"],
                           role_version=int(record.get("role_version") or 0), source_session=record.get("source_session", ""),
-                          budget=Budget(**(record.get("budget") or {})), request_id=request_id)
+                          budget=Budget(**(record.get("budget") or {})), request_id=request_id,
+                          parent_job_id=record.get("parent_job_id") or "",
+                          isolation=opts.isolation, accept_unprotected_credentials=opts.accept_unprotected_credentials)
             return tenant.jobs.start(spec)  # every start() guard still applies; a role revoked since the proposal fails HERE
 
         def find_existing(rid: str) -> dict[str, Any] | None:
@@ -1159,6 +1173,8 @@ def router(app_state):
                 item["depth"] = int(resolved_record.get("depth") or 0)
                 parent = tenant.jobs.items.get(resolved_record["parent_job_id"])
                 item["mission_root_id"] = (parent.get("mission_root_id") or parent["id"]) if parent else resolved_record["parent_job_id"]
+                item["accepted_with"] = {"isolation": (options.isolation if options else "") or None,
+                                         "accept_unprotected_credentials": bool(options and options.accept_unprotected_credentials)}
                 if parent is None or parent.get("status") != "waiting":
                     # The asking job is not parked (ended, or never existed): this child runs ALONE and nothing
                     # will resume anyone with its result. Said on the item so a stale proposal cannot look like

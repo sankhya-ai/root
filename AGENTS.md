@@ -323,3 +323,23 @@ CREDENTIAL/SCOPE PROPERTIES ACROSS THE MISSION, each pinned by a test:
   API's open bootstrap, which hands out the owner token - are reachable from jailed code (already named in
   the refusal text and scope_guarantee; closing that is host networking work, not done here); (3) redaction
   protects the model's view only and is NOT a boundary against the worker's own code.
+
+### Delegated-code jail guard (mission layer 5, 2026-10-31)
+
+THE ESCAPE, closed in code: a delegated child whose role can run code (Shell, process, run_python, or a served
+app) could ignore its scope ceiling entirely - unjailed it reads the same-user 0600 credential store, or fetches
+the owner token from the owner API's open bootstrap on the host loopback, and becomes the owner. The existing
+guard covered credentials only; delegation now counts the same way: ``start()`` refuses a job with
+``parent_job_id`` + code-running capability unless it runs under ``bwrap-model-only`` without ``serve`` (the
+network-isolated jail whose ONLY egress is the HTTP-filtered model bridge - one exact POST path, no query, no
+encoding tricks, no pipelining; the owner API is unreachable from inside, verified in test_isolation.py including
+pipelined-request and redirect cases) or the owner explicitly passes ``accept_unprotected_credentials``. A failed
+accept leaves the request PENDING; the owner's explicit accept-time choices (``AcceptOptions``: isolation, ack)
+are the only way through, and they are recorded on the job item as ``accepted_with``. Owner-started jobs are
+unchanged: the owner's own delegate runs with owner-equivalent authority BY DESIGN, and that is stated, not hidden.
+
+What this does NOT close, stated plainly: shared-network mode (the default for owner-started jobs) still exposes
+loopback services to code - the refusal text says so; the open bootstrap remains open to anything on the host
+loopback BY DESIGN for the local UI (any same-user process can read the token file anyway - the jail, not the
+endpoint, is the boundary); the UI review card does not yet surface the accept-time jail choice (API + audit
+record only).

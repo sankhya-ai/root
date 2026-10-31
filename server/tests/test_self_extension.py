@@ -1088,3 +1088,42 @@ def test_scenario_l_sequential_delegation_is_bounded(client, workspace, monkeypa
     events = page.get("events", page) if isinstance(page, dict) else page
     tool_results = [e for e in events if e.get("type") == "ToolResult"]
     assert any("delegation cap" in str(e.get("payload", {}).get("return_value", "")) for e in tool_results)
+
+
+@requires_runtime
+def test_scenario_m_delegated_code_running_child_needs_the_jail_or_the_ack(client, workspace, script):
+    """A delegated child whose role runs code: a plain accept is REFUSED (its scope ceiling means nothing against
+    its own code - unjailed it reads the store as the owner and fetches the owner token). The failed start leaves
+    the request pending; the owner's explicit accept-time choices (jail, or the named ack) are the only way through."""
+    session_id = _proposer_role(client, workspace, script)
+    script([tool_call("j", "recommend_job", {"goal": "build the thing", "role": "developer", "reason": "code needed"}), text("proposed")])
+    parent = client.post("/api/jobs", json={"goal": "delegate code work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    _wait_parked(client, parent["id"])
+    req = client.get("/api/job-requests").json()["requests"][0]
+    refused = client.post(f"/api/job-requests/{req['id']}/accept")
+    assert refused.status_code == 400, refused.text
+    assert "accept_unprotected_credentials" in refused.text and "scope ceiling" in refused.text
+    assert client.get("/api/job-requests").json()["requests"][0]["status"] == "pending"  # failed start: still the owner's to decide
+    script([text("done")])
+    accepted = client.post(f"/api/job-requests/{req['id']}/accept", json={"isolation": "bwrap-model-only"})
+    assert accepted.status_code == 200, accepted.text
+    child = accepted.json()["job"]
+    done = _wait_terminal(client, child["id"])
+    assert done["status"] == "finished", done
+    assert done["isolation"] == "bwrap-model-only"
+    assert done["accepted_with"] == {"isolation": "bwrap-model-only", "accept_unprotected_credentials": False}
+
+
+@requires_runtime
+def test_delegated_code_guard_at_the_start_boundary(client, workspace, script):
+    """The same guard at start(): parent_job_id + code-running role refuses without the jail or the ack; an
+    owner-started job (no parent_job_id) with the same role is untouched - the owner's own delegate by design."""
+    script([text("done")])
+    refused = client.post("/api/jobs", json={"goal": "x", "workspace": str(workspace), "role": "developer", "parent_job_id": "job-x"})
+    assert refused.status_code == 400 and "scope ceiling" in refused.text, refused.text
+    ack = client.post("/api/jobs", json={"goal": "x", "workspace": str(workspace), "role": "developer", "parent_job_id": "job-x", "accept_unprotected_credentials": True})
+    assert ack.status_code == 200, ack.text
+    assert _wait_terminal(client, ack.json()["id"])["status"] == "finished"
+    own = client.post("/api/jobs", json={"goal": "x", "workspace": str(workspace), "role": "developer"})
+    assert own.status_code == 200, own.text
+    assert _wait_terminal(client, own.json()["id"])["status"] == "finished"
