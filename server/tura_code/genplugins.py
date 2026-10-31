@@ -31,6 +31,7 @@ import ast
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -39,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import catalogue
 from .registry import NAME_RE, RegistryError, _atomic_write, validate_schema
-from .sandbox import Bubblewrap, Mounts
+from .sandbox import Bubblewrap
 from .sessions.host_tools import tool_error
 
 if TYPE_CHECKING:
@@ -350,22 +351,52 @@ def sandbox_problem() -> str:
     return Bubblewrap(network=False).problem()
 
 
-async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
-    """One execution of candidate code: a fresh process in a fresh jail. No network, read-only system and plugin
-    source, a private scratch workspace deleted afterwards, a scrubbed environment. The process is the boundary."""
+#: The jail mounts ONLY what running Python needs. The agent sandbox's usual read-only system set includes /etc,
+#: /opt, /nix and /snap - fine for the owner's own agent, wrong for candidate code: config files under those trees
+#: can carry host secrets. Candidate jails get no /etc, no /opt, no home, no other users' files, no network.
+JAIL_SYSTEM_DIRS = ("/usr", "/lib", "/lib64", "/lib32", "/libx32", "/bin", "/sbin")
+
+
+def _jail_argv(python: str, runner: Path, snapshot: Path, scratch: Path) -> list[str]:
+    args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--unshare-cgroup-try", "--unshare-net"]
+    for path in JAIL_SYSTEM_DIRS:
+        if os.path.islink(path):
+            args += ["--symlink", os.readlink(path), path]
+        elif os.path.isdir(path):
+            args += ["--ro-bind", path, path]
+    args += ["--dev", "/dev", "--tmpfs", "/tmp"]
+    args += ["--ro-bind", str(runner), str(runner), "--ro-bind", str(snapshot), str(snapshot)]
+    args += ["--bind", str(scratch), str(scratch), "--chdir", str(scratch)]
+    return [*args, "--", python, str(runner), str(snapshot)]
+
+
+async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[str, Any], *, timeout: float,
+                     expected_sha256: str | None = None) -> dict[str, Any]:
+    """One execution of candidate code: a fresh process in a fresh minimal jail. No network, no /etc or /opt, a
+    private scratch workspace deleted afterwards, a scrubbed environment, rlimit ceilings. The process is the
+    boundary. The plugin files are SNAPSHOTTED and re-hashed at mount time: the bytes the owner reviewed are the
+    bytes that execute, with no check-to-mount window for a swapped file."""
     problem = sandbox_problem()
     if problem:
         return {"ok": False, "error": f"generated plugins need bubblewrap isolation, which is unavailable here, so nothing ran: {problem}"}
-    plugin_dir = store.dir / name / str(version)
     runner = Path(__file__).with_name("genplugin_runner.py")
     python = shutil.which("python3")
     if not python:
         return {"ok": False, "error": "no python3 on PATH for the jail; nothing ran"}
     scratch = Path(tempfile.mkdtemp(prefix="genplugin-"))
+    snapshot = Path(tempfile.mkdtemp(prefix="genplugin-src-"))
     try:
-        sandbox = Bubblewrap(network=False)
-        argv = sandbox.wrap([python, str(runner), str(plugin_dir)], Mounts(workspace=scratch, readable=(runner, plugin_dir)))
-        env = sandbox.environment({"PATH": "/usr/bin:/bin"}, Mounts(workspace=scratch))
+        source_dir = store.dir / name / str(version)
+        files = read_files(source_dir)
+        actual = content_hash(files)
+        if expected_sha256 is not None and actual != expected_sha256:
+            return {"ok": False, "error": f"the files on disk hash to {actual[:12]}..., not the activated {expected_sha256[:12]}...; nothing ran"}
+        for filename, content in files.items():
+            if content:
+                (snapshot / filename).write_text(content, "utf-8")
+        argv = _jail_argv(python, runner, snapshot, scratch)
+        env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"}
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
@@ -381,10 +412,13 @@ async def run_jailed(store: PluginStore, name: str, version: int, payload: dict[
         try:
             reply = json.loads(line)
         except ValueError:
-            return {"ok": False, "error": f"the candidate produced no protocol reply (exit {proc.returncode}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
+            killed = proc.returncode in (-9, -11, -6, -24, -25, 137)  # SIGKILL/SIGSEGV/SIGABRT/SIGXCPU/SIGXFSZ
+            why = "it hit a resource limit and was killed" if killed else f"exit {proc.returncode}"
+            return {"ok": False, "error": f"the candidate produced no protocol reply ({why}); stderr tail: {stderr.decode(errors='replace')[-300:]}"}
         return reply
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(snapshot, ignore_errors=True)
 
 
 # ----- the host toolsets -------------------------------------------------------------------------------------------
@@ -425,11 +459,10 @@ class GeneratedToolset:
         record = self.store.tool_owner(name)
         if record is None:
             return tool_error(f"`{name}` is not an active generated tool (unknown, not yet owner-activated, or revoked).", "Unavailable")
-        # TOCTOU: the files behind the active version must still hash to what the owner activated.
-        on_disk = content_hash(read_files(self.store.dir / record["name"] / str(record["version"])))
-        if on_disk != record["sha256"]:
-            return tool_error(f"`{name}`'s files no longer match the activated hash; refusing to run until the owner reviews again.", "Hash mismatch")
-        reply = await run_jailed(self.store, record["name"], record["version"], {"mode": "call", "tool": name, "arguments": arguments}, timeout=CALL_TIMEOUT)
+        # TOCTOU, closed: run_jailed snapshots the files, re-hashes the snapshot against the activated hash, and
+        # only then mounts the snapshot into the jail. A swapped file never executes.
+        reply = await run_jailed(self.store, record["name"], record["version"], {"mode": "call", "tool": name, "arguments": arguments},
+                                 timeout=CALL_TIMEOUT, expected_sha256=record["sha256"])
         if not reply.get("ok"):
             return tool_error(str(reply.get("error", "the generated tool failed")), "Generated tool failed")
         result = reply.get("result")

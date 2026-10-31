@@ -106,6 +106,10 @@ class NewJob(BaseModel):
     #: Pin a registry role's version (0 = the version active at start). A session-lifetime role is never promoted
     #: silently: using it means naming it - and optionally its exact version - in this owner-authenticated request.
     role_version: int = 0
+    #: Required when the named role is SESSION-LIFETIME (private to the session that created it): the id of that
+    #: session. Owner authentication proves WHO is asking; this proves WHICH private role they mean, so a job can
+    #: never silently pick up another session's role by an ambiguous name.
+    source_session: str = ""
     budget: Budget = Budget()
     #: Keys the final JSON block must contain, e.g. ["summary", "files_changed"].
     contract: list[str] = []
@@ -125,7 +129,7 @@ class NewJob(BaseModel):
     isolation: Literal["", "bwrap", "bwrap-model-only"] = ""
 
 
-def resolve_role(tenant: "Tenant", name: str, version: int = 0) -> dict[str, Any]:
+def resolve_role(tenant: "Tenant", name: str, version: int = 0, source_session: str = "") -> dict[str, Any]:
     """A role's effective scope: the built-in presets plus ACTIVE registry roles (``registry.py``), re-validated at use time.
 
     A registry role is data created through ``create_role``; using it still needs this owner-authenticated job start.
@@ -139,6 +143,12 @@ def resolve_role(tenant: "Tenant", name: str, version: int = 0) -> dict[str, Any
     if record is None:
         known = sorted(ROLES) + sorted(registry.roles if registry is not None else [])
         raise JobError(f"Unknown role `{name}`" + (f" v{version}." if version else f". Roles: {', '.join(known)}."))
+    if record.get("lifetime") == "session" and record.get("session") and source_session != record.get("session"):
+        raise JobError(
+            f"Role `{name}` v{record['version']} is private to the session that created it. To run a job with it, pass "
+            f"source_session='<that session id>' so the choice is explicit, or promote the role into the durable catalogue. "
+            "The job was not started."
+        )
     inactive = [t for t in record["tools"] if t in registry.tool_names() and registry.active_tool(t) is None]
     if inactive:
         raise JobError(f"Role `{name}` v{record['version']} names registry tool(s) {', '.join(inactive)}, which are no longer active. The job was not started.")
@@ -376,7 +386,7 @@ class Jobs:
         return out
 
     def start(self, spec: NewJob) -> dict[str, Any]:
-        resolved = resolve_role(self.tenant, spec.role, spec.role_version)
+        resolved = resolve_role(self.tenant, spec.role, spec.role_version, source_session=spec.source_session)
         if not spec.goal.strip():
             raise JobError("A job needs a goal.")
         if not spec.contract and resolved["contract"]:

@@ -73,3 +73,20 @@ that implements a genuinely new tool. The rules, enforced by ordinary code:
 
 The registry store serializes multi-process read-modify-write with an flock on `registry/.lock` plus atomic
 tmp-file writes; parallel creators lose no versions (tested with 6 OS processes).
+
+### How this compares to current practice (researched 2026-10-31)
+
+* Anthropic's Claude Code sandboxes bash with bubblewrap on Linux (Seatbelt on macOS), network denied by default -
+  the same OS-primitive tier chosen here, and their sandbox-runtime (anthropic-experimental) wraps arbitrary
+  processes and MCP servers the same way this jail wraps candidate code. https://playciso.com/blog/agent-sandbox-comparison-srt-vs-alternatives-2026
+* Hosted agent code execution uses stronger boundaries when no human watches each call: claude.ai runs code in
+  ephemeral gVisor containers; E2B and Vercel run Firecracker microVMs. The 2026 guidance: human-in-the-loop ->
+  namespace sandbox (what Root does); fully autonomous fleets -> microVM. Root's jobs already document the shared
+  -kernel caveat; generated plugins inherit it. https://niteagent.com/blog/2026-08-15-agent-sandboxing-2026/
+* The WASM/capability tier (Extism, WASI) removes ambient authority in-process but constrains languages and host
+  interop; for a Python host with an existing bubblewrap dependency, the namespace jail plus a whitelisted-stdlib
+  screen gives the same deny-by-default shape without a new runtime.
+  https://www.systemshardening.com/articles/wasm/wasm-sandboxed-mcp-tools/
+* The common lifecycle pattern matches Ashish's rule: propose -> deterministic verify -> human activation of an exact
+  artifact -> audited invoke -> instant revoke. MCP security guidance likewise centers manifest-declared permissions,
+  approval gates and schema-locked tool interfaces. https://www.practical-devsecops.com/mcp-security-best-practices/

@@ -13,8 +13,17 @@ import contextlib
 import importlib.util
 import json
 import os
+import resource
 import sys
 import traceback
+
+# Hard resource ceilings, set by the host before any candidate code loads. The namespace jail is the boundary for
+# what the candidate can REACH; these bound what it can CONSUME. The wall-clock timeout on the host is the backstop.
+resource.setrlimit(resource.RLIMIT_CPU, (10, 10))            # 10s of CPU
+resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))   # 512 MB address space
+resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))          # no fork bombs
+resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024))  # 16 MB files
+resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
 
 def _load(name: str, path: str):

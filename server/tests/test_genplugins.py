@@ -182,7 +182,7 @@ def test_tampered_files_refuse_activation_and_calls(tmp_path):
     plugin_py.write_text(plugin_py.read_text() + "\n# tampered\n")
     generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
     call = run(generated.call(runtime, "c4", "stats_summary", {"numbers": [1.0]}))
-    assert call["is_error"] and "no longer match" in call["message"]
+    assert call["is_error"] and "not the activated" in call["message"] + call["output"]
 
 
 @needs_bwrap
@@ -246,7 +246,8 @@ def test_a_runaway_candidate_is_killed(tmp_path):
     store._save()
     generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
     call = run(generated.call(runtime, "c6", "spin_forever", {}))
-    assert call["is_error"] and "killed" in call["output"] + call["message"]
+    # The CPU rlimit kills the spin (SIGKILL) before the wall-clock timeout needs to.
+    assert call["is_error"] and ("killed" in call["output"] + call["message"] or "limit" in call["output"] + call["message"])
 
 
 @needs_bwrap
@@ -280,3 +281,131 @@ def test_listing_reports_status_and_hashes(tmp_path):
     listing = store.listing()
     assert listing["numstats"]["versions"][0]["status"] == "verified"
     assert len(listing["numstats"]["versions"][0]["sha256"]) == 64
+
+
+# ----- the jail's reach: canaries, environment, resource ceilings -------------------------------------------------
+
+CANARY = "canary-7f3e9c1d-host-secret-do-not-read"
+
+
+@needs_bwrap
+def test_host_files_are_invisible_canary(tmp_path):
+    """A secret-shaped file on the host (even a world-readable one) is not inside the jail's filesystem: no /etc,
+    no /opt, no home, no tenant root, no other temp files - only the read-only source snapshot and the scratch dir."""
+    tenant, runtime, store = make(tmp_path)
+    canary = tmp_path.parent / (CANARY + ".txt")  # a sibling of the workspace, outside every jail mount
+    canary.write_text(CANARY)
+    probe = (
+        "def handle(tool, arguments):\n"
+        "    if tool == 'stats_summary':\n"
+        "        targets = ['/etc/hostname', '/etc/passwd', '/opt', '/root', '" + str(canary) + "']\n"
+        "        out = {}\n"
+        "        for t in targets:\n"
+        "            try:\n"
+        "                with open(t, 'rb') as fh:\n"
+        "                    out[t] = fh.read(64).decode('utf-8', 'replace')\n"
+        "            except (OSError, IOError) as e:\n"
+        "                out[t] = type(e).__name__\n"
+        "        return out\n"
+        "    raise ValueError('nope')\n"
+    )
+    payload = json.loads(propose(runtime, source=probe, tests="def test_ok():\n    pass\n")["output"])
+    store.activate("numstats", 1, payload["sha256"])
+    generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
+    call = run(generated.call(runtime, "c8", "stats_summary", {}))
+    assert not call["is_error"], call
+    result = json.loads(call["output"])
+    for target, outcome in result.items():
+        assert CANARY not in outcome, (target, outcome)
+        assert outcome in ("FileNotFoundError", "PermissionError", "IsADirectoryError"), (target, outcome)
+
+
+@needs_bwrap
+def test_the_jail_environment_carries_no_host_secrets(tmp_path, monkeypatch):
+    """The exec environment is exactly PATH/HOME/TMPDIR - asserted at the exec boundary, not by trusting the screen."""
+    captured = {}
+    original = asyncio.create_subprocess_exec
+
+    async def spy(*argv, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return await original(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-never-leak")
+    monkeypatch.setenv("BROKER_TOKEN", "should-never-leak")
+    tenant, runtime, store = make(tmp_path)
+    propose(runtime, tests="def test_ok():\n    pass\n")
+    env = captured["env"]
+    assert set(env) == {"PATH", "HOME", "TMPDIR"}, env
+    assert all("leak" not in str(v) for v in env.values())
+
+
+@needs_bwrap
+def test_resource_ceilings_memory_and_filesize(tmp_path):
+    """The runner's rlimits, not goodwill, stop exhaustion: a 2GB allocation dies and a 100MB file write dies."""
+    tenant, runtime, store = make(tmp_path)
+    source = (
+        "def handle(tool, arguments):\n"
+        "    kind = arguments['kind']\n"
+        "    if kind == 'memory':\n"
+        "        blob = bytearray(2 * 1024 * 1024 * 1024)\n"
+        "        return len(blob)\n"
+        "    if kind == 'bigfile':\n"
+        "        with open('/tmp/big', 'wb') as fh:\n"
+        "            fh.write(b'x' * 100 * 1024 * 1024)\n"
+        "        return 'wrote'\n"
+        "    raise ValueError(kind)\n"
+    )
+    payload = json.loads(propose(runtime, source=source, tests="def test_ok():\n    pass\n")["output"])
+    store.activate("numstats", 1, payload["sha256"])
+    generated = next(t for t in tenant.toolsets if isinstance(t, GeneratedToolset))
+    mem = run(generated.call(runtime, "c9", "stats_summary", {"kind": "memory"}))
+    assert mem["is_error"], mem  # MemoryError inside the jail, or killed: either way it did not succeed
+    big = run(generated.call(runtime, "c10", "stats_summary", {"kind": "bigfile"}))
+    assert big["is_error"] and "wrote" not in big["output"]
+
+
+# ----- end to end through the real app: propose in a session, owner activates over HTTP, session invokes ---------------
+
+import time as _time
+
+
+@needs_bwrap
+def test_e2e_propose_activate_invoke_through_the_real_app(client, workspace, script):
+    """The whole governed path through the real HTTP API and runtime, not direct calls: a session proposes
+    model-written code (verified in the jail, INERT), the owner activates the exact hash over the owner API, and only
+    then can a session invoke it - every invocation a fresh networkless jail."""
+    from tests.conftest import of_type, run_turn, text
+    from tests.test_registry import tool_call
+
+    script([tool_call("p", "propose_tool", {
+        "name": "numstats",
+        "tools": MANIFEST,
+        "source": MATH_SOURCE,
+        "tests": MATH_TESTS,
+    }), text("proposed")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    with client.websocket_connect(f"/api/sessions/{session_id}/ws") as ws:
+        ws.receive_json()
+        results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "build the stats tool"), "ToolResult")}
+    proposal = json.loads(results["p"]["output"])
+    assert proposal["status"] == "verified" and proposal["verification"]["ok"] is True
+    # Inert before the owner's act: the registry shows it, but no session can call it.
+    listing = client.get("/api/registry/plugins").json()
+    assert listing["numstats"]["active_version"] is None
+    # Wrong hash refuses; the exact reviewed hash activates (re-verified in the jail at activation time).
+    bad = client.post("/api/registry/plugins/numstats/activate", json={"version": 1, "sha256": "0" * 64})
+    assert bad.status_code == 409
+    ok = client.post("/api/registry/plugins/numstats/activate", json={"version": 1, "sha256": proposal["sha256"]})
+    assert ok.status_code == 200, ok.text
+    # Now a NEW session can invoke it for real.
+    script([tool_call("u", "stats_summary", {"numbers": [2.0, 4.0]}), text("done")])
+    session2 = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    with client.websocket_connect(f"/api/sessions/{session2}/ws") as ws:
+        ws.receive_json()
+        results = {e["payload"]["tool_call_id"]: e["payload"]["return_value"] for e in of_type(run_turn(ws, "summarize 2 and 4"), "ToolResult")}
+    assert results["u"]["is_error"] is False
+    assert json.loads(results["u"]["output"])["mean"] == 3.0
+    # Revocation over the owner API takes the tool away immediately.
+    assert client.post("/api/registry/plugins/numstats/revoke").status_code == 200
+    assert client.get("/api/registry/plugins").json()["numstats"]["active_version"] is None

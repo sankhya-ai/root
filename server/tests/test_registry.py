@@ -316,7 +316,7 @@ def test_resolve_role_builtin_registry_and_unknown(tmp_path):
     assert resolved["scope"] == jobs.ROLES["reviewer"] and resolved["version"] is None
     universe = registry.role_universe(tenant, runtime, reg)
     reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
-    resolved = jobs.resolve_role(tenant, "docs_reviewer")
+    resolved = jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")
     assert resolved["version"] == 1 and "read_pdf" in resolved["scope"]
     with pytest.raises(jobs.JobError):
         jobs.resolve_role(tenant, "wizard")
@@ -328,10 +328,10 @@ def test_resolve_role_fails_when_a_named_composite_was_revoked(tmp_path):
     reg.promote_tool("pdf_digest")
     universe = registry.role_universe(tenant, runtime, reg)
     reg.create_role(role_spec(tools=["ReadFile", "pdf_digest"]), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
-    assert jobs.resolve_role(tenant, "docs_reviewer")["scope"]
+    assert jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")["scope"]
     reg.set_tool_status("pdf_digest", "revoked")
     with pytest.raises(jobs.JobError, match="no longer active"):
-        jobs.resolve_role(tenant, "docs_reviewer")  # fails at job start, not mid-job
+        jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")  # fails at job start, not mid-job
 
 
 def test_guides_for_registry_role(tmp_path):
@@ -440,7 +440,10 @@ def test_create_role_then_start_a_job_with_it(client, workspace, script):
     # Session-lifetime roles do not join the standing catalogue, but the owner can start a job with one at once.
     assert client.get("/api/jobs/roles").json()["registry_roles"] == {}
     script([text('{"summary": "no processes"}')])
-    created = client.post("/api/jobs", json={"goal": "report processes", "workspace": str(workspace), "role": "process_watcher"})
+    # ...but only when the owner names the creating session explicitly: an ambiguous bare name refuses.
+    refused = client.post("/api/jobs", json={"goal": "report processes", "workspace": str(workspace), "role": "process_watcher"})
+    assert refused.status_code != 200 and "source_session" in refused.text
+    created = client.post("/api/jobs", json={"goal": "report processes", "workspace": str(workspace), "role": "process_watcher", "source_session": session_id})
     assert created.status_code == 200, created.text
     item = created.json()
     assert item["role_version"] == 1 and item["scope_guarantee"]["level"] == "none"  # `process` is a code runner: honest guarantee
@@ -631,12 +634,26 @@ def test_role_version_is_pinned_at_job_creation_and_latest_wins(tmp_path):
     tenant, runtime, reg, _ = make(tmp_path)
     universe = registry.role_universe(tenant, runtime, reg)
     reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
-    assert jobs.resolve_role(tenant, "docs_reviewer")["version"] == 1
+    assert jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")["version"] == 1
     reg.create_role(role_spec(tools=["ReadFile"]), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
-    resolved = jobs.resolve_role(tenant, "docs_reviewer")
+    resolved = jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")
     assert resolved["version"] == 2 and resolved["scope"] == ["ReadFile"]  # a job start binds the version active at that moment
-    # Cross-session: roles resolve at owner level (POST /api/jobs is owner-authenticated); no session context is needed or used.
-    assert jobs.resolve_role(SimpleNamespace(registry=reg), "docs_reviewer")["version"] == 2
+    # Cross-session: owner-authenticated, but the private role must be named together with its creating session.
+    assert jobs.resolve_role(SimpleNamespace(registry=reg), "docs_reviewer", source_session="s1")["version"] == 2
+
+
+def test_a_private_role_needs_an_explicit_source_session(tmp_path):
+    """Owner authentication proves WHO asks; source_session proves WHICH private role they mean. No silent pickup."""
+    tenant, runtime, reg, _ = make(tmp_path)
+    universe = registry.role_universe(tenant, runtime, reg)
+    reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
+    with pytest.raises(jobs.JobError, match="source_session"):
+        jobs.resolve_role(tenant, "docs_reviewer")  # bare name: refused
+    with pytest.raises(jobs.JobError, match="source_session"):
+        jobs.resolve_role(tenant, "docs_reviewer", source_session="someone-else")
+    assert jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")["version"] == 1
+    reg.promote_role("docs_reviewer")
+    assert jobs.resolve_role(tenant, "docs_reviewer")["version"] == 1  # durable roles need no source_session
 
 
 def test_event_payloads_and_outputs_carry_no_hidden_data(tmp_path):
@@ -653,11 +670,11 @@ def test_a_job_can_pin_a_role_version(tmp_path):
     universe = registry.role_universe(tenant, runtime, reg)
     reg.create_role(role_spec(), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
     reg.create_role(role_spec(tools=["ReadFile"]), universe=universe, guide_names=set(guides.GUIDES), builtin_roles=set(jobs.ROLES), created_by="t", session="s1")
-    assert jobs.resolve_role(tenant, "docs_reviewer")["version"] == 2  # latest active by default
-    pinned = jobs.resolve_role(tenant, "docs_reviewer", version=1)
+    assert jobs.resolve_role(tenant, "docs_reviewer", source_session="s1")["version"] == 2  # latest active by default
+    pinned = jobs.resolve_role(tenant, "docs_reviewer", version=1, source_session="s1")
     assert pinned["version"] == 1 and "read_pdf" in pinned["scope"]
     with pytest.raises(jobs.JobError, match="v9"):
-        jobs.resolve_role(tenant, "docs_reviewer", version=9)
+        jobs.resolve_role(tenant, "docs_reviewer", version=9, source_session="s1")
 
 
 # ----- multi-process safety: the flock must make concurrent read-modify-write lose nothing ------------------------------

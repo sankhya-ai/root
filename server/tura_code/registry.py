@@ -784,7 +784,9 @@ class RegistryToolset:
         ]
 
     def handles(self, name: str) -> bool:
-        return name in MANAGEMENT_TOOLS
+        # MANAGEMENT_TOOLS is also the name-reservation list (it contains genplugins' propose_tool); this toolset
+        # only ANSWERS its own three.
+        return name in (CREATE_TOOL, CREATE_ROLE, LIST_TOOL)
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tenant = runtime.tenant
