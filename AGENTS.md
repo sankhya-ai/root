@@ -216,3 +216,44 @@ layer 2. A proposing job's turn continues without waiting, and the model-facing 
 say nothing comes back automatically. Until layer 2, a sub-job's result reaches the owner only, who can relay
 it. Cancel-during-wait semantics are undefined because waiting does not exist yet.
 
+### Parking and event-driven resume (mission layer 2, 2026-10-31)
+
+A job whose turn ends with delegated work outstanding PARKS (``waiting`` + ``waiting_on``) instead of finishing:
+the worker's task exits and no model calls run while parked. Outstanding means accepted children still running or
+parked, proposals still pending, or outcomes that settled but were never delivered (a child finishing while the
+parent's own turn was ending must not lose its outcome - that race is closed by parking on settled-undelivered
+work and delivering immediately).
+
+Events that resume a parked parent: a child reaching a final state, or the owner dismissing its proposal. Resume
+requires status ``waiting`` (check-and-set with no await between: asyncio-atomic), so a cancelled/stopped/finished
+parent is never resurrected. Deliverables are computed live against ``delivered``/``delivered_requests`` sets, so
+out-of-order completions batch into one resume turn and duplicate events find nothing new. The resume turn
+reattaches the PARKED session (its transcript is retained - a durable-mission resume, deliberately NOT the
+small-brief stateless worker, which is a later open layer) and injects child outcomes only: job id, role, goal,
+status, stopped_by, contract data - broker-redacted, never transcripts, credentials or session internals.
+
+Mission-wide budget, by ordinary code not model judgment: the job accumulates runtime-reported tokens/cost/wall
+across ALL turns (``used``). Before any resume turn, ``_gate`` refuses over-budget resumes
+(``mission_token_budget`` / ``mission_cost_budget`` / ``mission_timeout`` - parked time counts) and past
+``MAX_RESUMES`` (10). A gate stop records the undelivered outcome ids on the item: visible, never dropped. The
+parked session's record caps are clamped to the REMAINING budget before a resume (the launch spec rebuilds from
+the record, so a change respawns the process with tightened caps). The wall deadline also fires WHILE PARKED via
+a timer task: a still-parked job stops at the approved deadline without needing an event.
+
+RESIDUALS, stated not smoothed:
+
+* STEPS: the runtime reports no step count, so mission-wide steps cannot be measured; the step cap stays per-turn
+  and aggregate steps are bounded only indirectly by (1 + MAX_RESUMES) turns.
+* SPEND: the gate is hard at TURN granularity (no turn starts over budget). WITHIN a turn, token/cost enforcement
+  is the runtime's own and depends on provider-reported usage; cost caps additionally need price data (absent
+  under the host proxy). Accumulation is after-the-fact accounting - no hard monetary overshoot bound is claimed.
+* CRASH MID-RESUME: the host dying during a resume turn leaves the job ``interrupted`` (the existing crash rule,
+  unchanged) with undelivered outcomes named on the item. Nothing auto-resumes a mid-turn crash; the owner
+  inspects. Crash windows around delivery collapse to this same rule; a duplicate delivery cannot occur because
+  the waiting->running claim is atomic and ``delivered`` persists before any later park.
+* RESUME-TURN ERROR: a resume turn that errors presented nothing - outcomes stay ``undelivered`` and named, the
+  error is the job's status, and no automatic retry spends model calls.
+* SERVE jobs never park (their app dies with the turn); their proposals stay owner-visible results only.
+* A parent TERMINAL before its proposal is accepted: the accepted child runs standalone, lineage recorded, no
+  resume (resume requires ``waiting``).
+

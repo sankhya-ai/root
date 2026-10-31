@@ -11,6 +11,7 @@ F. a session PROPOSES a job -> nothing starts -> the owner's accept runs exactly
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import time
@@ -20,7 +21,7 @@ import pytest
 
 from conftest import of_type, requires_runtime, run_turn, text, tool_call
 
-from tura_code import genplugins, jobs
+from tura_code import genplugins, jobs, launcher
 
 MATH_SOURCE = (
     "import statistics\n\n\n"
@@ -185,6 +186,44 @@ def _wait_job(client, job_id, timeout=30):
             return item
         time.sleep(0.2)
     raise AssertionError("job did not finish")
+
+
+def _wait_terminal(client, job_id, timeout=30):
+    # Wait until a job is neither running nor parked.
+    end = time.time() + timeout
+    while time.time() < end:
+        item = client.get(f"/api/jobs/{job_id}").json()
+        if item["status"] not in ("running", "waiting"):
+            return item
+        time.sleep(0.2)
+    raise AssertionError("job did not settle")
+
+
+def _wait_parked(client, job_id, resumes=0, timeout=30):
+    # Wait until a job is parked, optionally after a given number of resumes.
+    end = time.time() + timeout
+    while time.time() < end:
+        item = client.get(f"/api/jobs/{job_id}").json()
+        if item["status"] == "waiting" and int(item.get("resumes") or 0) == resumes:
+            return item
+        time.sleep(0.2)
+    raise AssertionError(f"job did not park with resumes={resumes}")
+
+
+def _proposer_role(client, workspace, script, name="builder"):
+    # A session-lifetime role that may propose jobs (the one management tool a role can name).
+    client.put("/api/settings", json={"dynamic_tools": True})
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    script([tool_call("r", "create_role", {"name": name, "description": "Builds and may ask for help.", "tools": ["ReadFile", "Grep", "recommend_job"]}), text("done")])
+    _, results = _turn_results(client, workspace, script, session_id, "make a role")
+    assert results["r"]["is_error"] is False
+    return session_id
+
+
+def _prompt_events(client, session_id):
+    page = client.get(f"/api/sessions/{session_id}/events").json()
+    events = page.get("events", page) if isinstance(page, dict) else page
+    return [e for e in events if e.get("type") == "UserPrompt"]
 
 
 @requires_runtime
@@ -568,21 +607,29 @@ def test_scenario_g_job_proposes_sub_job_with_lineage(client, workspace, script)
     script([tool_call("r", "create_role", {"name": "builder", "description": "Builds and may ask for help.", "tools": ["ReadFile", "Grep", "recommend_job"]}), text("done")])
     _, results = _turn_results(client, workspace, script, session_id, "make a role")
     assert results["r"]["is_error"] is False
-    script([tool_call("j", "recommend_job", {"goal": "check the utils", "role": "explorer", "reason": "parallel look"}), text("proposed")])
+    script([tool_call("j", "recommend_job", {"goal": "check the utils", "role": "explorer", "reason": "parallel look"}),
+            text("proposed"), text("parent final: utils checked")])
     parent = client.post("/api/jobs", json={"goal": "build the thing", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
-    parent_item = _wait_job(client, parent["id"])
-    assert parent_item["status"] != "running"
+    parked = _wait_parked(client, parent["id"])  # the turn ended with the proposal open: the worker parked, no model calls
     requests = client.get("/api/job-requests").json()["requests"]
     assert len(requests) == 1
     req = requests[0]
     assert req["parent_job_id"] == parent["id"] and req["depth"] == 1
     assert req["escalation"] is True  # explorer's Glob is outside the builder role's tools: the owner must see that
-    script([text("Checked.")])
+    assert parked["waiting_on"]["requests"] == [req["id"]]
+    script([text("Checked. Done: utils are fine.")])
     accepted = client.post(f"/api/job-requests/{req['id']}/accept")
     assert accepted.status_code == 200, accepted.text
     child = accepted.json()["job"]
     assert child.get("parent_job_id") == parent["id"] and child.get("depth") == 1
-    _wait_job(client, child["id"])
+    _wait_terminal(client, child["id"])
+    # The child's completion resumed the parked parent ONCE, delivered the outcome, and the parent finished.
+    done = _wait_terminal(client, parent["id"])
+    assert done["status"] == "finished", done
+    assert done["resumes"] == 1 and done["delivered"] == [child["id"]]
+    prompts = _prompt_events(client, parked["session"])
+    resume = [e for e in prompts if "Delegated work you asked for" in (e.get("payload", {}).get("text") or "")]
+    assert len(resume) == 1 and "check the utils" in resume[0]["payload"]["text"]
 
 
 @requires_runtime
@@ -642,3 +689,252 @@ def test_chat_session_proposal_carries_no_lineage(tmp_path):
     payload, problem = jobs.request_job(tenant, runtime, {"goal": "g", "role": "explorer"})
     assert problem is None
     assert payload["parent_job_id"] == "" and payload["depth"] == 0 and payload["escalation"] is False
+
+
+# ----- Layer 2: parking and event-driven resume (durable missions, disposable workers) -----------------------------
+
+
+@requires_runtime
+def test_scenario_h_cancel_while_parked_never_resumes(client, workspace, script):
+    """The owner cancels a parked parent: no worker is running, the parked state ends, and a later child
+    completion does NOT resurrect it."""
+    session_id = _proposer_role(client, workspace, script)
+    script([tool_call("j", "recommend_job", {"goal": "side quest", "role": "explorer", "reason": "r"}),
+            text("proposed"), text("must never be played")])
+    parent = client.post("/api/jobs", json={"goal": "main work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    _wait_parked(client, parent["id"])
+    req = client.get("/api/job-requests").json()["requests"][0]
+    cancelled = client.post(f"/api/jobs/{parent['id']}/cancel").json()
+    assert cancelled["status"] == "stopped" and cancelled["stopped_by"] == "cancelled"
+    script([text("child done")])
+    child = client.post(f"/api/job-requests/{req['id']}/accept").json()["job"]
+    _wait_terminal(client, child["id"])
+    time.sleep(1.5)  # long enough for any (wrong) resume to fire
+    item = client.get(f"/api/jobs/{parent['id']}").json()
+    assert item["status"] == "stopped" and item["resumes"] == 0 and item["delivered"] == []
+
+
+@requires_runtime
+def test_scenario_i_dismissed_proposals_resume_parent(client, workspace, script):
+    """A dismissal is an outcome: each dismiss resumes the parked parent once; with nothing left outstanding the
+    parent finishes instead of parking forever."""
+    session_id = _proposer_role(client, workspace, script)
+    script([
+        tool_call("j1", "recommend_job", {"goal": "part one", "role": "explorer", "reason": "r"}),
+        tool_call("j2", "recommend_job", {"goal": "part two", "role": "explorer", "reason": "r"}),
+        text("proposed both"), text("first dismissal seen"), text("second dismissal seen"),
+    ])
+    parent = client.post("/api/jobs", json={"goal": "two-part work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    _wait_parked(client, parent["id"])
+    reqs = client.get("/api/job-requests").json()["requests"]
+    assert len(reqs) == 2
+    client.post(f"/api/job-requests/{reqs[0]['id']}/dismiss")
+    parked = _wait_parked(client, parent["id"], resumes=1)  # resumed once, parked again on the second proposal
+    assert parked["delivered_requests"] == [reqs[0]["id"]]
+    client.post(f"/api/job-requests/{reqs[1]['id']}/dismiss")
+    done = _wait_terminal(client, parent["id"])
+    assert done["status"] == "finished" and done["resumes"] == 2
+    assert done["delivered_requests"] == [reqs[0]["id"], reqs[1]["id"]]
+
+
+@requires_runtime
+def test_scenario_j_cancelled_child_outcome_delivered(client, workspace, script, monkeypatch):
+    """A child the owner CANCELS is still an outcome: the parked parent is resumed with the cancelled status.
+    (The provider turns slow for the child via a local mock, so the child is genuinely mid-turn at cancel time.)"""
+    from mock_provider import MockProvider
+
+    session_id = _proposer_role(client, workspace, script)
+    script([tool_call("j", "recommend_job", {"goal": "long check", "role": "explorer", "reason": "r"}),
+            text("proposed")])
+    parent = client.post("/api/jobs", json={"goal": "main work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
+    _wait_parked(client, parent["id"])
+    req = client.get("/api/job-requests").json()["requests"][0]
+    monkeypatch.delenv(launcher.SCRIPTED_ECHO_ENV, raising=False)  # the child and the resume turn use the mock provider
+    with MockProvider([{"delay": 10, "text": "late child reply"}, {"text": "parent final: noted the cancel"}]) as mock:
+        client.put("/api/settings", json={"base_url": mock.base_url, "openrouter_api_key": "sk-test-mock", "model": "mock/model"})
+        child = client.post(f"/api/job-requests/{req['id']}/accept").json()["job"]
+        end = time.time() + 10
+        while time.time() < end:  # the child's turn has genuinely started (and its process resolved its provider)
+            if _prompt_events(client, child["session"]):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("child turn never started")
+        client.post(f"/api/jobs/{child['id']}/cancel")
+        cancelled = _wait_terminal(client, child["id"])
+        assert cancelled["status"] == "stopped" and cancelled["stopped_by"] == "cancelled", cancelled
+        done = _wait_terminal(client, parent["id"])
+    assert done["status"] == "finished", done
+    assert done["resumes"] == 1 and done["delivered"] == [child["id"]]
+    prompts = _prompt_events(client, done["session"])
+    resume = [e for e in prompts if "Delegated work you asked for" in (e.get("payload", {}).get("text") or "")]
+    assert len(resume) == 1
+    body = resume[0]["payload"]["text"]
+    assert child["id"] in body and '"status": "stopped"' in body and '"stopped_by": "cancelled"' in body
+
+
+@requires_runtime
+def test_scenario_k_parked_mission_wall_deadline_fires(client, workspace, script):
+    """The approved wall clock includes parked time: with no events at all, a still-parked job stops at the
+    deadline instead of lingering."""
+    session_id = _proposer_role(client, workspace, script)
+    script([tool_call("j", "recommend_job", {"goal": "never accepted", "role": "explorer", "reason": "r"}), text("proposed")])
+    parent = client.post("/api/jobs", json={"goal": "main work", "workspace": str(workspace), "role": "builder",
+                                            "source_session": session_id, "budget": {"timeout_seconds": 3}}).json()
+    _wait_parked(client, parent["id"])
+    done = _wait_terminal(client, parent["id"], timeout=20)
+    assert done["status"] == "stopped" and done["stopped_by"] == "mission_timeout", done
+
+
+# ----- Layer 2 units: gate, clamp, delivery dedup, recovery sweep, compact+redacted payload -------------------------
+
+
+def _jobs_with(tmp_path, items=(), requests=()):
+    store = SimpleNamespace(list=lambda status="": [r for r in requests if not status or r.get("status") == status])
+    j = jobs.Jobs(SimpleNamespace(root=tmp_path, job_requests=store))
+    for it in items:
+        j.items[it["id"]] = it
+    return j
+
+
+def test_mission_budget_gate(tmp_path):
+    j = _jobs_with(tmp_path)
+    base = {"id": "p", "budget": {"max_tokens": 100, "max_cost_usd": 1.0, "timeout_seconds": 60},
+            "started": time.time(), "resumes": 0, "used": {}}
+    assert j._gate({**base, "used": {"tokens": 50, "cost_usd": 0.5}}) is None
+    assert j._gate({**base, "used": {"tokens": 100}}) == "mission_token_budget"   # accumulated over ALL turns
+    assert j._gate({**base, "used": {"cost_usd": 1.5}}) == "mission_cost_budget"
+    assert j._gate({**base, "started": time.time() - 120}) == "mission_timeout"   # parked time counts
+    assert j._gate({**base, "resumes": jobs.MAX_RESUMES}) == "resume_cap"
+
+
+def test_clamp_record_tightens_to_remaining():
+    rec = SimpleNamespace(max_tokens=0, max_cost_usd=0.0)
+    item = {"budget": {"max_tokens": 100, "max_cost_usd": 2.0}, "used": {"tokens": 30, "cost_usd": 0.5}}
+    jobs.Jobs._clamp_record(item, rec)
+    assert rec.max_tokens == 70 and rec.max_cost_usd == 1.5  # the resume turn's ENFORCED caps are the remainder
+
+
+def test_deliverables_dedup_and_settled_semantics(tmp_path):
+    reqs = [{"id": "q1", "parent_job_id": "p", "status": "dismissed"}, {"id": "q2", "parent_job_id": "p", "status": "pending"}]
+    kids = [{"id": "c2", "parent_job_id": "p", "status": "finished"},
+            {"id": "c1", "parent_job_id": "p", "status": "waiting"},
+            {"id": "c3", "parent_job_id": "p", "status": "error: boom"}]
+    parent = {"id": "p", "delivered": ["c2"], "delivered_requests": []}
+    j = _jobs_with(tmp_path, items=[parent, *kids], requests=reqs)
+    children, requests = j._deliverables(j.items["p"])
+    assert [c["id"] for c in children] == ["c3"]   # c2 already delivered; c1 still parked: no outcome yet
+    assert [r["id"] for r in requests] == ["q1"]   # a pending proposal is not an outcome
+
+
+async def test_maybe_resume_gate_stop_records_undelivered(tmp_path):
+    parent = {"id": "p", "session": "s", "status": "waiting", "resumes": jobs.MAX_RESUMES, "budget": {}, "used": {},
+              "delivered": [], "delivered_requests": [], "started": time.time()}
+    child = {"id": "c", "parent_job_id": "p", "status": "finished", "result": None, "role": "explorer", "goal": "g"}
+    j = _jobs_with(tmp_path, items=[parent, child])
+    await j._maybe_resume("p")
+    p = j.items["p"]
+    assert p["status"] == "stopped" and p["stopped_by"] == "resume_cap"
+    assert p["undelivered"] == ["c"] and j.tasks == {}  # named, never silently dropped; no turn launched
+
+
+async def test_maybe_resume_never_resurrects_a_decided_job(tmp_path):
+    parent = {"id": "p", "status": "stopped", "delivered": [], "delivered_requests": []}
+    child = {"id": "c", "parent_job_id": "p", "status": "finished"}
+    j = _jobs_with(tmp_path, items=[parent, child])
+    await j._maybe_resume("p")
+    assert j.items["p"]["status"] == "stopped" and j.tasks == {}
+
+
+async def test_recovery_sweep_after_restart(monkeypatch, tmp_path):
+    """Host restart: running jobs are marked interrupted (existing rule), PARKED jobs survive, and outcomes that
+    settled while the host was down are delivered by the sweep."""
+    d = tmp_path / "jobs"
+    d.mkdir()
+    (d / "p.json").write_text(json.dumps({"id": "p", "session": "sess-p", "status": "waiting", "budget": {}, "used": {},
+                                          "resumes": 0, "delivered": [], "delivered_requests": [], "started": time.time()}))
+    (d / "c.json").write_text(json.dumps({"id": "c", "parent_job_id": "p", "status": "running", "started": time.time()}))
+    (d / "r.json").write_text(json.dumps({"id": "r", "session": "s", "status": "running", "started": time.time()}))
+    calls = []
+
+    async def fake_resume(self, pid):
+        calls.append(pid)
+
+    monkeypatch.setattr(jobs.Jobs, "_maybe_resume", fake_resume)
+    j = jobs.Jobs(SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": [])))
+    assert j.items["r"]["status"] == "interrupted" and j.items["c"]["status"] == "interrupted"  # the existing crash rule
+    assert j.items["p"]["status"] == "waiting"  # parked is the durable state: nothing was mid-turn
+    await asyncio.sleep(0.2)  # the sweep scheduled at construction runs
+    assert calls == ["p"]  # the interrupted child's outcome is deliverable to the parked parent
+
+
+async def test_resume_drive_delivers_compact_redacted_outcome(tmp_path):
+    """The resume turn gets child OUTCOMES only - redacted contract data, no transcripts, no session internals -
+    on the parent's own parked session."""
+    class FakeRuntime:
+        def __init__(self):
+            self._turn_done = asyncio.Event()
+            self.record = SimpleNamespace(id="sess-p", max_tokens=0, max_cost_usd=0.0, last_status="finished")
+            self.last_budget, self.last_reply, self.last_error, self.last_files = {}, "done", "", []
+            self.prompts = []
+
+        async def prompt(self, text, attachments=None):
+            self.prompts.append(text)
+            self._turn_done.set()
+
+        async def wait_turn(self, timeout=None):
+            return None
+
+        def save_record(self):
+            return None
+
+    fake = FakeRuntime()
+    broker = SimpleNamespace(redact_json=lambda v: json.loads(json.dumps(v).replace("s3cr3t", "[redacted]")))
+    tenant = SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": []),
+                             sessions=SimpleNamespace(get=lambda sid: fake), broker=broker,
+                             proxy=SimpleNamespace(enabled=False))
+    j = _jobs_with(tmp_path)
+    j.tenant = tenant
+    parent = {"id": "p", "session": "sess-p", "status": "running", "budget": {}, "used": {}, "resumes": 1,
+              "delivered": [], "delivered_requests": [], "started": time.time(), "contract": ["summary"], "credentials": []}
+    child = {"id": "c", "session": "sess-child", "parent_job_id": "p", "status": "finished", "role": "explorer",
+             "goal": "g", "result": {"contract": {"data": {"note": "s3cr3t found"}}}}
+    j.items.update({"p": parent, "c": child})
+    await j._resume_drive(parent, [child], [])
+    assert parent["status"] == "finished" and parent["delivered"] == ["c"]
+    prompt = fake.prompts[0]
+    assert "[redacted] found" in prompt and "s3cr3t" not in prompt
+    assert "sess-child" not in prompt  # outcomes only, never the child's session internals
+    assert "summary" in prompt  # the mission's contract reminder survives the resume
+
+
+async def test_resume_turn_error_is_not_a_delivery(tmp_path):
+    # A resume turn that ERRORS (provider/launch failure) presented nothing: the outcomes stay undelivered and
+    # named, the error is visible, and nothing retries on its own.
+    class FakeRuntime:
+        def __init__(self):
+            self._turn_done = asyncio.Event()
+            self.record = SimpleNamespace(id="sess-p", max_tokens=0, max_cost_usd=0.0, last_status="error")
+            self.last_budget, self.last_reply, self.last_error, self.last_files = {}, "", "provider exploded", []
+
+        async def prompt(self, text, attachments=None):
+            self._turn_done.set()
+
+        async def wait_turn(self, timeout=None):
+            return None
+
+        def save_record(self):
+            return None
+
+    fake = FakeRuntime()
+    tenant = SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": []),
+                             sessions=SimpleNamespace(get=lambda sid: fake),
+                             broker=SimpleNamespace(redact_json=lambda v: v), proxy=SimpleNamespace(enabled=False))
+    j = _jobs_with(tmp_path)
+    j.tenant = tenant
+    parent = {"id": "p", "session": "sess-p", "status": "running", "budget": {}, "used": {}, "resumes": 1,
+              "delivered": [], "delivered_requests": [], "started": time.time(), "contract": [], "credentials": []}
+    child = {"id": "c", "parent_job_id": "p", "status": "finished", "role": "explorer", "goal": "g", "result": None}
+    j.items.update({"p": parent, "c": child})
+    await j._resume_drive(parent, [child], [])
+    assert parent["status"].startswith("error") and parent["delivered"] == [] and parent["undelivered"] == ["c"]

@@ -300,6 +300,9 @@ MAX_REQUESTS_KEPT = 50
 #: nest and how many PENDING proposals one job may have open. The owner's accept stays the only start path either way.
 MAX_PROPOSAL_DEPTH = 3
 MAX_PENDING_PER_PARENT = 5
+#: How many times one parked job may be resumed by resolved delegated work. Every resume is a real model turn,
+#: so the loop of propose -> park -> resume is bounded by ordinary code, not by the model's good judgment.
+MAX_RESUMES = 10
 
 
 class JobRequestStore:
@@ -477,7 +480,9 @@ class Jobs:
         self.items: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.dir = Path(tenant.root) / "jobs"
+        self._sweep_pending = False
         self._recover()
+        self._schedule(self.resume_sweep())  # outcomes that settled while the host was down are delivered now
 
     # ----- persistence: a job outlives the process that ran it ---------------
 
@@ -622,6 +627,11 @@ class Jobs:
             "started": time.time(), "budget": b.model_dump(), "scope": list(scope), "scope_guarantee": catalogue.guarantee(self.tenant, runtime.record),
             "handoff_from": spec.handoff_from, "result": None,
             "credentials": spec.credentials,
+            # Mission layer: the contract reminder for resume turns, accumulated usage across ALL turns of this
+            # job (the mission-wide budget), how often it was resumed, and which delegated outcomes were delivered.
+            "contract": list(spec.contract or []),
+            "used": {"tokens": 0, "cost_usd": 0.0, "wall_ms": 0},
+            "resumes": 0, "delivered": [], "delivered_requests": [],
         }
         item["credential_guarantee"] = credential_guarantee(spec.credentials, {"level": "none"} if spec.serve else item["scope_guarantee"], protected)
         item["isolation"] = spec.isolation or None
@@ -644,6 +654,225 @@ class Jobs:
         self.tasks[job_id] = asyncio.create_task(self._drive(item, runtime, spec, handoff))
         return item
 
+    # ----- mission layer: parking and event-driven resume -------------------------------
+
+    @staticmethod
+    def _settled(item: dict[str, Any]) -> bool:
+        """A final outcome: not running and not parked. A parked job has no outcome yet."""
+        return item.get("status") not in ("running", "waiting")
+
+    @staticmethod
+    def _used_add(item: dict[str, Any], runtime) -> None:
+        """Accumulate one turn's runtime-reported accounting onto the job, so the mission budget spans every
+        turn (initial + resumes) instead of resetting per turn."""
+        used = item.setdefault("used", {"tokens": 0, "cost_usd": 0.0, "wall_ms": 0})
+        last = runtime.last_budget or {}
+        used["tokens"] = int(used.get("tokens") or 0) + int(last.get("tokens_used") or 0)
+        used["cost_usd"] = float(used.get("cost_usd") or 0.0) + float(last.get("cost_used_usd") or 0.0)
+        used["wall_ms"] = int(used.get("wall_ms") or 0) + int(last.get("elapsed_millis") or 0)
+
+    async def _await_turn(self, item: dict[str, Any], runtime, wall_seconds: float) -> None:
+        """Wait out one turn with the host-side wall backstop: even a hung turn is cancelled and recorded."""
+        deadline = time.monotonic() + wall_seconds + BACKSTOP_SECONDS
+        while not runtime._turn_done.is_set():
+            if time.monotonic() > deadline:
+                item["stopped_by"] = "timeout_backstop"
+                await runtime.cancel()
+                break
+            await asyncio.sleep(0.2)
+        await runtime.wait_turn(30)
+
+    def _park(self, item: dict[str, Any]) -> bool:
+        """Park a job whose turn ended while delegated work is outstanding: ACCEPTED children still running or
+        parked on their own help, proposals still waiting for the owner, or outcomes that settled but were never
+        delivered (a child that finished while this job's own turn was still ending - that race must not lose the
+        outcome). Parking ends the worker's turn: no model calls run while parked; a completion, a dismissal or
+        the owner resumes it. Returns True when parked."""
+        inflight = [j["id"] for j in self.items.values()
+                    if j.get("parent_job_id") == item["id"] and j.get("status") in ("running", "waiting")]
+        pending = [r["id"] for r in self.tenant.job_requests.list(status="pending") if r.get("parent_job_id") == item["id"]]
+        new_children, new_requests = self._deliverables(item)
+        if not inflight and not pending and not new_children and not new_requests:
+            return False
+        item["status"] = "waiting"
+        item["waiting_on"] = {"children": inflight, "requests": pending}
+        item["note"] = ("Parked: waiting on delegated work. No model calls run while parked; a completion, "
+                        "a dismissal or the owner resumes it.")
+        if new_children or new_requests:
+            self._schedule(self._maybe_resume(item["id"]))  # resolved before the park: deliver it right away
+        budget = item.get("budget") or {}
+        if budget.get("timeout_seconds"):
+            # The approved wall includes parked time, so the deadline fires while parked - not just at the next event.
+            self._schedule(self._wall_deadline(item["id"], float(item.get("started") or time.time()) + float(budget["timeout_seconds"])))
+        return True
+
+    async def _wall_deadline(self, job_id: str, deadline: float) -> None:
+        # The mission wall clock fires WHILE PARKED: waiting spends nothing, but at the approved deadline a
+        # still-parked job stops instead of lingering for an event that may never come.
+        await asyncio.sleep(max(0.0, deadline - time.time()))
+        item = self.items.get(job_id)
+        if item is None or item.get("status") != "waiting":
+            return  # resumed or resolved meanwhile; a resume turn carries its own remaining-wall deadline
+        item["status"] = "stopped"
+        item["stopped_by"] = self._gate(item) or "mission_timeout"
+        item["finished"] = time.time()
+        item.pop("waiting_on", None)
+        children, requests = self._deliverables(item)
+        if children or requests:
+            item["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+        self._save(item)
+
+    def _deliverables(self, parent: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Settled child outcomes and dismissed proposals not yet delivered to this parent. Computed live, so
+        out-of-order completions batch into one resume and a duplicate event finds nothing new."""
+        delivered = set(parent.get("delivered") or [])
+        children = [j for j in self.items.values()
+                    if j.get("parent_job_id") == parent["id"] and self._settled(j) and j["id"] not in delivered]
+        delivered_reqs = set(parent.get("delivered_requests") or [])
+        requests = [r for r in self.tenant.job_requests.list()
+                    if r.get("parent_job_id") == parent["id"] and r.get("status") == "dismissed" and r["id"] not in delivered_reqs]
+        return children, requests
+
+    @staticmethod
+    def _gate(parent: dict[str, Any]) -> str | None:
+        """The mission-wide budget gate, checked by ordinary code before ANY resume turn starts: accumulated
+        usage over all turns against the budget the owner approved once. A resume never begins over budget.
+        Wall clock counts from the job's start and includes parked time."""
+        budget = parent.get("budget") or {}
+        used = parent.get("used") or {}
+        if budget.get("max_tokens") and int(used.get("tokens") or 0) >= int(budget["max_tokens"]):
+            return "mission_token_budget"
+        if budget.get("max_cost_usd") and float(used.get("cost_usd") or 0.0) >= float(budget["max_cost_usd"]):
+            return "mission_cost_budget"
+        if budget.get("timeout_seconds") and time.time() - float(parent.get("started") or time.time()) >= float(budget["timeout_seconds"]):
+            return "mission_timeout"
+        if int(parent.get("resumes") or 0) >= MAX_RESUMES:
+            return "resume_cap"
+        return None
+
+    @staticmethod
+    def _clamp_record(item: dict[str, Any], record) -> None:
+        """Tighten the parked session's per-turn caps to what the mission budget still allows. The launch spec is
+        rebuilt from the record each turn (a change respawns the process), so these are ENFORCED caps on the
+        remaining budget, not documentation. Wall clock is enforced host-side per resume turn instead (the drive's
+        deadline), and steps stay per-turn: the runtime reports no step count, so a mission-wide step total cannot
+        be measured - that residual is stated, not smoothed over."""
+        budget = item.get("budget") or {}
+        used = item.get("used") or {}
+        if budget.get("max_tokens"):
+            record.max_tokens = max(1, int(budget["max_tokens"]) - int(used.get("tokens") or 0))
+        if budget.get("max_cost_usd"):
+            record.max_cost_usd = max(0.0, float(budget["max_cost_usd"]) - float(used.get("cost_usd") or 0.0))
+
+    def _schedule(self, coro) -> None:
+        try:
+            asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            self._sweep_pending = True  # no loop (tenant built synchronously): the next API read sweeps
+
+    def _notify_parent(self, item: dict[str, Any]) -> None:
+        """A job reached a FINAL state: if a parked parent delegated to it, deliver the outcome now."""
+        parent_id = item.get("parent_job_id")
+        if parent_id and self._settled(item):
+            self._schedule(self._maybe_resume(parent_id))
+
+    async def _maybe_resume(self, parent_id: str) -> None:
+        """Resume a parked parent when - and only when - there is something new to tell it. Never resurrects a
+        decided job: anything but `waiting` (running, stopped, cancelled, error) returns untouched."""
+        parent = self.items.get(parent_id)
+        if parent is None or parent.get("status") != "waiting":
+            return
+        children, requests = self._deliverables(parent)
+        if not children and not requests:
+            return  # a duplicate or out-of-order event with nothing new
+        problem = self._gate(parent)
+        if problem:
+            # Over the mission budget (or the resume cap): stop instead of spending. The undelivered outcomes
+            # stay named on the item - visible, never silently dropped.
+            parent["status"] = "stopped"
+            parent["stopped_by"] = problem
+            parent["finished"] = time.time()
+            parent["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+            self._save(parent)
+            return
+        parent["status"] = "running"  # claimed: no await between the status check and this line (asyncio-atomic)
+        parent["resumes"] = int(parent.get("resumes") or 0) + 1
+        parent.pop("waiting_on", None)
+        parent.pop("note", None)
+        self._save(parent)
+        self.tasks[parent["id"]] = asyncio.create_task(self._resume_drive(parent, children, requests))
+
+    async def resume_sweep(self) -> None:
+        """Deliver outcomes that settled while no loop was available (host restart, synchronous tenant build).
+        Parking is the durable state - no worker was mid-turn while parked, so recovery loses nothing."""
+        for item in list(self.items.values()):
+            if item.get("status") == "waiting":
+                await self._maybe_resume(item["id"])
+        self._sweep_pending = False
+
+    async def _resume_drive(self, item: dict[str, Any], children: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
+        """One resume turn on the parked job's OWN session (reattached; its transcript is retained - this is a
+        durable-mission resume, NOT the stateless small-brief worker, which is a later, open layer). The injected
+        context is compact by construction: child outcomes only - ids, roles, goals, statuses, contract data -
+        never their transcripts, and redacted against the credential broker."""
+        runtime = self.tenant.sessions.get(item["session"])
+        self._clamp_record(item, runtime.record)
+        runtime.save_record()
+        parts = ["Delegated work you asked for has resolved. Outcomes follow - roles, goals, statuses and contract "
+                 "data only; check anything you rely on. No child transcript or credential is included."]
+        for child in children:
+            outcome = {"job_id": child["id"], "role": child.get("role"), "goal": child.get("goal"), "status": child.get("status"),
+                       "stopped_by": child.get("stopped_by"),
+                       "contract": (((child.get("result") or {}).get("contract") or {}).get("data"))}
+            parts.append(json.dumps(self.tenant.broker.redact_json(outcome), indent=2, default=str))
+        for req in requests:
+            parts.append(json.dumps({"request_id": req["id"], "role": req.get("role"), "goal": req.get("goal"),
+                                     "status": "dismissed by the owner - it will not run"}, indent=2))
+        prompt = "\n\n".join(parts)
+        if item.get("contract"):
+            prompt += f"\n\nEnd your final reply with one JSON object in a ```json block with the keys: {', '.join(item['contract'])}."
+        proxy = self.tenant.proxy
+        try:
+            await runtime.prompt(prompt)
+            budget = item.get("budget") or {}
+            remaining_wall = max(1.0, float(budget.get("timeout_seconds") or 900) - (time.time() - float(item.get("started") or time.time())))
+            await self._await_turn(item, runtime, remaining_wall)
+            if runtime.record.last_status == "budget_exhausted" and not item.get("stopped_by"):
+                item["stopped_by"] = which_limit(runtime.last_budget)
+            item["budget_used"] = runtime.last_budget or None  # the runtime's own accounting for THIS turn
+            item["result"] = {"reply": runtime.last_reply, "error": runtime.last_error,
+                              "contract": check_contract(runtime.last_reply, list(item.get("contract") or [])),
+                              "files_touched": runtime.last_files}
+            if item.get("credentials"):
+                item["result"] = self.tenant.broker.redact_json(item["result"])
+            self._used_add(item, runtime)
+            if runtime.record.last_status == "error":
+                # The turn never presented anything (provider or launch failure): NOT delivered. The outcomes stay
+                # named as undelivered, the error is visible, and no automatic retry spends model calls on its own.
+                item["status"] = f"error: {runtime.last_error or 'resume turn failed'}"[:300]
+                item["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+            else:
+                # Delivered only after a turn that genuinely ran (finished, stopped or budget-cut): the outcomes
+                # were in front of the model. A host crash MID-turn leaves them undelivered and the job
+                # `interrupted` - visible, never silently lost.
+                item.setdefault("delivered", []).extend(c["id"] for c in children)
+                item.setdefault("delivered_requests", []).extend(r["id"] for r in requests)
+                if item.get("stopped_by") or not self._park(item):
+                    item["status"] = "stopped" if item.get("stopped_by") else (runtime.record.last_status or "finished")
+        except Exception as error:  # noqa: BLE001 - a failed resume is recorded, never raised
+            item["status"] = f"error: {error}"[:300]
+            item["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+        finally:
+            # Provider-reported tokens from the host proxy, when it carried the calls; None otherwise (never estimated).
+            item["proxy_tokens_reported"] = proxy.used(runtime.record.id) if proxy.enabled else None
+            if self._settled(item):
+                item["finished"] = time.time()
+            self._save(item)
+            if self.tasks.get(item["id"]) is asyncio.current_task():
+                self.tasks.pop(item["id"], None)  # a resume task may already hold the slot: never pop its entry
+            self._notify_parent(item)
+
     async def _drive(self, item: dict[str, Any], runtime, spec: NewJob, handoff: str) -> None:
         prompt = spec.goal
         if handoff:
@@ -664,14 +893,7 @@ class Jobs:
                     raise JobError(f"The app did not come up: {problem}")
                 prompt += f"\n\nThe app is already running for you at {url} (the host started it and will stop it when you finish)."
             await runtime.prompt(prompt)
-            deadline = time.monotonic() + spec.budget.timeout_seconds + BACKSTOP_SECONDS
-            while not runtime._turn_done.is_set():
-                if time.monotonic() > deadline:
-                    item["stopped_by"] = "timeout_backstop"
-                    await runtime.cancel()
-                    break
-                await asyncio.sleep(0.2)
-            await runtime.wait_turn(30)
+            await self._await_turn(item, runtime, spec.budget.timeout_seconds)
             reply = runtime.last_reply
             error = runtime.last_error
             if runtime.record.last_status == "budget_exhausted" and not item.get("stopped_by"):
@@ -688,7 +910,11 @@ class Jobs:
                 item["result"]["evidence_check"] = guides.check_findings(data, Path(spec.workspace), runtime.scratch_dir / "inspect", prior)
             if spec.credentials:  # no reply, error or handoff carries a credential value this job could use
                 item["result"] = self.tenant.broker.redact_json(item["result"])
-            item["status"] = "stopped" if item.get("stopped_by") else (runtime.record.last_status or "finished")
+            self._used_add(item, runtime)
+            # A job with outstanding delegated work PARKS instead of finishing (serve jobs never park: their app
+            # would stop with the turn, so their proposals stay owner-visible results only - stated, not hidden).
+            if item.get("stopped_by") or spec.serve or not self._park(item):
+                item["status"] = "stopped" if item.get("stopped_by") else (runtime.record.last_status or "finished")
         except Exception as error:  # noqa: BLE001 - a failed job is recorded, never raised
             item["status"] = f"error: {error}"[:300]
         finally:
@@ -698,9 +924,12 @@ class Jobs:
                 self._save(item)
             # Provider-reported tokens from the host proxy, when it carried the calls; None otherwise (never estimated).
             item["proxy_tokens_reported"] = proxy.used(runtime.record.id) if proxy.enabled else None
-            item["finished"] = time.time()
+            if self._settled(item):
+                item["finished"] = time.time()
             self._save(item)
-            self.tasks.pop(item["id"], None)
+            if self.tasks.get(item["id"]) is asyncio.current_task():
+                self.tasks.pop(item["id"], None)  # a resume task may already hold the slot: never pop its entry
+            self._notify_parent(item)
 
     async def _serve(self, serve: Serve, workspace: Path, item: dict[str, Any], isolated: bool = False):
         import shlex
@@ -769,6 +998,14 @@ class Jobs:
         if item is None:
             raise JobError("No such job.")
         item["stopped_by"] = item.get("stopped_by") or "cancelled"
+        if item.get("status") == "waiting":
+            # Parked: no worker is running, nothing to interrupt. The parked state ends here and NO child
+            # completion will resume it (resume requires status `waiting`). Running children are not cancelled
+            # with it - each is its own owner-visible job with its own cancel.
+            item["status"] = "stopped"
+            item["finished"] = time.time()
+            self._save(item)
+            return item
         await self.tenant.sessions.get(item["session"]).cancel()
         return item
 
@@ -813,6 +1050,8 @@ def router(app_state):
 
     @api.get("/jobs/{job_id}")
     async def get(job_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        if tenant.jobs._sweep_pending:
+            await tenant.jobs.resume_sweep()
         item = tenant.jobs.items.get(job_id)
         if item is None:
             raise HTTPException(404, "No such job.")
@@ -854,9 +1093,13 @@ def router(app_state):
     @api.post("/job-requests/{request_id}/dismiss")
     async def dismiss_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
         try:
-            return {"request": tenant.job_requests.mark(request_id, "dismissed")}
+            record = tenant.job_requests.mark(request_id, "dismissed")
         except JobError as error:
             raise HTTPException(404 if "No such" in str(error) else 409, str(error)) from error
+        if record.get("parent_job_id"):
+            # A parked parent is told its proposal will never run, so it can finish or choose other work.
+            tenant.jobs._schedule(tenant.jobs._maybe_resume(record["parent_job_id"]))
+        return {"request": record}
 
     @api.post("/jobs/{job_id}/cancel")
     async def cancel(job_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
