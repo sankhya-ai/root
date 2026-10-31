@@ -22,6 +22,11 @@ What each limit can and cannot enforce:
   the owner-authenticated ``POST /api/job-requests/{id}/accept`` is the sole start path, and it builds the
   ``NewJob`` exclusively from the stored record (role version pinned at proposal time). A session can never
   start a job, and nothing in the accept call can alter what the session proposed.
+* The owner MAY move review of routine helper proposals from per-job accept to policy time: a bounded
+  auto-start policy (``PUT /api/auto-start-policy``, owner-authenticated, disabled by default) lets a matching
+  proposal start through the SAME locked accept path with the rule's limits. Rules match only checkable
+  fields (role, depth, workspace prefix, budget ceilings, isolation) - plain code cannot judge intent, so
+  anything the policy does not cover, and every escalation, still waits for the owner.
 """
 
 from __future__ import annotations
@@ -422,6 +427,158 @@ class JobRequestStore:
             return record
 
 
+# ----- bounded auto-start: owner policy, not model judgment ---------------------------------------------------
+
+MAX_AUTO_LOG_KEPT = 200
+
+
+class AutoStartRule(BaseModel):
+    """One routine-helper shape the owner allows to start without a per-job accept. Every field is checkable by
+    plain code; a rule that cannot name its role matches nothing."""
+    name: str
+    role: str = ""
+    #: Only chat-session proposals (depth 0) auto-start unless the rule explicitly allows delegated children.
+    max_depth: int = Field(default=0, ge=0, le=3)
+    #: When set, the proposal's workspace must begin with this prefix.
+    workspace_prefix: str = ""
+    #: Force the jail for the auto-started job ("bwrap" or "bwrap-model-only"); empty leaves the start guards to
+    #: refuse what needs isolation (the request then simply stays pending for the owner).
+    require_isolation: Literal["", "bwrap", "bwrap-model-only"] = ""
+    #: Tighten the pinned budget: 0 keeps the proposal's value, otherwise the job runs with min(proposal, rule).
+    max_steps: int = Field(default=0, ge=0, le=1000)
+    max_cost_usd: float = Field(default=0.0, ge=0.0, le=1000.0)
+    #: Running auto-started jobs under THIS rule at once.
+    max_concurrent: int = Field(default=1, ge=1, le=10)
+
+
+class AutoStartPolicy(BaseModel):
+    """The owner's standing answer to routine proposals. DISABLED by default: an absent or disabled policy is the
+    old world - every proposal waits for the owner. The totals fuse re-arms from zero whenever the policy content
+    changes (a new policy is a new grant of trust; editing it also pauses nothing else)."""
+    enabled: bool = False
+    rules: list[AutoStartRule] = []
+    #: Auto-started jobs running at once across ALL rules.
+    max_auto_running: int = Field(default=2, ge=1, le=20)
+    #: Lifetime fuse: total auto-starts under THIS policy content; changing the policy resets it.
+    max_auto_started_total: int = Field(default=20, ge=1, le=1000)
+
+
+def _auto_dir(tenant: "Tenant") -> Path:
+    return Path(tenant.root) / "jobs"
+
+
+def _policy_hash(policy: AutoStartPolicy) -> str:
+    import hashlib
+
+    return hashlib.sha256(json.dumps(policy.model_dump(), sort_keys=True).encode()).hexdigest()[:16]
+
+
+def load_auto_start_policy(tenant: "Tenant") -> AutoStartPolicy:
+    try:
+        data = json.loads((_auto_dir(tenant) / "auto-start.json").read_text("utf-8"))
+        return AutoStartPolicy(**data)
+    except (OSError, ValueError, TypeError):
+        return AutoStartPolicy()
+
+
+def save_auto_start_policy(tenant: "Tenant", policy: AutoStartPolicy) -> None:
+    from .registry import _atomic_write
+
+    _auto_dir(tenant).mkdir(parents=True, exist_ok=True)
+    _atomic_write(_auto_dir(tenant) / "auto-start.json", policy.model_dump())
+
+
+def _auto_state(tenant: "Tenant", policy: AutoStartPolicy) -> dict[str, Any]:
+    try:
+        state = json.loads((_auto_dir(tenant) / "auto-start-state.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    if state.get("policy") != _policy_hash(policy):
+        return {"policy": _policy_hash(policy), "total": 0}  # a changed policy is a new grant: the fuse restarts
+    return state
+
+
+def _save_auto_state(tenant: "Tenant", state: dict[str, Any]) -> None:
+    from .registry import _atomic_write
+
+    _auto_dir(tenant).mkdir(parents=True, exist_ok=True)
+    _atomic_write(_auto_dir(tenant) / "auto-start-state.json", state)
+
+
+def _auto_running(tenant: "Tenant", rule_name: str | None = None) -> int:
+    return sum(1 for j in getattr(tenant, "jobs", {}).items.values()
+               if j.get("auto_started") and j.get("status") == "running" and (rule_name is None or j.get("auto_rule") == rule_name))
+
+
+def _audit_auto_start(tenant: "Tenant", record: dict[str, Any], item: dict[str, Any], rule: AutoStartRule) -> None:
+    from .registry import _atomic_write
+
+    path = _auto_dir(tenant) / "auto-start-log.json"
+    try:
+        log = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        log = []
+    log.append({"request_id": record["id"], "job_id": item["id"], "rule": rule.name, "role": record.get("role"),
+                "goal": str(record.get("goal") or "")[:200], "at": time.time()})
+    _atomic_write(path, log[-MAX_AUTO_LOG_KEPT:])
+
+
+def match_auto_start(policy: AutoStartPolicy, record: dict[str, Any], tenant: "Tenant") -> AutoStartRule | None:
+    """Pure matching: which rule, if any, covers this proposal RIGHT NOW (fuses included). No side effects."""
+    if _auto_state(tenant, policy).get("total", 0) >= policy.max_auto_started_total:
+        return None  # lifetime fuse for this policy content
+    if _auto_running(tenant) >= policy.max_auto_running:
+        return None  # too many auto-started jobs running; this one waits for the owner like any other
+    for rule in policy.rules:
+        if rule.role != record.get("role"):
+            continue
+        if int(record.get("depth") or 0) > rule.max_depth:
+            continue
+        if rule.workspace_prefix and not str(record.get("workspace") or "").startswith(rule.workspace_prefix):
+            continue
+        if _auto_running(tenant, rule.name) >= rule.max_concurrent:
+            continue
+        return rule
+    return None
+
+
+def maybe_auto_start(tenant: "Tenant", record: dict[str, Any]) -> tuple[dict[str, Any], AutoStartRule] | None:
+    """Start a stored proposal under the owner's auto-start policy, through the SAME locked accept path the route
+    uses. Anything outside the policy - including EVERY escalation (tools the parent lacks) and every failure of
+    the ordinary start guards - leaves the request pending for the owner; auto-start never weakens a guard."""
+    policy = load_auto_start_policy(tenant)
+    if not policy.enabled or record.get("escalation"):
+        return None
+    rule = match_auto_start(policy, record, tenant)
+    if rule is None:
+        return None
+
+    def start(rec: dict[str, Any]) -> dict[str, Any]:
+        budget = dict(rec.get("budget") or {})
+        for key, ceiling in (("max_steps", rule.max_steps), ("max_cost_usd", rule.max_cost_usd)):
+            if ceiling and (not budget.get(key) or budget[key] > ceiling):
+                budget[key] = ceiling  # the rule tightens, never loosens
+        spec = NewJob(goal=rec["goal"], workspace=rec["workspace"], role=rec["role"],
+                      role_version=int(rec.get("role_version") or 0), source_session=rec.get("source_session", ""),
+                      budget=Budget(**budget), request_id=rec["id"], parent_job_id=rec.get("parent_job_id") or "",
+                      isolation=rule.require_isolation, accept_unprotected_credentials=False)
+        item = tenant.jobs.start(spec)  # every start() guard still applies; failure keeps the request pending
+        item["auto_started"] = True
+        item["auto_rule"] = rule.name
+        tenant.jobs._save(item)
+        return item
+
+    try:
+        _, item = tenant.job_requests.accept(record["id"], start)
+    except (JobError, Exception):  # noqa: BLE001 - a refused auto-start is a normal pending request, not an error
+        return None
+    _audit_auto_start(tenant, record, item, rule)
+    state = _auto_state(tenant, policy)
+    state["total"] = int(state.get("total") or 0) + 1
+    _save_auto_state(tenant, state)
+    return item, rule
+
+
 def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     """Validate and store a session's job proposal. Starts NOTHING: the owner's accept route is the only start path.
 
@@ -485,8 +642,16 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
     }
     tenant.job_requests.create(record)
     payload = dict(record)
-    payload["what_happens_now"] = ("Nothing started. The owner sees this recommendation and decides; their accept is "
-                                   "the only way the job runs, and it runs with exactly the fields stored here.")
+    auto = maybe_auto_start(tenant, record)
+    if auto is not None:
+        item, rule = auto
+        payload["auto_started"] = {"job_id": item["id"], "rule": rule.name}
+        payload["what_happens_now"] = (f"Started under the owner's auto-start policy (rule '{rule.name}'): the job runs NOW "
+                                       "with exactly the stored fields plus the rule's limits, and the audit log names the "
+                                       "rule. Anything the policy does not cover still waits for the owner's accept.")
+    else:
+        payload["what_happens_now"] = ("Nothing started. The owner sees this recommendation and decides; their accept is "
+                                       "the only way the job runs, and it runs with exactly the fields stored here.")
     if parent is not None:
         payload["what_happens_now"] += (" Your turn continues without waiting for it, and nothing comes back to you "
                                         "automatically: result handoff to a waiting parent is not built yet. Report "
@@ -1195,6 +1360,28 @@ def router(app_state):
         if standalone:
             out["note"] = standalone
         return out
+
+    @api.get("/auto-start-policy")
+    async def get_auto_start_policy(tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        policy = load_auto_start_policy(tenant)
+        state = _auto_state(tenant, policy)
+        return {"policy": policy.model_dump(), "auto_started_total": state.get("total", 0), "auto_running": _auto_running(tenant),
+                "note": "Disabled by default: every proposal then waits for a per-job accept, as before. Rules match checkable "
+                        "fields only; plain code cannot judge intent, so keep rules narrow."}
+
+    @api.put("/auto-start-policy")
+    async def put_auto_start_policy(body: AutoStartPolicy, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        save_auto_start_policy(tenant, body)
+        return {"policy": body.model_dump(), "auto_started_total": 0,
+                "note": "Saved. The lifetime fuse restarted: a changed policy is a new grant of trust."}
+
+    @api.get("/auto-start-policy/log")
+    async def get_auto_start_log(tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
+        try:
+            log = json.loads((_auto_dir(tenant) / "auto-start-log.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            log = []
+        return {"log": log}
 
     @api.post("/job-requests/{request_id}/dismiss")
     async def dismiss_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
