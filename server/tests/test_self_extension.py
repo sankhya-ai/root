@@ -919,7 +919,8 @@ async def test_resume_drive_delivers_compact_redacted_outcome(tmp_path):
     assert "sess-child" not in prompt  # outcomes only, never the child's session internals
     assert "summary" in prompt  # the mission's contract reminder survives the resume
     assert "the mission" in prompt  # the goal anchors the small brief
-    assert fake.record.credentials == ["stripe-key"]  # names on the worker's record, broker-resolved at use...
+    assert fake.record.credentials == []  # grant closed at terminal (layer 4); during the turn the record carried
+    # the name, broker-resolved at use...
     assert "stripe-key" not in prompt  # ...never inherited through narrative
 
 
@@ -959,16 +960,41 @@ async def test_resume_turn_error_is_not_a_delivery(tmp_path):
 
 
 def test_job_proposal_mission_delegation_cap(tmp_path):
-    # The pending-fanout cap alone would allow an unbounded SEQUENCE of accepted children; the mission cap refuses.
+    # The pending-fanout cap alone would allow an unbounded SEQUENCE of accepted children, and a per-parent cap
+    # alone would multiply down the tree; the mission cap counts the WHOLE TREE from the root job.
     store = _store(tmp_path)
-    parent = {"id": "job-p", "session": "sess-p", "depth": 0, "scope": ["ReadFile", "recommend_job"]}
-    children = {f"c{i}": {"id": f"c{i}", "parent_job_id": "job-p", "status": "finished"} for i in range(jobs.MAX_DELEGATIONS_PER_MISSION)}
+    parent = {"id": "job-p", "session": "sess-p", "depth": 0, "scope": ["ReadFile", "recommend_job"], "mission_root_id": "job-p"}
+    children = {f"c{i}": {"id": f"c{i}", "parent_job_id": "job-p", "status": "finished", "mission_root_id": "job-p"}
+                for i in range(jobs.MAX_DELEGATIONS_PER_MISSION - 1)}
+    children["grandchild"] = {"id": "grandchild", "parent_job_id": "c0", "status": "finished", "mission_root_id": "job-p"}  # tree-wide, not per-parent
+    other = {"other": {"id": "other", "parent_job_id": "job-x", "status": "finished", "mission_root_id": "job-x"}}  # another mission's tree does not count
     tenant = SimpleNamespace(root=tmp_path, registry=None, workspace_root=tmp_path, job_requests=store,
-                             jobs=SimpleNamespace(items={**children, "job-p": parent}))
+                             jobs=SimpleNamespace(items={**children, **other, "job-p": parent}))
     runtime = SimpleNamespace(record=SimpleNamespace(id="sess-p", workspace="/w"))
     payload, problem = jobs.request_job(tenant, runtime, {"goal": "one more", "role": "explorer"})
     assert payload is None and "delegation cap" in problem
     assert tenant.job_requests.list() == []
+
+
+def test_terminal_job_credential_grant_closes(tmp_path):
+    # Job-terminal closes the GRANT, not only the driver: the clearing covers the current session record and
+    # every superseded (parked) session the job ever drove; the item keeps the names as the audit record.
+    from tura_code.sessions.record import SessionRecord
+
+    sessions_dir = tmp_path / "sessions"
+    old_dir, new_dir = sessions_dir / "sess-old", sessions_dir / "sess-new"
+    for session_id, directory in (("sess-old", old_dir), ("sess-new", new_dir)):
+        record = SessionRecord(id=session_id, workspace="/w", title="t")
+        record.credentials = ["api"]
+        record.save(directory)
+    tenant = SimpleNamespace(sessions=SimpleNamespace(dir=sessions_dir))
+    j = _jobs_with(tmp_path)
+    j.tenant = tenant
+    item = {"id": "p", "session": "sess-new", "session_history": ["sess-old"], "credentials": ["api"]}
+    j._close_credentials(item)
+    for session_id in ("sess-old", "sess-new"):
+        assert SessionRecord.load(sessions_dir / session_id / "session.json").credentials == []
+    assert item["credentials"] == ["api"]  # the audit record of what the job WAS granted stays
 
 
 def test_proposal_carries_no_credentials(tmp_path):

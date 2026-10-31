@@ -268,7 +268,12 @@ remaining budget clamped onto its record, and the remaining wall as its per-turn
 disk, listed in ``item["session_history"]``, inspectable; it is never prompted again. The durable mission state is
 the WORKSPACE FILES plus the job item, not a transcript: the small brief (``Jobs._brief``) carries the mission
 goal, the previous worker's contract data, resolved delegated outcomes, the role's guides and the contract
-reminder - that is all a fresh worker sees of the past.
+reminder - that is all a fresh worker sees of the mission's CONVERSATIONAL past. One addition stands outside
+the brief, and it is stated, not hidden: the session runtime injects its per-turn memory packet
+(``memory.compile_packet``: owner-scope + project-scope memories for the workspace, plus first-turn lessons)
+into EVERY prompt when memory is enabled, job workers included. Narrowed tool scope restricts explicit memory
+tool calls; it does NOT gate that injection. Whether a delegated child should receive owner-scope memories at
+all is an OPEN design question for the owner - not silently decided here.
 
 STANDALONE children are marked at accept: when the asking job is not parked (ended or gone), the accept stamps
 ``standalone`` on the child item and returns a note - a stale proposal can no longer look like it still aids a
@@ -280,12 +285,21 @@ mission-wide steps unmeasurable.
 
 ### Bounded delegation + credential properties (mission layer 4, 2026-10-31)
 
-MISSION DELEGATION CAP (``Jobs.MAX_DELEGATIONS_PER_MISSION = 10``): one job may have at most this many ACCEPTED
-children over its whole life, sequential or parallel. The pending-fanout cap alone did not bound this: a mission
-that proposes, parks, resumes and proposes again could stack accepted children without limit. Each accepted child
-is a real worker with real side effects and its own budget, so the footprint is now bounded by ordinary code.
-The refusal is delivered to the proposing worker as a normal tool error; nothing is stored (scenario L:
-propose -> accept -> complete -> resume -> re-propose refused, cap=1).
+MISSION DELEGATION CAP (``Jobs.MAX_DELEGATIONS_PER_MISSION = 10``): one MISSION may have at most this many
+ACCEPTED sub-jobs across its WHOLE TREE - counted from the root job (``mission_root_id``, propagated at accept),
+all depths, sequential or parallel. The pending-fanout cap alone did not bound this: a mission that proposes,
+parks, resumes and proposes again could stack accepted children without limit, and a per-parent cap alone would
+multiply down the tree. Each accepted child is a real worker with real side effects and its own budget, so the
+footprint is now bounded by ordinary code, tree-wide. The refusal is delivered to the proposing worker as a
+normal tool error; nothing is stored (scenario L: propose -> accept -> complete -> resume -> re-propose refused,
+cap=1; unit: a grandchild counts against the root's cap, another mission's tree does not).
+
+TERMINAL CLOSES THE GRANT (``Jobs._close_credentials``): when a job reaches any terminal state - finished,
+error, stopped, cancelled-while-parked, gate-stopped, wall-deadline - the credential NAMES are cleared from
+every session record the job ever drove (current + parked history). The values never left the broker store;
+what closes is the session's license to resolve names. Consequence, tested: even the OWNER re-prompting an
+ended job's session gets no credentialed_request for the ended job's names - a leaked or cached session id is
+not a live grant. The job item keeps the names as the audit record of what it WAS granted.
 
 CREDENTIAL/SCOPE PROPERTIES ACROSS THE MISSION, each pinned by a test:
 
@@ -300,8 +314,12 @@ CREDENTIAL/SCOPE PROPERTIES ACROSS THE MISSION, each pinned by a test:
 * CANCELLATION CLOSES ACCESS: a terminal job drives no more turns, so its credential names are never resolved
   again (no job-driven turn exists to call the broker). The ended session's RECORD stays on the owner surface,
   where the owner holds full authority anyway - that is not a leak channel, it is the owner's own data.
-* THE GENUINE BOUNDARY, not a rename: the start() guard that REFUSES a code-capable role with credentials
-  unless the owner picks bwrap-model-only or explicitly acknowledges (``accept_unprotected_credentials``) is
-  what keeps a non-isolated code-running worker from reading the same-user 0600 credential store. Redaction
-  protects the model's view; it is NOT a boundary against the worker's own code, and the docs and the refusal
-  say so plainly.
+* THE GENUINE BOUNDARY, and its stated limits - not a rename, not claimed complete: the start() guard that
+  REFUSES a code-capable role with credentials unless the owner picks bwrap-model-only or explicitly
+  acknowledges (``accept_unprotected_credentials``) is what keeps a non-isolated code-running worker from
+  reading the same-user 0600 credential store. Three limits are stated, not smoothed: (1) the explicit
+  override EXISTS - with ``accept_unprotected_credentials`` the owner knowingly waives that protection and
+  only model-view redaction remains; (2) even under bwrap, the host's loopback services - including the owner
+  API's open bootstrap, which hands out the owner token - are reachable from jailed code (already named in
+  the refusal text and scope_guarantee; closing that is host networking work, not done here); (3) redaction
+  protects the model's view only and is NOT a boundary against the worker's own code.

@@ -303,9 +303,10 @@ MAX_PENDING_PER_PARENT = 5
 #: How many times one parked job may be resumed by resolved delegated work. Every resume is a real model turn,
 #: so the loop of propose -> park -> resume is bounded by ordinary code, not by the model's good judgment.
 MAX_RESUMES = 10
-#: Total ACCEPTED children one job may ever have, sequential or parallel: each accepted child is a real worker
-#: with real side effects and its own budget, so the mission's delegation footprint is bounded over its LIFE -
-#: the pending-fanout cap alone would allow an unbounded sequence of accepted children.
+#: Total ACCEPTED sub-jobs one MISSION may ever have across its whole tree (counted from the root job, all
+#: depths, sequential or parallel): each accepted child is a real worker with real side effects and its own
+#: budget, so the mission's delegation footprint is bounded over its LIFE - the pending-fanout cap alone would
+#: allow an unbounded sequence of accepted children, and a per-parent cap alone would multiply down the tree.
 MAX_DELEGATIONS_PER_MISSION = 10
 
 
@@ -440,10 +441,11 @@ def request_job(tenant: "Tenant", runtime: Any, arguments: dict[str, Any]) -> tu
         if pending >= MAX_PENDING_PER_PARENT:
             return None, (f"This job already has {MAX_PENDING_PER_PARENT} proposals waiting for the owner; that is the cap. "
                           "Do the parts your own tools allow, or report the rest in your contract data.")
-        accepted = sum(1 for j in tenant.jobs.items.values() if j.get("parent_job_id") == parent["id"])
+        root_id = parent.get("mission_root_id") or parent["id"]
+        accepted = sum(1 for j in tenant.jobs.items.values() if j.get("parent_job_id") and j.get("mission_root_id") == root_id)
         if accepted >= MAX_DELEGATIONS_PER_MISSION:
-            return None, (f"This job already has {MAX_DELEGATIONS_PER_MISSION} accepted sub-jobs over its life; that is the "
-                          "mission delegation cap. Report the rest in your contract data so the owner can start the work directly.")
+            return None, (f"This mission already has {MAX_DELEGATIONS_PER_MISSION} accepted sub-jobs across its whole tree; that "
+                          "is the mission delegation cap. Report the rest in your contract data so the owner can start the work directly.")
     # Attenuation flag: does the proposed child ask for tools the PARENT job does not have? The owner sees this at
     # review. (A chat session proposes from the owner's full scope, so the flag applies to job proposers only.)
     escalation = bool(parent is not None and not set(resolved["scope"]) <= set(parent.get("scope") or []))
@@ -641,6 +643,9 @@ class Jobs:
             "contract": list(spec.contract or []),
             "used": {"tokens": 0, "cost_usd": 0.0, "wall_ms": 0},
             "resumes": 0, "delivered": [], "delivered_requests": [],
+            # The mission tree this job belongs to: itself when owner-started, the root's id when accepted from
+            # a proposal (stamped on accept). The delegation cap counts the whole tree from this root.
+            "mission_root_id": job_id,
         }
         item["credential_guarantee"] = credential_guarantee(spec.credentials, {"level": "none"} if spec.serve else item["scope_guarantee"], protected)
         item["isolation"] = spec.isolation or None
@@ -729,7 +734,33 @@ class Jobs:
         children, requests = self._deliverables(item)
         if children or requests:
             item["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+        self._close_credentials(item)
         self._save(item)
+
+    def _close_credentials(self, item: dict[str, Any], runtime=None) -> None:
+        # A TERMINAL job's credential grant ends with the job: clear the names from every session record the
+        # job ever drove (the values never leave the broker store). The sessions stay the owner's to inspect
+        # and re-prompt, but a re-prompted stale session no longer answers credentialed_request for the ended
+        # job's names: job-terminal closes the grant, not only the driver.
+        if not item.get("credentials"):
+            return
+        from .sessions.record import SessionRecord
+
+        live = getattr(getattr(runtime, "record", None), "id", None)
+        if runtime is not None:
+            runtime.record.credentials = []
+            runtime.save_record()
+        for session_id in [item.get("session"), *(item.get("session_history") or [])]:
+            if not session_id or session_id == live:
+                continue
+            path = self.tenant.sessions.dir / session_id / "session.json"
+            try:
+                record = SessionRecord.load(path)
+            except (OSError, ValueError, TypeError):
+                continue
+            if record.credentials:
+                record.credentials = []
+                record.save(path.parent)
 
     def _deliverables(self, parent: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Settled child outcomes and dismissed proposals not yet delivered to this parent. Computed live, so
@@ -803,6 +834,7 @@ class Jobs:
             parent["stopped_by"] = problem
             parent["finished"] = time.time()
             parent["undelivered"] = [c["id"] for c in children] + [r["id"] for r in requests]
+            self._close_credentials(parent)
             self._save(parent)
             return
         parent["status"] = "running"  # claimed: no await between the status check and this line (asyncio-atomic)
@@ -906,6 +938,7 @@ class Jobs:
             item["proxy_tokens_reported"] = proxy.used(runtime.record.id) if proxy.enabled else None
             if self._settled(item):
                 item["finished"] = time.time()
+                self._close_credentials(item, runtime)
             self._save(item)
             if self.tasks.get(item["id"]) is asyncio.current_task():
                 self.tasks.pop(item["id"], None)  # a resume task may already hold the slot: never pop its entry
@@ -964,6 +997,7 @@ class Jobs:
             item["proxy_tokens_reported"] = proxy.used(runtime.record.id) if proxy.enabled else None
             if self._settled(item):
                 item["finished"] = time.time()
+                self._close_credentials(item, runtime)
             self._save(item)
             if self.tasks.get(item["id"]) is asyncio.current_task():
                 self.tasks.pop(item["id"], None)  # a resume task may already hold the slot: never pop its entry
@@ -1042,6 +1076,7 @@ class Jobs:
             # with it - each is its own owner-visible job with its own cancel.
             item["status"] = "stopped"
             item["finished"] = time.time()
+            self._close_credentials(item)
             self._save(item)
             return item
         await self.tenant.sessions.get(item["session"]).cancel()
@@ -1123,6 +1158,7 @@ def router(app_state):
                 item["parent_job_id"] = resolved_record["parent_job_id"]
                 item["depth"] = int(resolved_record.get("depth") or 0)
                 parent = tenant.jobs.items.get(resolved_record["parent_job_id"])
+                item["mission_root_id"] = (parent.get("mission_root_id") or parent["id"]) if parent else resolved_record["parent_job_id"]
                 if parent is None or parent.get("status") != "waiting":
                     # The asking job is not parked (ended, or never existed): this child runs ALONE and nothing
                     # will resume anyone with its result. Said on the item so a stale proposal cannot look like
