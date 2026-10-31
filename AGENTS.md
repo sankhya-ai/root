@@ -132,7 +132,11 @@ generated code ever runs without per-hash owner activation.
   alter what the owner approved; the card shows the values. Crash window: if the host dies after the job was
   created and persisted but before the accepted state was saved, the retried accept ADOPTS the existing job
   (matched by the request_id recorded on the job item) instead of launching a duplicate; a crash before the job
-  was persisted is a failure before job creation - nothing was recorded, and the retry starts fresh.
+  was persisted is a failure before job creation - nothing was recorded, and the retry starts fresh. The job item
+  is persisted BEFORE its task launches, so no job executes in that window. Review binding: a pending request is
+  immutable through normal operations (no store update method, no mutation route, no session tool), and role
+  versions are append-only, so the displayed scope snapshot of the pinned version is what runs; the disk file is
+  plain JSON like the registry and trust ledger, so the boundary is API/session operations, not host tamper-proofing.
 * SELECTING a role for oneself is a BEHAVIOR choice: which guides load (guides.guides_for / script_role in
   tenancy.py) and which subset of ALREADY-ALLOWED tools are in play. A session's authority ceiling is its tool
   scope, fixed at creation; choosing among capabilities it already holds grants nothing.

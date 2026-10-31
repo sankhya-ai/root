@@ -483,14 +483,17 @@ def test_accept_after_crash_window_adopts_the_existing_job(client, workspace, sc
 
 
 @requires_runtime
-def test_accept_applies_the_pinned_budget_not_fresh_defaults(client, workspace, script):
-    """The budget the owner reviewed is what runs: the stored record's pinned values, not defaults re-read at accept."""
+def test_accept_applies_the_stored_budget_values(client, workspace, script):
+    """The accept binds the budget from the STORED RECORD, never a fresh Budget() read. The file rewrite below
+    stands in for 'this request was pinned when the defaults differed' - through normal operations the record is
+    immutable (no API or session path edits it; see test_pending_requests_are_immutable_through_the_api), so the
+    values the owner reviewed are the values that run."""
     script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "explorer"}), text("ok")])
     session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
     _, results = _turn_results(client, workspace, script, session_id, "recommend")
     payload = json.loads(results["j"]["output"])
     assert payload["budget"]["timeout_seconds"] == 900 and payload["budget"]["max_steps"] == 0  # defaults pinned at proposal
-    # A default changed after review must not leak in: rewrite the pinned budget as the review saw it (tighter).
+    # Stand-in for a proposal pinned under different defaults: the record now holds a tighter value than current defaults.
     import json as _json
     store_file, data = _requests_file(payload["id"])
     data[payload["id"]]["budget"]["max_steps"] = 3
@@ -511,3 +514,43 @@ def test_store_accept_adopts_existing_job_without_starting(tmp_path):
                                 find_existing=lambda rid: {"id": "job-existing"})
     assert calls == [] and item["id"] == "job-existing"
     assert record["job_id"] == "job-existing" and record["status"] == "accepted"
+
+
+@requires_runtime
+def test_pending_requests_are_immutable_through_the_api(client, workspace, script):
+    """The review boundary: no normal operation can change what a pending request asks. The store has no update
+    method (only create/mark/accept), no session tool names one, and the HTTP surface has no mutation verb."""
+    script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "explorer"}), text("ok")])
+    session_id = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, session_id, "recommend")
+    payload = json.loads(results["j"]["output"])
+    for method in (client.put, client.patch, client.delete):
+        assert method(f"/api/job-requests/{payload['id']}").status_code == 405
+    assert client.post(f"/api/job-requests/{payload['id']}", json={"goal": "changed", "role": "developer"}).status_code in (404, 405)
+    stored = client.get("/api/job-requests").json()["requests"][0]
+    assert stored["goal"] == "sweep" and stored["role"] == "explorer"  # untouched
+    # NOTE: the file on disk is plain JSON like the registry and trust ledger; host filesystem access can rewrite
+    # it. The boundary is 'no normal API or session operation', not OS-level tamper-proofing.
+
+
+@requires_runtime
+def test_pinned_role_version_content_is_what_runs(client, workspace, script):
+    """Binding through NORMAL operations: v1 is proposed and reviewed; a newer v2 of the role is created before the
+    click (role versions are append-only - content never edits in place). The accept runs the PINNED v1."""
+    script([tool_call("r", "create_role", {"name": "reader", "description": "Read-only helper.", "tools": ["ReadFile"]}), text("done")])
+    first = client.post("/api/sessions", json={"workspace": str(workspace)}).json()["id"]
+    _, results = _turn_results(client, workspace, script, first, "make a role")
+    assert results["r"]["is_error"] is False
+    script([tool_call("j", "recommend_job", {"goal": "sweep", "role": "reader"}), text("ok")])
+    _, results = _turn_results(client, workspace, script, first, "recommend")
+    payload = json.loads(results["j"]["output"])
+    assert payload["role_version"] == 1 and payload["scope"] == ["ReadFile"]
+    # A new version exists by the time the owner clicks.
+    script([tool_call("r2", "create_role", {"name": "reader", "description": "Read-only helper, wider.", "tools": ["ReadFile", "Grep"]}), text("done")])
+    _, results2 = _turn_results(client, workspace, script, first, "revise the role")
+    assert results2["r2"]["is_error"] is False
+    script([text("Swept.")])
+    accepted = client.post(f"/api/job-requests/{payload['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    item = client.get(f"/api/jobs/{accepted.json()['job']['id']}").json()
+    assert item["role_version"] == 1  # the REVIEWED version ran, not v2
