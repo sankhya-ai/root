@@ -84,7 +84,8 @@ export const api = {
   events: (id: string, before: number) => request<{ events: WireEvent[]; has_more: boolean; first_seq: number | null }>(`/api/sessions/${id}/events?${q({ before: String(before) })}`),
   director: (id: string) => request<{ decisions: any[] }>(`/api/sessions/${id}/director`),
   jobRequests: () => request<{ requests: JobRequest[] }>("/api/job-requests"),
-  acceptJobRequest: (id: string) => post<{ request: JobRequest; job: { id: string } }>(`/api/job-requests/${id}/accept`),
+  acceptJobRequest: (id: string, options: { isolation?: string; accept_unprotected_credentials?: boolean } = {}) =>
+    post<{ request: JobRequest; job: { id: string } }>(`/api/job-requests/${id}/accept`, options),
   dismissJobRequest: (id: string) => post<{ request: JobRequest }>(`/api/job-requests/${id}/dismiss`),
   revokeGrant: (id: string, key: string) => post<Session>(`/api/sessions/${id}/grants/revoke`, { key }),
   processes: (id: string) => request<{ processes: ProcessInfo[] }>(`/api/sessions/${id}/processes`),

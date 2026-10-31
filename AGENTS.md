@@ -343,3 +343,21 @@ loopback services to code - the refusal text says so; the open bootstrap remains
 loopback BY DESIGN for the local UI (any same-user process can read the token file anyway - the jail, not the
 endpoint, is the boundary); the UI review card does not yet surface the accept-time jail choice (API + audit
 record only).
+
+### Owner accept-time protection choice (mission layer 5b, 2026-10-31)
+
+The review card no longer hides the guard behind an API-only field: a DELEGATED, code-running proposal (lineage
++ Shell/process/run_python in scope) shows the protection choice on the card itself - "isolated jail
+(recommended)" vs "run unprotected - it can read my credentials and owner token" (the real boundary warning).
+NOTHING is preselected and Start stays disabled until the owner picks; the pick rides the accept as
+AcceptOptions; a refused accept shows the server's refusal text on the card (nothing started, still pending) -
+no more swallowed 400s, no unusable Start. Verified on fixtures (not runtime evidence): initial state (nothing
+preselected, Start disabled) and the driven state (jail chosen, exact payload {"isolation":"bwrap-model-only"},
+full refusal text).
+
+HOST-STAMPED WORKER IDENTITY on the session record: ``job`` (the job id) and ``delegated`` (the job answered
+another job's proposal) are set by the HOST at creation - on the first worker and every fresh resume worker -
+never model-supplied. Resume workers also keep the mission's ``isolation`` (pinned from the item, asserted).
+Per-turn policy (how much memory a worker is shown, least-context delegation) keys off these fields, not off
+model claims. LINEAGE CANNOT BE ERASED TO BYPASS THE GUARD: a standalone child (parent ended before accept) is
+still refused without the jail or the ack - the stored record's parent_job_id drives start(), tested.
