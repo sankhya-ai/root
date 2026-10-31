@@ -331,6 +331,11 @@
   margin: 6px 0;
   padding-left: 24px;
 }
+/* State the owner must not miss (a created tool/role/plugin) reads at muted ink, not faint: roughly 6.5:1 on the
+   dark theme instead of roughly 3:1. */
+.notice.info {
+  color: var(--ink-muted);
+}
 .notice.error {
   color: var(--err);
 }

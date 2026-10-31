@@ -17,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from .sessions.host_tools import tool_error
@@ -153,6 +154,25 @@ def stats(tenant: "Tenant", runtime: "SessionRuntime") -> dict[str, int]:
     }
 
 
+def _composite_definitions(runtime: "SessionRuntime") -> list[dict[str, Any]]:
+    """ACTIVE registry tools this session may call (created by it, or promoted durable). Empty without a registry."""
+    registry = getattr(runtime.tenant, "registry", None)
+    if registry is None:
+        return []
+    from .registry import CompositeToolset
+
+    toolset = next((t for t in runtime.tenant.toolsets if isinstance(t, CompositeToolset)), None)
+    return toolset.definitions(runtime) if toolset is not None else []
+
+
+def _composite_record(runtime: "SessionRuntime", name: str) -> dict[str, Any] | None:
+    registry = getattr(runtime.tenant, "registry", None)
+    if registry is None:
+        return None
+    record = registry.active_tool(name, getattr(runtime.record, "id", None))
+    return {**record, "name": name} if record is not None else None
+
+
 def gateway_definitions() -> list[dict[str, Any]]:
     return [
         {
@@ -174,7 +194,7 @@ def gateway_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": USE_TOOL,
-            "description": f"Run a tool that `{FIND_TOOL}` returned, by name, with arguments matching its schema.",
+            "description": f"Run a tool that `{FIND_TOOL}` returned, by name, with arguments matching its schema. Also the way to call a registry tool created earlier in this turn.",
             "parameters": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
@@ -201,19 +221,63 @@ class GatewayToolset:
         found = deferred_definitions(tenant, runtime)
         if name == FIND_TOOL:
             limit = arguments.get("limit") if isinstance(arguments.get("limit"), int) else MAX_RESULTS
-            hits = rank(str(arguments.get("query") or ""), [d for _, d in found], limit)
+            hits = rank(str(arguments.get("query") or ""), [d for _, d in found] + _composite_definitions(runtime), limit)
             if not hits:
-                return {"is_error": False, "output": "No matching tool. Do the task with the tools already listed.", "message": "", "display": [{"type": "brief", "text": "No tools found"}]}
+                return capability_miss(runtime, str(arguments.get("query") or ""))
             return {"is_error": False, "output": json.dumps(hits, ensure_ascii=False), "message": "", "display": [{"type": "brief", "text": f"Found {len(hits)} tool(s)"}]}
         target = str(arguments.get("name") or "")
         args = arguments.get("arguments") or {}
         if not isinstance(args, dict):
             return tool_error("`arguments` must be an object.", "Invalid arguments")
         owner = next((t for t, d in found if d["name"] == target), None)
+        # A registry tool created this turn is not in the runtime's initialized tool list; the gateway still reaches it,
+        # through the same scope check as any call. No runtime change, no bypass: each pipeline step re-checks scope and approvals.
+        if owner is None:
+            composite = _composite_record(runtime, target)
+            if composite is not None and allowed(tenant, target, runtime):
+                from .registry import run_composite
+
+                return await run_composite(tenant, runtime, call_id, composite, args, tenant.registry)
         # Re-checked at call time: the model may name a tool it never found, or one outside the scope.
         if owner is None or not allowed(tenant, target, runtime):
             return tool_error(f"`{target}` is not an available tool. Use `{FIND_TOOL}` to see what is.", "Unavailable")
         return await owner.call(runtime, call_id, target, args)
+
+
+#: Every this many find_tools misses in a session, the owner sees a CapabilityGap notice.
+MISS_NOTIFY_EVERY = 3
+#: The session record keeps at most this many recent misses.
+MISS_KEEP = 20
+
+
+def capability_miss(runtime: "SessionRuntime | None", query: str) -> dict[str, Any]:
+    """A find_tools miss is a structured capability-gap signal, not just prose.
+
+    Deterministic detection only: the session record tallies the miss, the result tells the model how a genuinely
+    missing capability can be added (compose with ``create_tool``, or generate code with ``propose_tool`` - owner
+    activates the exact hash), and every MISS_NOTIFY_EVERY misses the owner sees a CapabilityGap notice. A miss is
+    NOT proof that a capability is missing or that building one will succeed; the model still decides what, if
+    anything, to build."""
+    misses: list[dict[str, Any]] = []
+    if runtime is not None:
+        record = getattr(runtime, "record", None)
+        if record is not None:
+            misses = list(getattr(record, "capability_misses", None) or [])
+            misses.append({"query": query[:200], "at": time.time()})
+            misses = misses[-MISS_KEEP:]
+            record.capability_misses = misses
+            save = getattr(runtime, "save_record", None)
+            if callable(save):
+                save()
+            emit = getattr(runtime, "emit", None)
+            if callable(emit) and len(misses) % MISS_NOTIFY_EVERY == 0:
+                emit("CapabilityGap", {"queries": [m["query"] for m in misses[-MISS_NOTIFY_EVERY:]], "misses": len(misses)})
+    hint = ("No matching tool. If the capability is genuinely missing, `create_tool` composes existing tools into a new one and "
+            "`propose_tool` generates new code (the owner activates the exact reviewed hash). "
+            "Do the task with the tools already listed when one fits.")
+    if misses:
+        hint += f" ({len(misses)} miss(es) this session; the owner is shown a CapabilityGap notice every {MISS_NOTIFY_EVERY}.)"
+    return {"is_error": False, "output": hint, "message": "", "display": [{"type": "brief", "text": "No tools found"}]}
 
 
 def install(server) -> None:

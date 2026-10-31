@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..settings import Settings
-from .errors import MemoryUnavailableError
+from .errors import MemoryScopeError, MemoryUnavailableError
 from .lanes import reembed, use_openrouter
 from .local_embedder import MODEL as LOCAL_MODEL
 from .local_embedder import LocalEmbedder
@@ -247,10 +247,10 @@ class MemoryGateway:
         }.get(scope, [project_scope(workspace), owner])
         return await self._run(lambda dhee: self._search(dhee, query, scopes, limit, owner))
 
-    async def list_memories(self, workspace: Path, limit: int = 200, owner: str = OWNER_SCOPE) -> list[dict[str, Any]]:
+    async def list_memories(self, workspace: Path, limit: int = 200, owner: str = OWNER_SCOPE, *, project_only: bool = False) -> list[dict[str, Any]]:
         def work(dhee: Any) -> list[dict[str, Any]]:
             items: list[dict[str, Any]] = []
-            for scope in (project_scope(workspace), owner):
+            for scope in ((project_scope(workspace),) if project_only else (project_scope(workspace), owner)):
                 try:
                     rows = dhee._engram.get_all(user_id=scope, limit=limit)
                 except Exception:  # noqa: BLE001
@@ -274,21 +274,25 @@ class MemoryGateway:
     async def forget(self, memory_id: str) -> None:
         await self._run(lambda dhee: dhee._engram.delete(memory_id))
 
-    async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool, owner: str = OWNER_SCOPE) -> Packet | None:
+    async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool, owner: str = OWNER_SCOPE, project_only: bool = False) -> Packet | None:
         """The memory worth attaching to this request, or ``None``.
 
         Only memories not yet shown in this session are attached, so a long
         session does not pay for the same facts on every turn. Lessons from
         earlier work (Dhee's insights and warnings) come with the first turn.
+
+        ``project_only`` (a delegated worker): this workspace's project memory and nothing else. No owner
+        preferences, and no first-turn lessons: Dhee's insights and warnings are distilled from the owner's
+        earlier sessions, and a worker does not need them to do its brief.
         """
         if not self.enabled or not prompt.strip():
             return None
         scope = project_scope(workspace)
 
         def work(dhee: Any) -> Packet | None:
-            hits = [item for item in self._search(dhee, prompt, [scope, owner], 8, owner) if item["id"] not in seen]
+            hits = [item for item in self._search(dhee, prompt, [scope] if project_only else [scope, owner], 8, owner) if item["id"] not in seen]
             lessons: list[str] = []
-            if first_turn:
+            if first_turn and not project_only:
                 try:
                     context = dhee.context(task_description=prompt, user_id=scope) or {}
                 except Exception:  # noqa: BLE001
@@ -375,9 +379,21 @@ class MemoryView:
     worker thread) instead of one per user; the scope keeps them apart.
     """
 
-    def __init__(self, gateway: MemoryGateway, owner: str = OWNER_SCOPE) -> None:
+    def __init__(self, gateway: MemoryGateway, owner: str = OWNER_SCOPE, *, project_only: bool = False) -> None:
         self.gateway = gateway
         self.owner = owner
+        #: A delegated worker's view: this workspace's project memory only. Set by the host from the session
+        #: record, never by the model. Project memory is shared by every session in the same workspace, so this
+        #: narrows what a worker sees of the OWNER's memory; it is not per-job confidentiality.
+        self.project_only = project_only
+
+    def restricted(self) -> "MemoryView":
+        """The same person's memory as a delegated worker may reach it: project scope only."""
+        return MemoryView(self.gateway, self.owner, project_only=True)
+
+    def _deny_owner(self, what: str) -> None:
+        if self.project_only:
+            raise MemoryScopeError(f"This worker was delegated this job and may {what} project memory only, not the owner's.")
 
     @property
     def enabled(self) -> bool:
@@ -387,10 +403,14 @@ class MemoryView:
         return self.gateway.status()
 
     async def recall(self, query: str, workspace: Path, *, scope: str = "all", limit: int = 6) -> list[dict[str, Any]]:
+        if self.project_only:
+            if scope == "owner":
+                self._deny_owner("read")
+            scope = "project"
         return await self.gateway.recall(query, workspace, scope=scope, limit=limit, owner=self.owner)
 
     async def list_memories(self, workspace: Path, limit: int = 200) -> list[dict[str, Any]]:
-        return await self.gateway.list_memories(workspace, limit, owner=self.owner)
+        return await self.gateway.list_memories(workspace, limit, owner=self.owner, project_only=self.project_only)
 
     async def forget(self, memory_id: str, workspace: Path) -> bool:
         """Forget a memory, but only one this person can see."""
@@ -401,9 +421,11 @@ class MemoryView:
         return True
 
     async def compile_packet(self, prompt: str, workspace: Path, *, seen: set[str], first_turn: bool) -> Packet | None:
-        return await self.gateway.compile_packet(prompt, workspace, seen=seen, first_turn=first_turn, owner=self.owner)
+        return await self.gateway.compile_packet(prompt, workspace, seen=seen, first_turn=first_turn, owner=self.owner, project_only=self.project_only)
 
     async def remember(self, content: str, workspace: Path, *, scope: str = "project", kind: str = "fact", session_id: str = "") -> dict[str, Any]:
+        if scope == "owner":
+            self._deny_owner("write")
         return await self.gateway.remember(content, workspace, scope=scope, kind=kind, session_id=session_id, owner=self.owner)
 
     async def checkpoint(self, workspace: Path, *, summary: str, status: str = "paused", **fields: Any) -> dict[str, Any]:

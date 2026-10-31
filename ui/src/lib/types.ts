@@ -54,6 +54,29 @@ export interface ApprovalRequest {
   trust?: TrustInfo;
 }
 
+/** An owner-reviewed job proposal stored by ``recommend_job``: the session proposed; the owner's accept is the only start. */
+export interface JobRequest {
+  id: string;
+  goal: string;
+  role: string;
+  role_version: number;
+  workspace: string;
+  reason: string;
+  requested_by: string;
+  /** The role's effective tool scope resolved at proposal time (display-only; the accept re-resolves the pinned role). */
+  scope?: string[];
+  /** Job-specific limits pinned at proposal time; the accept applies exactly these. */
+  budget?: { max_steps?: number; timeout_seconds?: number; max_tokens?: number; max_cost_usd?: number };
+  status: "pending" | "accepted" | "dismissed";
+  created_at: number;
+  job_id?: string;
+  /** Set when a job (not a chat session) proposed this: the parent job's id and this request's delegation depth. */
+  parent_job_id?: string;
+  depth?: number;
+  /** True when the proposed role's scope reaches beyond the proposer's own scope: the owner decides whether to widen. */
+  escalation?: boolean;
+}
+
 export interface TokenUsage {
   input_other: number;
   output: number;
@@ -406,4 +429,44 @@ export interface ProducedFile {
   path: string;
   scope: "scratch" | "workspace";
   size: number;
+}
+
+/** A generated plugin version as listed by GET /api/registry/plugins. */
+export interface GeneratedPluginVersion {
+  version: number;
+  status: string;
+  lifetime?: string;
+  session?: string;
+  sha256?: string;
+  created_by?: string;
+  created_at?: string;
+  activated_at?: string | null;
+  verified?: { ok?: boolean } | null;
+}
+
+export interface GeneratedPluginEntry {
+  active_version: number | null;
+  versions: GeneratedPluginVersion[];
+}
+
+export type GeneratedPluginListing = Record<string, GeneratedPluginEntry>;
+
+/** The full owner review payload: exactly what activation would run. */
+export interface PluginReview {
+  name: string;
+  version: number;
+  status: string;
+  lifetime?: string;
+  session?: string;
+  created_by?: string;
+  created_at?: string;
+  activated_at?: string | null;
+  verified?: { ok?: boolean; results?: { name: string; ok: boolean }[] } | null;
+  sha256: string;
+  on_disk_sha256: string;
+  hash_matches_record: boolean;
+  files: Record<string, string>;
+  tools: { name: string; description?: string; parameters?: unknown }[];
+  execution: { available: boolean; reason: string; isolation: string };
+  activation: string;
 }

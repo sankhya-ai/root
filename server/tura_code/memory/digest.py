@@ -149,6 +149,8 @@ async def digest_turn(memory: "MemoryView", workspace: Path, turn: "TurnState", 
     if digest and status == "finished" and turn.verified:
         for fact in digest["facts"]:
             kind, scope = FACT_KINDS[fact["kind"]]
+            if scope == "owner" and getattr(memory, "project_only", False):
+                continue  # a delegated worker never writes the owner's preferences
             try:
                 if fact["replaces"] and await memory.forget(fact["replaces"], workspace):
                     replaced += 1

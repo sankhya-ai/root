@@ -219,6 +219,7 @@ class LaunchSpec:
             os.environ.get(SCRIPTED_ECHO_ENV, ""),
             skills_signature(self.skills_dirs),
             self.sandbox.name,
+            self.script_role,
             self.tool_scope,
             self.max_steps,
             self.max_tokens,

@@ -1,8 +1,12 @@
 import type {
   Checkpoint,
+  GeneratedPluginListing,
+  GeneratedPluginVersion,
+  PluginReview,
   Connections,
   DeviceFlow,
   Flow,
+  JobRequest,
   FlowReview,
   Health,
   KeikiStatus,
@@ -79,6 +83,10 @@ export const api = {
   deleteSession: (id: string) => request<{ ok: boolean }>(`/api/sessions/${id}`, { method: "DELETE" }),
   events: (id: string, before: number) => request<{ events: WireEvent[]; has_more: boolean; first_seq: number | null }>(`/api/sessions/${id}/events?${q({ before: String(before) })}`),
   director: (id: string) => request<{ decisions: any[] }>(`/api/sessions/${id}/director`),
+  jobRequests: () => request<{ requests: JobRequest[] }>("/api/job-requests"),
+  acceptJobRequest: (id: string, options: { isolation?: string; accept_unprotected_credentials?: boolean } = {}) =>
+    post<{ request: JobRequest; job: { id: string } }>(`/api/job-requests/${id}/accept`, options),
+  dismissJobRequest: (id: string) => post<{ request: JobRequest }>(`/api/job-requests/${id}/dismiss`),
   revokeGrant: (id: string, key: string) => post<Session>(`/api/sessions/${id}/grants/revoke`, { key }),
   processes: (id: string) => request<{ processes: ProcessInfo[] }>(`/api/sessions/${id}/processes`),
   processLog: (id: string, pid: string) => request<{ lines: string[]; total_lines: number; status: string }>(`/api/sessions/${id}/processes/${pid}/log`),
@@ -107,6 +115,13 @@ export const api = {
   skill: (name: string) => request<{ name: string; text: string }>(`/api/skills/${encodeURIComponent(name)}`),
   rollbackSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/rollback`),
   forgetSkill: (name: string) => request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  generatedPlugins: () => request<GeneratedPluginListing>("/api/registry/plugins"),
+  reviewGeneratedPlugin: (name: string, version?: number) =>
+    request<PluginReview>(`/api/registry/plugins/${encodeURIComponent(name)}/review${version ? `?${q({ version: String(version) })}` : ""}`),
+  activateGeneratedPlugin: (name: string, version: number, sha256: string) =>
+    post<GeneratedPluginVersion>(`/api/registry/plugins/${encodeURIComponent(name)}/activate`, { version, sha256 }),
+  promoteGeneratedPlugin: (name: string) => post<GeneratedPluginVersion>(`/api/registry/plugins/${encodeURIComponent(name)}/promote`),
+  revokeGeneratedPlugin: (name: string) => post<{ ok: boolean }>(`/api/registry/plugins/${encodeURIComponent(name)}/revoke`),
   flows: () => request<{ flows: Flow[] }>("/api/flows"),
   createFlow: (body: { task: string; repo?: string; verification_commands?: string[]; candidate_count?: number; auto_start?: boolean }) =>
     post<{ flow: Flow }>("/api/flows", body),

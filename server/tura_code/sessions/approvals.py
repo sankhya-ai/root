@@ -34,6 +34,23 @@ class Approvals:
     pending: dict[str, tuple[asyncio.Future, dict]]
 
     async def _approve(self: "SessionRuntime", payload: dict) -> str:
+        # The session tool scope is a CEILING above the trust policy: a grant or ledger entry may settle an
+        # approval, but nothing settles an action whose tool is outside the session's scope (e.g. after
+        # ``adopt_role`` narrowed it). This is the same-turn enforcement point for native runtime tools, which
+        # only consult the host here - reads inside the workspace do not ask and stay possible until the
+        # runtime re-initializes next turn (see registry.adopt_role's stated limits).
+        sender = str(payload.get("sender") or "").strip()
+        if sender:
+            from .. import catalogue
+
+            if not catalogue.allowed(self.tenant, sender, self):
+                summary = {**approval_summary(payload), "key": f"scope:{sender}"}
+                self.emit(
+                    "ApprovalResolved",
+                    {"request_id": payload.get("id"), "response": "reject", "auto": True,
+                     "reason": f"`{sender}` is outside this session's tool scope", "mode": self.record.permission_mode, **summary},
+                )
+                return "reject"
         mode = self.record.permission_mode
         ledger = self.tenant.trust
         decision = trust.decide(

@@ -33,7 +33,7 @@ def tool_error(message: str, brief: str = "Failed") -> dict[str, Any]:
 
 class MemoryToolset:
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
-        return memory_tool_definitions() if runtime.tenant.memory.enabled else []
+        return memory_tool_definitions(project_only=runtime.tenant.memory_for(runtime.record).project_only) if runtime.tenant.memory.enabled else []
 
     def handles(self, name: str) -> bool:
         return name in MEMORY_TOOL_NAMES
@@ -43,7 +43,7 @@ class MemoryToolset:
         if unchecked:
             # A checkpoint outlives the session; an unexercised "fixed it" must not come back as a fact.
             arguments = {**arguments, "summary": f"UNVERIFIED (no check ran after the last edit): {arguments.get('summary') or ''}".strip()}
-        result = await runtime.tenant.memory.handle_tool(name, arguments, workspace=Path(runtime.record.workspace), session_id=runtime.record.id)
+        result = await runtime.tenant.memory_for(runtime.record).handle_tool(name, arguments, workspace=Path(runtime.record.workspace), session_id=runtime.record.id)
         if unchecked and not result.get("is_error"):
             result["output"] = (
                 "Saved as UNVERIFIED: this turn edited files and has run nothing that exercises them. "

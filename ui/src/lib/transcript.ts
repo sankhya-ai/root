@@ -36,6 +36,7 @@ export type Block =
     }
   | { kind: "approval"; key: string; turn: string | null; approval: ApprovalState }
   | { kind: "notice"; key: string; turn: string | null; tone: "info" | "warn" | "error"; text: string }
+  | { kind: "jobrequest"; key: string; turn: string | null; job: { id: string; goal: string; role: string; version: number | null; reason: string; workspace: string } }
   | { kind: "flow"; key: string; turn: string | null; flow: Flow }
   | { kind: "learned"; key: string; turn: string | null; ok: boolean; summary: string; mode: string; skills: string[]; memories: number; promoted: number; verified: boolean; error?: string }
   | {
@@ -389,6 +390,60 @@ export function applyEvent(state: TranscriptState, event: WireEvent, nested = fa
         undo: String((p.undo as { id?: string } | undefined)?.id ?? ""),
         restored: Array.isArray(p.restored) ? p.restored.map(String) : [],
         removed: Array.isArray(p.removed) ? p.removed.map(String) : [],
+      });
+      break;
+    }
+    case "RegistryChanged": {
+      // A tool or role this session created (or changed): visible, not silent. Session-lifetime until the owner promotes it.
+      const entry = p as { kind?: string; name?: string; version?: number; status?: string; lifetime?: string; description?: string };
+      const what = entry.kind === "role" ? "role" : entry.kind === "plugin" ? "generated plugin" : "tool";
+      const lifetime = entry.lifetime === "durable" ? "in the durable catalogue" : "for this session only";
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: `Created ${what} \`${entry.name ?? "?"}\` v${entry.version ?? "?"} (${entry.status ?? "?"}, ${lifetime}): ${entry.description ?? ""}`,
+      });
+      break;
+    }
+    case "CapabilityGap": {
+      // find_tools kept missing: the owner should see the repeated gap, not a buried tool result.
+      const entry = p as { queries?: string[]; misses?: number };
+      const queries = (entry.queries ?? []).map((q) => `\"${q}\"`).join(", ");
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: `Capability gap: ${entry.misses ?? "?"} tool searches found nothing this session (recently: ${queries}). The agent can compose a new tool or propose generated code - creating it is the agent's choice, activating generated code stays yours.`,
+      });
+      break;
+    }
+    case "JobRecommended": {
+      // The session PROPOSED a job; the owner's accept is the only start path. The card reads live status from the API,
+      // so a replayed event still shows what actually happened to the request.
+      const entry = p as { id?: string; goal?: string; role?: string; version?: number | null; reason?: string; workspace?: string };
+      if (!entry.id) break;
+      state.blocks.push({
+        kind: "jobrequest",
+        key: nextKey("jobrequest"),
+        turn,
+        job: { id: entry.id, goal: entry.goal ?? "", role: entry.role ?? "developer", version: entry.version ?? null, reason: entry.reason ?? "", workspace: entry.workspace ?? "" },
+      });
+      break;
+    }
+    case "RoleAdopted": {
+      // The session took on a role: one-way narrowing, pinned version. The owner must SEE the narrowing, not infer it.
+      const entry = p as { role?: string; version?: number | null; tools?: number; guides?: string[]; reversible?: boolean };
+      const version = entry.version ? ` v${entry.version}` : "";
+      const guides = (entry.guides ?? []).length ? (entry.guides ?? []).join(", ") : "none";
+      state.blocks.push({
+        kind: "notice",
+        key: nextKey("notice"),
+        turn,
+        tone: "info",
+        text: `Adopted role \`${entry.role ?? "?"}\`${version} for the rest of this session: tools narrowed to ${entry.tools ?? "?"}, guides: ${guides}. One-way - the session cannot widen back; output contracts are advisory here (enforced for jobs).`,
       });
       break;
     }

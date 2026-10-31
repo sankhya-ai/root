@@ -7,7 +7,7 @@ import json
 import threading
 
 import pytest
-from conftest import requires_runtime, text, tool_call
+from conftest import requires_runtime, run_turn, text, tool_call
 from test_jobs import _wait
 
 from tura_code import broker
@@ -185,3 +185,34 @@ def test_credentials_and_serve_are_refused_for_a_workspace_that_overlaps_the_dat
         assert r.status_code == 400 and "data directory" in r.text, ws
     r = client.post("/api/jobs", json={"goal": "x", "workspace": str(home / "proj"), "role": "designer", "serve": {"command": "sleep 1", "port": 45998}})
     assert r.status_code == 400
+
+
+def test_revoking_a_credential_closes_access_immediately(tmp_path, echo):
+    # The store is re-read on every request: a deletion closes access at the next request, no cached grant.
+    b = broker.Broker(tmp_path)
+    b.put("api", SECRET, [echo])
+    b.request("api", "GET", f"http://{echo}/x")
+    assert Echo.seen == [f"Bearer {SECRET}"]
+    b.delete("api")
+    with pytest.raises(broker.BrokerError):
+        b.request("api", "GET", f"http://{echo}/x")
+    assert not b.has("api") and Echo.seen == [f"Bearer {SECRET}"]
+
+
+@requires_runtime
+def test_a_finished_jobs_session_no_longer_answers_for_its_credentials(client, workspace, script, echo):
+    # Stale-session surface: after the job ends, the session record's grant is cleared - even the OWNER
+    # re-prompting that session gets no credentialed_request for the ended job's names.
+    client.put("/api/credentials/api", json={"value": SECRET, "hosts": [echo]})
+    script([tool_call("c1", "credentialed_request", {"credential": "api", "url": f"http://{echo}/data"}), text('{"summary": "s"}')])
+    item = _wait(client, client.post("/api/jobs", json={"goal": "x", "workspace": str(workspace), "role": "explorer", "contract": ["summary"], "credentials": ["api"]}).json()["id"])
+    assert Echo.seen == [f"Bearer {SECRET}"]
+    session = client.get(f"/api/sessions/{item['session']}").json()
+    assert session.get("credentials", []) == []  # grant closed on the record at terminal
+    script([tool_call("c2", "credentialed_request", {"credential": "api", "url": f"http://{echo}/data"}), text("tried")])
+    with client.websocket_connect(f"/api/sessions/{item['session']}/ws") as ws:
+        ws.receive_json()
+        events = run_turn(ws, "try the api again")
+    results = [e for e in events if e["type"] == "ToolResult" and e["payload"].get("tool_call_id") == "c2"]
+    assert not results or results[0]["payload"]["return_value"]["is_error"]  # refused, or the tool is gone entirely
+    assert Echo.seen == [f"Bearer {SECRET}"]  # no second request ever carried the secret

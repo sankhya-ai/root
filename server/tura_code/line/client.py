@@ -24,7 +24,24 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .protocol import AGENT, INLINE_FILE_BYTES, Invite, LineError, Message, decode_file, encode_file, mentions_in
+from .config import shared_home
+from .protocol import (
+    AGENT,
+    INLINE_FILE_BYTES,
+    EpochStore,
+    Invite,
+    LineError,
+    Message,
+    body_hash,
+    decode_file,
+    encode_file,
+    load_member_key,
+    mentions_in,
+    sign_envelope,
+    unwrap_epoch_key,
+    verify_distribution,
+    _unb64,
+)
 
 logger = logging.getLogger(__name__)
 BACKOFF = (1, 2, 5, 10, 30)
@@ -52,6 +69,15 @@ class LineClient:
         self.state_path = state_path
         self.on_message = on_message
         self.roster: list[dict[str, Any]] = []
+        # The line's protocol version, named by the welcome frame (1 shared key, 2 signed
+        # attribution, 3 signed attribution + per-epoch read keys).
+        self.line_version = 1
+        # v3: this machine's member key (the 0600 file chamber enroll wrote) and the epoch keys
+        # this member has unwrapped so far - both loaded from ~/.chamber/keys, never sent anywhere.
+        owner = agent.split("/")[0]
+        home = shared_home()
+        self._member_key = load_member_key(home, self.invite.line_id, owner)
+        self._epochs = EpochStore(home / "keys" / f"{self.invite.line_id}-{owner}-epochs.json")
         self.inbox: asyncio.Queue[Message] = asyncio.Queue(INBOX_LIMIT)
         self.connected = asyncio.Event()
         self.problem = ""
@@ -102,6 +128,7 @@ class LineClient:
         kind = frame.get("t")
         if kind == "welcome":
             self.roster = frame.get("agents") or []
+            self.line_version = int(frame.get("version") or 1)
             self.problem = ""
             self.connected.set()
         elif kind == "roster":
@@ -123,9 +150,29 @@ class LineClient:
         seq = int(frame.get("seq") or 0)
         to_owner = frame.get("to_owner")
         addressed = f"@{to_owner}" if to_owner else str(frame.get("to") or "")
+        epoch_no = int(frame.get("epoch") or 0) if self.line_version == 3 else 0
+        if self.line_version == 3 and epoch_no == 0:
+            # Epoch 0 on a v3 line is the bootstrap channel ONLY: an admin-signed epoch
+            # distribution. Anything else at epoch 0 is a downgrade attempt and is dropped.
+            try:
+                payload = self.invite.open(str(frame.get("body") or ""), sender=str(frame.get("from")), to=addressed, message_id=str(frame.get("id")), reply_to=frame.get("reply_to"))
+                self._take_distribution(payload)
+            except (LineError, ValueError):
+                pass
+            self._advance(seq)
+            return
+        epoch_arg = None
+        if self.line_version == 3:
+            key = self._epochs.key_for(epoch_no)
+            if key is None:
+                # No key for this epoch: history from before this member joined, or a rotation
+                # they were left out of. Never an error - those messages simply don't open here.
+                self._advance(seq)
+                return
+            epoch_arg = (epoch_no, key)
         try:
             payload = self.invite.open(
-                str(frame.get("body") or ""), sender=str(frame.get("from")), to=addressed, message_id=str(frame.get("id")), reply_to=frame.get("reply_to")
+                str(frame.get("body") or ""), sender=str(frame.get("from")), to=addressed, message_id=str(frame.get("id")), reply_to=frame.get("reply_to"), epoch=epoch_arg
             )
         except (LineError, ValueError) as error:
             logger.warning("dropped a message from %s: %s", frame.get("from"), error)
@@ -142,7 +189,7 @@ class LineClient:
             mentions=[str(m) for m in frame.get("mentions") or []],
             seq=seq,
             ts=int(frame.get("ts") or 0),
-            files=await self._files(payload.get("files")),
+            files=await self._files(payload.get("files"), epoch=epoch_arg),
         )
         self._advance(seq)
         waiting = self._replies.get(message.reply_to or "")
@@ -158,7 +205,29 @@ class LineClient:
                 self.inbox.get_nowait()
             self.inbox.put_nowait(message)
 
-    async def _files(self, raw: Any) -> list[dict[str, Any]]:
+    def _take_distribution(self, payload: dict[str, Any]) -> None:
+        """An epoch distribution: accept only one signed by the admin key in THIS invite, for THIS
+        line, with a wrap for THIS member that actually unwraps (mirrors chamber's #takeDistribution)."""
+        if str(payload.get("type") or "") != "chamber-epoch":
+            return
+        try:
+            epoch = int(payload.get("epoch") or 0)
+        except (TypeError, ValueError):
+            return
+        wraps = payload.get("wraps")
+        if payload.get("line") != self.invite.line_id or epoch < 1 or not isinstance(wraps, dict) or not self.invite.admin_pub:
+            return
+        if not verify_distribution(self.invite.admin_pub, line=self.invite.line_id, epoch=epoch, wraps=wraps, sig=str(payload.get("sig") or "")):
+            return
+        owner = self.agent.split("/")[0]
+        wrap = wraps.get(owner)
+        if not isinstance(wrap, dict) or not self._member_key or not self._member_key.get("encPrivate"):
+            return
+        key = unwrap_epoch_key(_unb64(str(self._member_key["encPrivate"])), wrap, line=self.invite.line_id, epoch=epoch, owner=owner)
+        if key is not None:
+            self._epochs.save(epoch, key)
+
+    async def _files(self, raw: Any, *, epoch: tuple[int, bytes] | None = None) -> list[dict[str, Any]]:
         """Decode a message's files, fetching the big ones from the relay's storage."""
         out = []
         for item in filter(None, map(decode_file, raw if isinstance(raw, list) else [])):
@@ -167,7 +236,7 @@ class LineClient:
                     async with httpx.AsyncClient(timeout=120) as http:
                         response = await http.get(self.invite.blob_url(item["blob"]), headers=self._auth)
                     response.raise_for_status()
-                    item = {"name": item["name"], "data": self.invite.open_blob(response.content, item["blob"])}
+                    item = {"name": item["name"], "data": self.invite.open_blob(response.content, item["blob"], epoch=epoch)}
                 except (httpx.HTTPError, LineError) as error:
                     item = {"name": item["name"], "data": b"", "error": f"could not fetch: {error}"[:200]}
             out.append(item)
@@ -177,9 +246,18 @@ class LineClient:
     def _auth(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.invite.token}"}
 
+    def _send_epoch(self) -> tuple[int, bytes] | None:
+        """The current epoch's key for sending on a v3 line, or a refusal: never the shared key."""
+        if self.line_version != 3:
+            return None
+        key = self._epochs.key_for(self._epochs.current) if self._epochs.current else None
+        if key is None:
+            raise LineError("this chamber is v3 and the admin has not shared an epoch key with you yet")
+        return (self._epochs.current, key)
+
     async def _upload(self, name: str, data: bytes) -> tuple[dict[str, Any], str]:
         blob_id = uuid.uuid4().hex
-        sealed = self.invite.seal_blob(data, blob_id)
+        sealed = self.invite.seal_blob(data, blob_id, epoch=self._send_epoch())
         async with httpx.AsyncClient(timeout=300) as http:
             response = await http.put(self.invite.blob_url(blob_id), content=sealed, headers=self._auth)
         if response.status_code != 200:
@@ -229,13 +307,27 @@ class LineClient:
                 packed.append(entry)
                 blobs.append(blob_id)
         thread = thread or message_id
-        body = self.invite.seal({"text": text, "files": packed, "thread": thread, "title": title}, sender=self.agent, to=to, message_id=message_id, reply_to=reply_to)
+        epoch_arg = self._send_epoch()
+        body = self.invite.seal({"text": text, "files": packed, "thread": thread, "title": title}, sender=self.agent, to=to, message_id=message_id, reply_to=reply_to, epoch=epoch_arg)
         future = asyncio.get_running_loop().create_future()
         self._acks[message_id] = future
         mentions = mentions_in(text) if mentions is None else mentions
         frame = {"t": "send", "id": message_id, "to": to, "body": body, "blobs": blobs, "mentions": mentions}
         if reply_to:
             frame["reply_to"] = reply_to
+        if self.line_version >= 2:
+            # The relay verifies this signature before storing or forwarding: sign the envelope
+            # (line, from, to, id, reply_to, ts, [epoch,] body-hash) with the member key.
+            if not self._member_key:
+                raise LineError(f"this chamber is v{self.line_version} but this machine has no member key: run `chamber enroll`")
+            frame["ts"] = int(time.time() * 1000)
+            if self.line_version == 3:
+                frame["epoch"] = epoch_arg[0]
+            frame["sig"] = sign_envelope(
+                _unb64(str(self._member_key["private"])),
+                line=self.invite.line_id, from_=self.agent, to=to, message_id=message_id,
+                reply_to=reply_to or "", ts=frame["ts"], hash_=body_hash(body), epoch=frame.get("epoch") or 0,
+            )
         await self._ws.send(json.dumps(frame))
         receipt = await asyncio.wait_for(future, timeout)
         return {**receipt, "id": message_id, "thread": thread, "mentions": mentions}

@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { api } from "../../lib/api.ts";
 import type { Connections, DeviceFlow, KeikiStatus, McpServerInfo, Plugin, PluginCatalog, SlackStatus } from "../../lib/types.ts";
 import { Group, Section, Switch } from "./controls.tsx";
+import { GeneratedSection } from "./GeneratedSection.tsx";
 
 const ICONS: Record<string, ReactNode> = {
   file: <FileText size={16} />,
@@ -478,6 +479,8 @@ export function PluginsSection() {
           </PluginRow>
         ))}
       </Group>
+
+      <GeneratedSection />
 
       <Group title="Built in">
         {builtIn.map((plugin) => (

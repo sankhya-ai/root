@@ -126,6 +126,55 @@ test("a turn keeps its checkpoint and a rollback says what it restored", () => {
   assert.deepEqual([rollback.label, rollback.undo, rollback.restored, rollback.removed], ["edit", "beef", ["a.py"], ["b.py"]]);
 });
 
+test("a registry creation becomes a visible notice, not a silent event", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("RegistryChanged", { kind: "tool", name: "pdf_digest", version: 1, status: "active", lifetime: "session", description: "Read a PDF and file a digest comment." }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /pdf_digest/);
+  assert.match(notice.text, /this session only/);
+  applyEvent(state, ev("RegistryChanged", { kind: "role", name: "docs_reviewer", version: 2, status: "active", lifetime: "durable", description: "Reviews docs." }));
+  const roleNotice = state.blocks[state.blocks.length - 1];
+  assert.ok(roleNotice.kind === "notice");
+  assert.match(roleNotice.text, /role `docs_reviewer` v2/);
+  assert.match(roleNotice.text, /durable catalogue/);
+});
+
+test("a capability gap becomes a visible notice with the missed queries", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("CapabilityGap", { queries: ["translate speech", "ocr labels", "resize video"], misses: 3 }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /Capability gap: 3 tool searches found nothing/);
+  assert.match(notice.text, /translate speech/);
+  assert.match(notice.text, /activating generated code stays yours/);
+});
+
+test("adopting a role shows the narrowing, the pin and the one-way rule", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("RoleAdopted", { role: "docs_reviewer", version: 2, tools: 5, guides: ["evidence"], reversible: false }));
+  const notice = state.blocks[state.blocks.length - 1];
+  assert.ok(notice.kind === "notice" && notice.tone === "info");
+  assert.match(notice.text, /Adopted role `docs_reviewer` v2/);
+  assert.match(notice.text, /narrowed to 5/);
+  assert.match(notice.text, /One-way/);
+  assert.match(notice.text, /advisory/);
+});
+
+test("JobRecommended becomes a jobrequest block the card renders from", () => {
+  const state = createTranscript();
+  applyEvent(state, ev("JobRecommended", { id: "abc123", goal: "summarise the repo", role: "explorer", version: null, reason: "read-only sweep", workspace: "/w" }));
+  const block = state.blocks[state.blocks.length - 1];
+  assert.ok(block.kind === "jobrequest");
+  assert.equal(block.job.id, "abc123");
+  assert.equal(block.job.goal, "summarise the repo");
+  assert.equal(block.job.role, "explorer");
+  // An event without an id cannot be tracked or decided, so it is dropped.
+  const before = state.blocks.length;
+  applyEvent(state, ev("JobRecommended", { goal: "no id" }));
+  assert.equal(state.blocks.length, before);
+});
+
 test("files a run produced are collected per turn, once each", () => {
   const state = createTranscript();
   applyEvent(state, ev("UserPrompt", { text: "make a pdf", attachments: [], memory: [] }));

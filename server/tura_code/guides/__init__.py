@@ -30,13 +30,18 @@ TOOL_NAMES = (GUIDE_TOOL, SCAN_TOOL)
 FINDING_KEYS = ("title", "observed", "inferred", "impact", "confidence", "evidence", "recommendation", "verification")
 
 
-def guides_for(role: str) -> list[str]:
-    return list(ROLE_GUIDES.get(role, []))
+def guides_for(role: str, tenant: Any = None) -> list[str]:
+    """Guide names for a role: the built-in presets, then ACTIVE registry roles (their guides are existing guide names)."""
+    if role in ROLE_GUIDES:
+        return list(ROLE_GUIDES[role])
+    registry = getattr(tenant, "registry", None) if tenant is not None else None
+    record = registry.active_role(role) if registry is not None else None
+    return list(record["guides"]) if record else []
 
 
-def index_for(role: str) -> str:
+def index_for(role: str, tenant: Any = None) -> str:
     """The only guide text a job prompt carries: names and one line each."""
-    names = guides_for(role)
+    names = guides_for(role, tenant)
     if not names:
         return ""
     lines = "\n".join(f"- {n}: {GUIDES[n][0]}" for n in names)
@@ -108,12 +113,12 @@ class GuideToolset:
 
     def definitions(self, runtime: "SessionRuntime") -> list[dict[str, Any]]:
         role = getattr(runtime.record, "job_role", "")
-        if not guides_for(role):
+        if not guides_for(role, getattr(runtime, "tenant", None)):
             return []  # ordinary sessions and other roles never see these tools
         out = [{
             "name": GUIDE_TOOL,
             "description": "Read one review guide for your role. Call with no name to list them. Guides steer judgment; they do not make a review correct.",
-            "parameters": {"type": "object", "properties": {"name": {"type": "string", "enum": guides_for(role)}}, "additionalProperties": False},
+            "parameters": {"type": "object", "properties": {"name": {"type": "string", "enum": guides_for(role, getattr(runtime, "tenant", None))}}, "additionalProperties": False},
         }]
         if role == "designer":
             out.append({
@@ -128,7 +133,7 @@ class GuideToolset:
 
     async def call(self, runtime: "SessionRuntime", call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         role = getattr(runtime.record, "job_role", "")
-        allowed = guides_for(role)
+        allowed = guides_for(role, getattr(runtime, "tenant", None))
         if not allowed:
             return tool_error(f"`{name}` is only for the designer and pm job roles.", "Not for this session")
         if name == SCAN_TOOL:
