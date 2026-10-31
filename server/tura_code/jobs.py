@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from . import broker, catalogue
+from . import broker, catalogue, guides
 
 if TYPE_CHECKING:
     from .tenancy import Tenant
@@ -48,8 +48,8 @@ ROLES: dict[str, list[str]] = {
     "developer": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "WriteFile", "StrReplaceFile", "Shell", "run_python", "process", "find_tools", "use_tool"],
     # Look at a running page (inspect_page: localhost only, executes the page's JS; see tura_code/visual). No code runner,
     # so they cannot start the app themselves: the owner or a developer/tester job runs it first.
-    "designer": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "find_tools", "use_tool", "inspect_page"],
-    "pm": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "find_tools", "use_tool", "inspect_page"],
+    "designer": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "find_tools", "use_tool", "inspect_page", "interact_page", "inspect_deployed", "role_guide", "design_scan"],
+    "pm": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "find_tools", "use_tool", "inspect_page", "interact_page", "inspect_deployed", "role_guide"],
     "tester": ["ReadFile", "ReadMediaFile", "Glob", "Grep", "Shell", "process", "find_tools", "use_tool"],
 }
 #: Roles that return a verdict by default. Skye (or a person) decides what a "block" does; the host only checks shape.
@@ -84,6 +84,21 @@ class Serve(BaseModel):
     path: str = "/"
 
 
+class Interact(BaseModel):
+    """Permission to operate (click, type) a LOCAL app in the browser. See ``visual.act``."""
+
+    origin: str = ""  # e.g. http://localhost:5173; empty with ``serve`` means the served app
+    #: Let the page's own POST/PUT/DELETE requests reach the app. Naming this says the app runs on synthetic or throwaway
+    #: state: Root cannot see what the app's backend does with a write.
+    allow_writes: bool = False
+
+
+class Deployed(BaseModel):
+    """Permission to LOOK at public https pages (GET only, no sign-in, no typing). See ``visual.act``."""
+
+    urls: list[str] = Field(min_length=1, max_length=5)
+
+
 class NewJob(BaseModel):
     goal: str
     workspace: str
@@ -97,6 +112,9 @@ class NewJob(BaseModel):
     credentials: list[str] = []
     #: Start this app before the job and stop it after (see ``Serve``). The job's goal is told the URL.
     serve: Serve | None = None
+    #: designer/pm only: operate a local app / look at deployed pages. Absent means the tool does not exist for the job.
+    interact: Interact | None = None
+    deployed: Deployed | None = None
     #: Required to give credentials to a role that can run code (Shell, process, run_python), which can read the store.
     accept_unprotected_credentials: bool = False
     #: Run the job's runtime (and so its Shell, process and run_python) in a bubblewrap jail. "bwrap": files only, the host's
@@ -300,6 +318,39 @@ class Jobs:
         if not launcher.scripted() and not self.tenant.proxy.enabled:
             raise JobError("isolation needs the host's LLM proxy so the real API key stays outside the jail; it is off, so the job was not started.")
 
+    def _visual_authority(self, spec: NewJob) -> dict[str, Any]:
+        """What this job may do on pages, validated now so a bad request fails before anything starts."""
+        if not (spec.interact or spec.deployed):
+            return {}
+        from urllib.parse import urlparse
+
+        from .visual import TargetError, host_ports, resolve_target
+        from .visual.act import check_deployed_url, resolve_public
+
+        if spec.role not in ("designer", "pm"):
+            raise JobError("interact and deployed are for the designer and pm roles only.")
+        out: dict[str, Any] = {}
+        try:
+            if spec.interact:
+                origin = spec.interact.origin
+                if not origin and spec.serve:
+                    origin = f"http://127.0.0.1:{spec.serve.port}"
+                if not origin:
+                    raise JobError("interact needs an origin (or a serve app to use).")
+                _, norm, _ = resolve_target(origin.rstrip("/") + "/", "", Path(spec.workspace))
+                port = urlparse(norm).port or 80
+                if port in host_ports(None):
+                    raise JobError("interact cannot target Root's own server port.")
+                out["interact"] = {"origin": norm, "allow_writes": spec.interact.allow_writes}
+            if spec.deployed:
+                for url in spec.deployed.urls:
+                    check_deployed_url(url)
+                    resolve_public(urlparse(url).hostname or "")
+                out["deployed"] = {"urls": list(spec.deployed.urls), "read_only": True}
+        except TargetError as error:
+            raise JobError(f"The job was not started: {error}") from error
+        return out
+
     def start(self, spec: NewJob) -> dict[str, Any]:
         if spec.role not in ROLES:
             raise JobError(f"Unknown role `{spec.role}`. Roles: {', '.join(sorted(ROLES))}.")
@@ -325,11 +376,14 @@ class Jobs:
             self._check_isolation(spec)
             if not launcher_scripted() and not spec.budget.max_tokens:
                 raise JobError("An isolated job needs budget.max_tokens: the jail's model token is only bounded by that provider-reported token cap (plus request, body, output and model limits). The proxy cannot enforce a dollar cap, so the job was not started.")
+        visual_authority = self._visual_authority(spec)
         b = spec.budget
         scope = ROLES[spec.role] + ([broker.TOOL_NAME] if spec.credentials else [])
         runtime = self.tenant.sessions.create(spec.workspace, f"Job · {spec.role}", mode="accept_edits", tool_scope=scope)
         runtime.record.credentials = list(spec.credentials)
         runtime.record.isolation = spec.isolation
+        runtime.record.job_role = spec.role
+        runtime.record.visual = visual_authority
         runtime.record.unattended = True
         runtime.record.max_steps = b.max_steps
         runtime.record.max_tokens = b.max_tokens
@@ -345,9 +399,11 @@ class Jobs:
         }
         item["credential_guarantee"] = credential_guarantee(spec.credentials, {"level": "none"} if spec.serve else item["scope_guarantee"], protected)
         item["isolation"] = spec.isolation or None
+        if visual_authority:
+            item["visual_authority"] = visual_authority
         if spec.isolation:
             # These run in the host process, not in the jail, so the jail's network and file limits do not apply to them.
-            outside = [t for t in scope if t in ("inspect_page", "credentialed_request", "find_tools", "use_tool")]
+            outside = [t for t in scope if t in ("inspect_page", "interact_page", "inspect_deployed", "credentialed_request", "find_tools", "use_tool", "role_guide", "design_scan")]
             item["host_tools_outside_jail"] = outside
         if spec.isolation:
             item["scope_guarantee"] = {**item["scope_guarantee"], "isolation": spec.isolation, "isolation_note": "Tool names are still not the boundary; the jail is. Shared kernel; no seccomp profile of our own." + (" The host's network is shared: loopback services, including the owner API's open bootstrap (which hands out the owner token), are reachable from the jailed code." if spec.isolation == "bwrap" else " Network for jailed code: only the filtered LLM bridge.") + " Host tools in host_tools_outside_jail (inspect_page, credentialed_request, the find_tools/use_tool gateway) run outside the jail with their own limits."}
@@ -364,6 +420,7 @@ class Jobs:
         prompt = spec.goal
         if handoff:
             prompt += "\n\nContext from earlier jobs (their own reports; check anything you rely on):\n" + handoff
+        prompt += guides.index_for(spec.role)
         if spec.contract:
             prompt += f"\n\nEnd your final reply with one JSON object in a ```json block with the keys: {', '.join(spec.contract)}."
         proxy = self.tenant.proxy
@@ -393,6 +450,14 @@ class Jobs:
                 item["stopped_by"] = which_limit(runtime.last_budget)
             item["budget_used"] = runtime.last_budget or None  # the runtime's own accounting for the turn
             item["result"] = {"reply": reply, "error": error, "contract": check_contract(reply, spec.contract), "files_touched": runtime.last_files}
+            if guides.guides_for(spec.role):
+                # Only whether each cited anchor exists; whether a finding is true is not something the host can check.
+                data = item["result"]["contract"].get("data") or {}
+                if not isinstance(data, dict) or "findings" not in data:
+                    parsed = check_contract(reply, ["findings"]).get("data")
+                    data = parsed if isinstance(parsed, dict) else {}
+                prior = {str(f.get("id")) for jid in spec.handoff_from for f in ((((self.items.get(jid) or {}).get("result") or {}).get("contract") or {}).get("data") or {}).get("findings", []) if isinstance(f, dict) and f.get("id")}
+                item["result"]["evidence_check"] = guides.check_findings(data, Path(spec.workspace), runtime.scratch_dir / "inspect", prior)
             if spec.credentials:  # no reply, error or handoff carries a credential value this job could use
                 item["result"] = self.tenant.broker.redact_json(item["result"])
             item["status"] = "stopped" if item.get("stopped_by") else (runtime.record.last_status or "finished")
