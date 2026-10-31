@@ -627,9 +627,15 @@ def test_scenario_g_job_proposes_sub_job_with_lineage(client, workspace, script)
     done = _wait_terminal(client, parent["id"])
     assert done["status"] == "finished", done
     assert done["resumes"] == 1 and done["delivered"] == [child["id"]]
-    prompts = _prompt_events(client, parked["session"])
+    # Layer 3: the resume ran as a FRESH worker - a new session (new identity), the parked one kept as history.
+    assert done["session"] != parked["session"] and done["session_history"] == [parked["session"]]
+    prompts = _prompt_events(client, done["session"])
     resume = [e for e in prompts if "Delegated work you asked for" in (e.get("payload", {}).get("text") or "")]
-    assert len(resume) == 1 and "check the utils" in resume[0]["payload"]["text"]
+    assert len(resume) == 1
+    brief = resume[0]["payload"]["text"]
+    assert "check the utils" in brief and "build the thing" in brief  # small brief: mission goal + child outcome
+    old_prompts = _prompt_events(client, parked["session"])
+    assert not any("Delegated work" in (e.get("payload", {}).get("text") or "") for e in old_prompts)  # disposed, not continued
 
 
 @requires_runtime
@@ -719,18 +725,22 @@ def test_scenario_i_dismissed_proposals_resume_parent(client, workspace, script)
     """A dismissal is an outcome: each dismiss resumes the parked parent once; with nothing left outstanding the
     parent finishes instead of parking forever."""
     session_id = _proposer_role(client, workspace, script)
+    # Every resume spawns a FRESH worker (layer 3): its process resolves the current script at spawn, so each
+    # resume reply is installed right before the event that triggers that resume.
     script([
         tool_call("j1", "recommend_job", {"goal": "part one", "role": "explorer", "reason": "r"}),
         tool_call("j2", "recommend_job", {"goal": "part two", "role": "explorer", "reason": "r"}),
-        text("proposed both"), text("first dismissal seen"), text("second dismissal seen"),
+        text("proposed both"),
     ])
     parent = client.post("/api/jobs", json={"goal": "two-part work", "workspace": str(workspace), "role": "builder", "source_session": session_id}).json()
     _wait_parked(client, parent["id"])
     reqs = client.get("/api/job-requests").json()["requests"]
     assert len(reqs) == 2
+    script([text("first dismissal seen")])
     client.post(f"/api/job-requests/{reqs[0]['id']}/dismiss")
     parked = _wait_parked(client, parent["id"], resumes=1)  # resumed once, parked again on the second proposal
     assert parked["delivered_requests"] == [reqs[0]["id"]]
+    script([text("second dismissal seen")])
     client.post(f"/api/job-requests/{reqs[1]['id']}/dismiss")
     done = _wait_terminal(client, parent["id"])
     assert done["status"] == "finished" and done["resumes"] == 2
@@ -891,21 +901,26 @@ async def test_resume_drive_delivers_compact_redacted_outcome(tmp_path):
     fake = FakeRuntime()
     broker = SimpleNamespace(redact_json=lambda v: json.loads(json.dumps(v).replace("s3cr3t", "[redacted]")))
     tenant = SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": []),
-                             sessions=SimpleNamespace(get=lambda sid: fake), broker=broker,
+                             sessions=SimpleNamespace(create=lambda *a, **kw: fake), broker=broker,
                              proxy=SimpleNamespace(enabled=False))
     j = _jobs_with(tmp_path)
     j.tenant = tenant
     parent = {"id": "p", "session": "sess-p", "status": "running", "budget": {}, "used": {}, "resumes": 1,
-              "delivered": [], "delivered_requests": [], "started": time.time(), "contract": ["summary"], "credentials": []}
+              "delivered": [], "delivered_requests": [], "started": time.time(), "contract": ["summary"],
+              "credentials": ["stripe-key"], "workspace": "/w", "role": "builder", "goal": "the mission"}
     child = {"id": "c", "session": "sess-child", "parent_job_id": "p", "status": "finished", "role": "explorer",
              "goal": "g", "result": {"contract": {"data": {"note": "s3cr3t found"}}}}
     j.items.update({"p": parent, "c": child})
     await j._resume_drive(parent, [child], [])
     assert parent["status"] == "finished" and parent["delivered"] == ["c"]
+    assert parent["session_history"] == ["sess-p"]  # the parked session is history, not the worker
     prompt = fake.prompts[0]
     assert "[redacted] found" in prompt and "s3cr3t" not in prompt
     assert "sess-child" not in prompt  # outcomes only, never the child's session internals
     assert "summary" in prompt  # the mission's contract reminder survives the resume
+    assert "the mission" in prompt  # the goal anchors the small brief
+    assert fake.record.credentials == ["stripe-key"]  # names on the worker's record, broker-resolved at use...
+    assert "stripe-key" not in prompt  # ...never inherited through narrative
 
 
 async def test_resume_turn_error_is_not_a_delivery(tmp_path):
@@ -928,7 +943,7 @@ async def test_resume_turn_error_is_not_a_delivery(tmp_path):
 
     fake = FakeRuntime()
     tenant = SimpleNamespace(root=tmp_path, job_requests=SimpleNamespace(list=lambda status="": []),
-                             sessions=SimpleNamespace(get=lambda sid: fake),
+                             sessions=SimpleNamespace(create=lambda *a, **kw: fake),
                              broker=SimpleNamespace(redact_json=lambda v: v), proxy=SimpleNamespace(enabled=False))
     j = _jobs_with(tmp_path)
     j.tenant = tenant

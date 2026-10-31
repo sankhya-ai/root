@@ -249,11 +249,32 @@ RESIDUALS, stated not smoothed:
   under the host proxy). Accumulation is after-the-fact accounting - no hard monetary overshoot bound is claimed.
 * CRASH MID-RESUME: the host dying during a resume turn leaves the job ``interrupted`` (the existing crash rule,
   unchanged) with undelivered outcomes named on the item. Nothing auto-resumes a mid-turn crash; the owner
-  inspects. Crash windows around delivery collapse to this same rule; a duplicate delivery cannot occur because
-  the waiting->running claim is atomic and ``delivered`` persists before any later park.
+  inspects. The ``delivered`` set prevents duplicate PRESENTATION of an outcome to the parent model (the
+  waiting->running claim is atomic and ``delivered`` persists before any later park). It says NOTHING about
+  exactly-once EXECUTION of a child's external side effects: those happened or they did not, this machinery never
+  replays them, and it cannot prove they happened exactly once.
 * RESUME-TURN ERROR: a resume turn that errors presented nothing - outcomes stay ``undelivered`` and named, the
   error is the job's status, and no automatic retry spends model calls.
 * SERVE jobs never park (their app dies with the turn); their proposals stay owner-visible results only.
 * A parent TERMINAL before its proposal is accepted: the accepted child runs standalone, lineage recorded, no
   resume (resume requires ``waiting``).
+
+### Fresh small-brief workers (mission layer 3, 2026-10-31)
+
+A resume no longer continues the parked session. A FRESH worker gets the mission: a new session (new identity)
+created with the mission's scope ceiling (``item["scope"]``), credential NAMES only on its record (broker-resolved
+at point of use; names and values never appear in the brief - no credential inheritance through narrative), the
+remaining budget clamped onto its record, and the remaining wall as its per-turn cap. The parked session stays on
+disk, listed in ``item["session_history"]``, inspectable; it is never prompted again. The durable mission state is
+the WORKSPACE FILES plus the job item, not a transcript: the small brief (``Jobs._brief``) carries the mission
+goal, the previous worker's contract data, resolved delegated outcomes, the role's guides and the contract
+reminder - that is all a fresh worker sees of the past.
+
+STANDALONE children are marked at accept: when the asking job is not parked (ended or gone), the accept stamps
+``standalone`` on the child item and returns a note - a stale proposal can no longer look like it still aids a
+finished parent. The owner still decides; the marker only tells the truth about where the result goes.
+
+Semantics kept deliberately, now load-bearing for later layers: crash mid-resume = interrupted + manual
+inspection; resume-turn error = outcomes undelivered and named, no auto-retry; no hard within-turn spend bound;
+mission-wide steps unmeasurable.
 

@@ -624,6 +624,7 @@ class Jobs:
         job_id = uuid.uuid4().hex[:12]
         item = {
             "id": job_id, "role": spec.role, "role_version": resolved["version"], "goal": spec.goal, "session": runtime.record.id, "status": "running",
+            "workspace": spec.workspace,
             "started": time.time(), "budget": b.model_dump(), "scope": list(scope), "scope_guarantee": catalogue.guarantee(self.tenant, runtime.record),
             "handoff_from": spec.handoff_from, "result": None,
             "credentials": spec.credentials,
@@ -811,16 +812,20 @@ class Jobs:
                 await self._maybe_resume(item["id"])
         self._sweep_pending = False
 
-    async def _resume_drive(self, item: dict[str, Any], children: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
-        """One resume turn on the parked job's OWN session (reattached; its transcript is retained - this is a
-        durable-mission resume, NOT the stateless small-brief worker, which is a later, open layer). The injected
-        context is compact by construction: child outcomes only - ids, roles, goals, statuses, contract data -
-        never their transcripts, and redacted against the credential broker."""
-        runtime = self.tenant.sessions.get(item["session"])
-        self._clamp_record(item, runtime.record)
-        runtime.save_record()
-        parts = ["Delegated work you asked for has resolved. Outcomes follow - roles, goals, statuses and contract "
-                 "data only; check anything you rely on. No child transcript or credential is included."]
+    def _brief(self, item: dict[str, Any], children: list[dict[str, Any]], requests: list[dict[str, Any]]) -> str:
+        """The SMALL BRIEF a fresh resume worker gets: the mission goal, the previous worker's contract data,
+        resolved delegated outcomes, the workspace. NOT the earlier turns' transcript, NOT credential values or
+        names - credential access comes from the broker tool in scope, never from narrative."""
+        parts = ["You are a fresh worker continuing a mission. Earlier turns are not shown to you: the durable "
+                 "state is the workspace files, this brief, and what you write back.",
+                 f"Mission goal: {item.get('goal')}"]
+        latest = ((item.get("result") or {}).get("contract") or {}).get("data")
+        if latest is not None:
+            parts.append("The previous worker's mission report (its contract data; check anything you rely on):\n"
+                         + json.dumps(self.tenant.broker.redact_json(latest), indent=2, default=str))
+        if children:
+            parts.append("Delegated work you asked for has resolved. Outcomes follow - roles, goals, statuses and "
+                         "contract data only; check anything you rely on. No child transcript or credential is included.")
         for child in children:
             outcome = {"job_id": child["id"], "role": child.get("role"), "goal": child.get("goal"), "status": child.get("status"),
                        "stopped_by": child.get("stopped_by"),
@@ -829,13 +834,38 @@ class Jobs:
         for req in requests:
             parts.append(json.dumps({"request_id": req["id"], "role": req.get("role"), "goal": req.get("goal"),
                                      "status": "dismissed by the owner - it will not run"}, indent=2))
+        parts.append(f"Workspace: {item.get('workspace')}")
         prompt = "\n\n".join(parts)
+        prompt += guides.index_for(str(item.get("role") or ""), self.tenant)
         if item.get("contract"):
             prompt += f"\n\nEnd your final reply with one JSON object in a ```json block with the keys: {', '.join(item['contract'])}."
+        return prompt
+
+    async def _resume_drive(self, item: dict[str, Any], children: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
+        """One resume turn by a FRESH worker: a new session (new identity) with the mission's scope ceiling,
+        credential NAMES only (broker-resolved at point of use, never in the brief), and caps clamped to the
+        remaining mission budget. The parked session stays on disk as history (``session_history``); the durable
+        mission state is the workspace files plus the job item, not a retained transcript."""
+        prior_session = item.get("session")
+        prompt = self._brief(item, children, requests)
+        budget = item.get("budget") or {}
+        runtime = self.tenant.sessions.create(item.get("workspace"), f"Job · {item.get('role')}", mode="accept_edits",
+                                              tool_scope=list(item.get("scope") or []))
+        runtime.record.credentials = list(item.get("credentials") or [])  # names only; the broker holds the values
+        runtime.record.isolation = item.get("isolation")
+        runtime.record.job_role = item.get("role")
+        if item.get("visual_authority"):
+            runtime.record.visual = item["visual_authority"]
+        runtime.record.unattended = True
+        runtime.record.max_steps = int(budget.get("max_steps") or 0)
+        runtime.record.max_wall_seconds = max(1, int(float(budget.get("timeout_seconds") or 900) - (time.time() - float(item.get("started") or time.time()))))
+        self._clamp_record(item, runtime.record)  # tokens/cost tightened to the remainder
+        runtime.save_record()
+        item.setdefault("session_history", []).append(prior_session)
+        item["session"] = runtime.record.id
         proxy = self.tenant.proxy
         try:
             await runtime.prompt(prompt)
-            budget = item.get("budget") or {}
             remaining_wall = max(1.0, float(budget.get("timeout_seconds") or 900) - (time.time() - float(item.get("started") or time.time())))
             await self._await_turn(item, runtime, remaining_wall)
             if runtime.record.last_status == "budget_exhausted" and not item.get("stopped_by"):
@@ -1080,15 +1110,27 @@ def router(app_state):
 
         try:
             resolved_record, item = store.accept(request_id, start, find_existing)
+            standalone = ""
             if resolved_record.get("parent_job_id"):
                 item["parent_job_id"] = resolved_record["parent_job_id"]
                 item["depth"] = int(resolved_record.get("depth") or 0)
+                parent = tenant.jobs.items.get(resolved_record["parent_job_id"])
+                if parent is None or parent.get("status") != "waiting":
+                    # The asking job is not parked (ended, or never existed): this child runs ALONE and nothing
+                    # will resume anyone with its result. Said on the item so a stale proposal cannot look like
+                    # it still aids a finished parent.
+                    standalone = (f"The asking job {resolved_record['parent_job_id']} is not waiting "
+                                  f"({parent.get('status') if parent else 'gone'}): this job runs standalone and its result goes nowhere.")
+                    item["standalone"] = standalone
                 tenant.jobs._save(item)
         except JobError as error:
             message = str(error)
             status = 404 if "No such" in message else 409 if "already" in message else 400
             raise HTTPException(status, message) from error
-        return {"request": resolved_record, "job": item}
+        out = {"request": resolved_record, "job": item}
+        if standalone:
+            out["note"] = standalone
+        return out
 
     @api.post("/job-requests/{request_id}/dismiss")
     async def dismiss_request(request_id: str, tenant: Tenant = Depends(app_state.auth.tenant)) -> dict:
